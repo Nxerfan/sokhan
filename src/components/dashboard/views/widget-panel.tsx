@@ -195,7 +195,7 @@ export function WidgetPanel({ slug }: { slug: string }) {
               </div>
 
               <Button onClick={save} disabled={saving} className="w-full gap-2">
-                {saving ? tc('loading') : t('save')}
+                {saving ? tc('loading') : tc('save')}
               </Button>
             </CardContent>
           </Card>

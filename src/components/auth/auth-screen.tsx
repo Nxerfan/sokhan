@@ -2,7 +2,6 @@
 
 import { useState } from 'react'
 import { signIn } from 'next-auth/react'
-import { useRouter } from 'next/navigation'
 import { useTranslations } from 'next-intl'
 import { MessageSquareText } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -18,7 +17,6 @@ export function AuthScreen() {
   const t = useTranslations()
   const [mode, setMode] = useState<Mode>('signup')
   const [loading, setLoading] = useState(false)
-  const router = useRouter()
 
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -52,8 +50,14 @@ export function AuthScreen() {
         setLoading(false)
         return
       }
-      router.refresh()
-      router.replace('/')
+      // Force a full page navigation so the server re-evaluates the session
+      // cookie and renders the dashboard. router.replace('/') + router.refresh()
+      // is NOT sufficient here because page.tsx is a Client Component using
+      // useSession() — router.refresh() only re-fetches Server Components and
+      // does not invalidate the client-side useSession cache, so the page
+      // keeps rendering <AuthScreen/> and the button hangs in loading forever.
+      // This was the signup-hang bug. See worklog Task ID 2.
+      window.location.href = '/'
     } catch {
       toast.error('Something went wrong')
       setLoading(false)

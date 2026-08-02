@@ -45,7 +45,7 @@ export async function POST(req: NextRequest) {
     }
 
     const membership = await db.membership.create({
-      data: { userId, role, status: 'invited' },
+      data: { userId, role, status: 'invited', tenantId: session.user.workspaceId! },
       include: { user: { select: { id: true, name: true, email: true } } },
     })
     return { membership } as const

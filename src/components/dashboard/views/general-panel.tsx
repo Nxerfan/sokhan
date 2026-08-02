@@ -119,7 +119,7 @@ export function GeneralPanel() {
           </div>
 
           <Button onClick={save} disabled={saving} className="gap-2">
-            {saving ? tc('loading') : t('save')}
+            {saving ? tc('loading') : tc('save')}
           </Button>
         </CardContent>
       </Card>

@@ -120,7 +120,7 @@ export function MembersPanel() {
             </div>
             <Button type="submit" disabled={inviting} className="gap-2">
               <UserPlus className="h-4 w-4" />
-              {t('create')}
+              {tc('create')}
             </Button>
           </form>
         </CardContent>

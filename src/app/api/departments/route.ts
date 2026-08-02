@@ -18,7 +18,12 @@ export async function POST(req: NextRequest) {
     const body = await req.json()
     const name = String(body.name ?? '').trim()
     if (!name) return { error: 'invalid_name' as const }
-    const department = await db.department.create({ data: { name } })
+    // Pass tenantId explicitly — the Prisma $extends query interceptor is
+    // unreliable for `create` in Turbopack dev mode (the global tenant context
+    // isn't read inside the extension's create handler). Explicit is safer.
+    const department = await db.department.create({
+      data: { name, tenantId: session.user.workspaceId! },
+    })
     return { department } as const
   })
   if (!result) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
