@@ -17,8 +17,10 @@ export async function connectRealtime(): Promise<Socket> {
   if (!res.ok) throw new Error('Failed to get realtime token')
   const { token } = await res.json()
 
-  // Connect via the gateway — NEVER use a direct port in the URL
+  // Connect via the gateway — NEVER use a direct port in the URL.
+  // path: '/' matches the realtime service's Socket.IO server config.
   socketInstance = io('/?XTransformPort=3003', {
+    path: '/',
     auth: { token },
     transports: ['websocket', 'polling'],
     reconnection: true,

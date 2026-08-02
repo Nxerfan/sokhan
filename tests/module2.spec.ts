@@ -211,8 +211,9 @@ test.describe('Module 2 — Realtime messaging', () => {
     await replyArea.getByRole('button').click()
     await dashboardPage.waitForTimeout(500)
 
-    // The reply should appear in the widget
-    await expect(widgetPage.getByText('سلام! چطور می‌تونم کمکتون کنم؟')).toBeVisible({ timeout: 10000 })
+    // The reply should appear in the widget as an agent message bubble (not the
+    // system greeting). Target the .sk-agt class to be specific.
+    await expect(widgetPage.locator('.sk-agt').filter({ hasText: 'سلام! چطور می‌تونم کمکتون کنم؟' })).toBeVisible({ timeout: 10000 })
 
     await dashboardCtx.close()
     await widgetCtx.close()

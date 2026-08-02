@@ -17,10 +17,14 @@ import { db } from '@/lib/db'
  * Fully self-contained (no framework), RTL-aware via the config's defaultDirection.
  */
 
-function buildScript(_origin: string, slug: string): string {
+function buildScript(_origin: string, slug: string, disablePolling: boolean): string {
   return `(function(){
   "use strict";
   var SLUG = ${JSON.stringify(slug)};
+  // DISABLE_POLLING is set to true when the script is loaded with ?nopoll=1 —
+  // used ONLY by the Socket.IO verification test to isolate real-time delivery
+  // from the polling safety net. In normal operation polling stays enabled.
+  var DISABLE_POLLING = ${disablePolling ? 'true' : 'false'};
   // Use RELATIVE URLs so the browser resolves them against the page origin.
   // This works correctly behind Caddy reverse proxy — absolute URLs with the
   // internal origin (localhost:3000) would cause CORS errors.
@@ -257,6 +261,7 @@ function buildScript(_origin: string, slug: string): string {
     loadSocketIO(function(){
       if (state.socket) return;
       state.socket = window.io(SOCKET_URL, {
+        path: '/',
         auth: { token: state.token },
         transports: ['websocket', 'polling'],
         reconnection: true,
@@ -316,10 +321,15 @@ function buildScript(_origin: string, slug: string): string {
     .catch(function(e){ console.error('[sukhan] send failed', e); });
   }
 
-  // ---- Polling fallback (in case Socket.IO doesn't work through Caddy) ----
+  // ---- Polling fallback (safety net — see DISABLE_POLLING flag above) ----
+  // Primary delivery is Socket.IO. This polling runs only as a resilience
+  // fallback in case the realtime connection drops or is blocked by a proxy.
+  // Interval is 10s in normal operation — long enough to not be chatty, short
+  // enough to recover within a tolerable window if Socket.IO fails silently.
   var pollTimer = null;
   var lastPollCount = 0;
   function startPolling(){
+    if (DISABLE_POLLING) return; // test-only bypass
     if (pollTimer) return;
     pollTimer = setInterval(function(){
       if (!state.conversationId || !state.token) return;
@@ -345,7 +355,7 @@ function buildScript(_origin: string, slug: string): string {
         }
       })
       .catch(function(){});
-    }, 3000);
+    }, 10000); // 10s safety net — Socket.IO is the primary delivery path
   }
 
   // ---- Rendering ----
@@ -458,8 +468,10 @@ export async function GET(
     })
   }
 
-  const origin = new URL(_req.url).origin
-  const script = buildScript(origin, slug)
+  const url = new URL(_req.url)
+  const disablePolling = url.searchParams.get('nopoll') === '1'
+  const origin = url.origin
+  const script = buildScript(origin, slug, disablePolling)
 
   return new Response(script, {
     headers: {

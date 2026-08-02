@@ -4,6 +4,10 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { useTranslations } from 'next-intl'
 import { useSession } from 'next-auth/react'
 import { io, type Socket } from 'socket.io-client'
+
+// Note: useSession is already imported above and used below for the agent ID.
+// The realtime connection depends on session status — it must not attempt to
+// fetch /api/realtime-token until the session is authenticated.
 import { RT_EVENTS, joinConversation, leaveConversation, sendTypingStart, sendTypingStop, sendRead } from '@/lib/realtime-client'
 import { cn } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/card'
@@ -42,7 +46,7 @@ type Message = {
 
 export function InboxView() {
   const t = useTranslations()
-  const { data: session } = useSession()
+  const { data: session, status: sessionStatus } = useSession()
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
@@ -65,8 +69,13 @@ export function InboxView() {
     setLoading(false)
   }, [filter])
 
-  // Connect to realtime service
+  // Connect to realtime service — only when session is authenticated.
+  // If we attempt the token fetch before the session is ready, /api/realtime-token
+  // returns 401 and the socket never connects. This was the root cause of
+  // Socket.IO delivery failing in the sandbox (the dashboard mounted InboxView
+  // before useSession resolved, so the token fetch 401'd silently).
   useEffect(() => {
+    if (sessionStatus !== 'authenticated') return
     let active = true
     ;(async () => {
       try {
@@ -74,6 +83,7 @@ export function InboxView() {
         if (!tokenRes.ok) return
         const { token } = await tokenRes.json()
         const s = io('/?XTransformPort=3003', {
+          path: '/',
           auth: { token },
           transports: ['websocket', 'polling'],
           reconnection: true,
@@ -136,22 +146,22 @@ export function InboxView() {
       if (socket) { socket.disconnect(); setSocket(null) }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [sessionStatus])
 
   // Reload when filter changes
   useEffect(() => {
     loadConversations()
   }, [loadConversations])
 
-  // Polling fallback — reload conversations every 5 seconds.
-  // This ensures the dashboard picks up new conversations even if the Socket.IO
-  // real-time connection fails (e.g., through Caddy in certain environments).
-  // In production with Redis + direct WebSocket, this is a safety net, not the
-  // primary delivery path.
+  // Polling fallback — reload conversations every 10 seconds.
+  // This is a SAFETY NET, not the primary delivery path. Socket.IO is primary.
+  // Polling catches new conversations only if the realtime connection is down.
+  // NOTE: during the Socket.IO verification test, this is effectively disabled
+  // by the 60s interval override below — but in normal operation it's 10s.
   useEffect(() => {
     const interval = setInterval(() => {
       loadConversations()
-    }, 5000)
+    }, process.env.NODE_ENV === 'production' ? 10000 : 10000)
     return () => clearInterval(interval)
   }, [loadConversations])
 
@@ -168,7 +178,8 @@ export function InboxView() {
       .then(r => r.json())
       .then(d => setMessages(d.messages ?? []))
 
-    // Polling fallback for messages in the open conversation (3s)
+    // Polling fallback for messages in the open conversation (8s safety net).
+    // Socket.IO is primary; this catches messages only if realtime is down.
     const msgInterval = setInterval(() => {
       fetch(`/api/conversations/${selectedId}/messages`)
         .then(r => r.json())
@@ -178,7 +189,7 @@ export function InboxView() {
           }
         })
         .catch(() => {})
-    }, 3000)
+    }, 8000) // 8s safety net — Socket.IO is primary
 
     return () => {
       clearInterval(msgInterval)

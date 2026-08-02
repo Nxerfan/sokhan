@@ -1,6 +1,8 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'http'
 import { Server, type Socket } from 'socket.io'
 import crypto from 'crypto'
+import { readFileSync } from 'fs'
+import { resolve } from 'path'
 
 /**
  * Sukhan Realtime Service (Module 2)
@@ -11,19 +13,39 @@ import crypto from 'crypto'
  *   - Port 3004: Internal HTTP server — handles /internal/publish calls from
  *     Next.js API routes. NOT exposed through Caddy; server-to-server only.
  *
- * This separation is needed because Socket.IO with path: '/' intercepts ALL
- * requests on its port, so HTTP endpoints can't share the same port.
+ * IMPORTANT: loads NEXTAUTH_SECRET from the parent project's .env so token
+ * signing/verification matches the Next.js app. Without this, the realtime
+ * service falls back to 'dev-secret-change-me' and ALL token verification +
+ * internal publish auth fails silently.
  *
- * No database access — this service is a pure message broker. All persistence
- * happens in the Next.js API routes; this service only fans out to sockets.
- *
- * In production with Redis: replace the internal HTTP endpoint with a Redis
- * subscriber, and add @socket.io/redis-adapter for multi-instance scaling.
+ * No database access — this service is a pure message broker.
  */
+
+// Load .env from the parent project (sandbox: the mini-service runs in its own
+// process and doesn't inherit the parent's env). In production with Docker
+// Compose, the env is passed explicitly and this file load is a no-op.
+try {
+  const envPath = resolve(process.cwd(), '..', '..', '.env')
+  const envContent = readFileSync(envPath, 'utf-8')
+  for (const line of envContent.split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith('#')) continue
+    const eqIdx = trimmed.indexOf('=')
+    if (eqIdx === -1) continue
+    const key = trimmed.slice(0, eqIdx).trim()
+    const value = trimmed.slice(eqIdx + 1).trim()
+    if (!process.env[key]) process.env[key] = value
+  }
+  console.log('[env] loaded .env from', envPath)
+} catch (e) {
+  console.log('[env] no parent .env found, using process.env directly')
+}
 
 const SOCKET_PORT = 3003
 const INTERNAL_PORT = 3004
 const SECRET = process.env.NEXTAUTH_SECRET || 'dev-secret-change-me'
+
+console.log('[secret] using NEXTAUTH_SECRET:', SECRET.slice(0, 8) + '...')
 
 // ============================================================
 // Token verification (mirrors src/lib/realtime-token.ts)
@@ -75,10 +97,12 @@ interface AuthenticatedSocket extends Socket {
 io.use((socket: AuthenticatedSocket, next) => {
   const token = socket.handshake.auth?.token as string | undefined
   if (!token) {
+    console.log('[auth] no token provided')
     return next(new Error('no_token'))
   }
   const payload = verifyToken(token)
   if (!payload) {
+    console.log('[auth] invalid token')
     return next(new Error('invalid_token'))
   }
   socket.payload = payload
@@ -97,6 +121,7 @@ io.on('connection', (socket: AuthenticatedSocket) => {
 
   socket.on('conversation:join', (conversationId: string) => {
     socket.join(`conversation:${conversationId}`)
+    console.log(`[join] ${payload.type} → conversation:${conversationId}`)
   })
 
   socket.on('conversation:leave', (conversationId: string) => {
@@ -144,6 +169,7 @@ const internalServer = createServer((req: IncomingMessage, res: ServerResponse) 
   if (req.method === 'POST' && req.url === '/internal/publish') {
     const authHeader = req.headers['x-internal-secret']
     if (authHeader !== SECRET) {
+      console.log('[publish] forbidden — secret mismatch')
       res.writeHead(403)
       res.end('forbidden')
       return

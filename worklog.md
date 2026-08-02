@@ -55,3 +55,49 @@ Stage Summary:
 - Lint clean. Dev server running on port 3000.
 - The prior "no hydration error" conclusion from Module 1 is confirmed settled — the real issue was the useSession/router.refresh interaction, not hydration. Nav rail clicks work correctly with real Playwright clicks (test 2 passes).
 
+---
+Task ID: 3
+Agent: main (Staff Full-Stack Architect)
+Task: Module 2 — Realtime messaging engine. Build Socket.IO realtime service, conversation/message entities, contact identification, routing rules, typing/read receipts, file attachments, real two-way widget, agent inbox view. Verify Socket.IO delivers in real-time (not just polling).
+
+Work Log:
+- Schema: added Contact, Conversation, Message, Participant, RoutingRule models. Fixed Department ↔ Conversation relation (was missing, caused PrismaClientValidationError on findMany with include). Fixed SQLite Json DEFAULT {} (not valid — set in app code).
+- Realtime service (mini-services/realtime/index.ts): Socket.IO on port 3003 (path: '/'), internal HTTP on port 3004 (/internal/publish). Token auth for both agents and visitors via HMAC-signed realtime tokens. Rooms mapped to conversations + tenants. Typing indicators relayed. CRITICAL FIX: loads parent .env so NEXTAUTH_SECRET matches the Next.js app — without this, token verification and internal publish auth both fail silently (403 forbidden).
+- Visitor identification: /api/widget/[slug]/contact dedupes by (tenantId, identifier) — email if provided, otherwise generated visitorId stored in widget localStorage. Issues a realtime visitor token.
+- Widget API: /api/widget/[slug]/messages (GET history + POST send), /api/widget/[slug]/upload (attachments — stored in /public/uploads for sandbox). All writes pass tenantId explicitly.
+- Agent API: /api/conversations (list+filter), /api/conversations/[id] (get+update status/assign), /api/conversations/[id]/messages (list+reply), /api/routing-rules (CRUD), /api/contacts (list), /api/realtime-token (agent socket auth), /api/attachments (upload). All writes pass tenantId explicitly.
+- Routing engine (src/lib/routing-engine.ts): evaluates trigger→action rules on conversation_created. Supports keyword, businessHours, and always conditions. Actions: assign_department, assign_user, add_tag, send_message.
+- Dashboard inbox view (src/components/dashboard/views/inbox-view.tsx): conversation list (filter by status), thread view (messages + reply), real-time updates via Socket.IO, typing indicators, status/assign controls. CRITICAL FIX: realtime useEffect now depends on sessionStatus === 'authenticated' — previously it fired before the session was ready, causing /api/realtime-token to 401 and the socket to never connect.
+- Widget rewrite (src/app/api/widget/[slug]/script/route.ts): full two-way chat client. Loads socket.io-client, identifies visitor, connects to realtime service, renders message list + input + typing indicator. Uses RELATIVE URLs (not absolute localhost:3000) to avoid CORS through Caddy. path: '/' on the Socket.IO client to match the server config. Polling safety net (10s) labeled as secondary, not primary.
+- Polling fallback: 10s for conversation list, 8s for messages, 10s for widget. Clearly labeled as safety net in code comments. Socket.IO is primary. The ?nopoll=1 query param disables polling for the Socket.IO verification test.
+
+- SOCKET.IO VERIFICATION (the critical concern from the follow-up):
+  - Root cause of Socket.IO failure: TWO bugs. (1) The realtime service (separate bun process) didn't load the parent .env, so it used the fallback secret 'dev-secret-change-me' while Next.js used the real NEXTAUTH_SECRET — token verification and internal publish auth both failed silently. (2) The dashboard's realtime useEffect fired before useSession resolved, causing /api/realtime-token to 401. (3) The Socket.IO client used the default path '/socket.io/' but the server uses path: '/' — handshake never matched.
+  - Fix: (1) realtime service now reads parent .env on startup. (2) useEffect depends on sessionStatus === 'authenticated'. (3) client sets path: '/' explicitly.
+  - Verification: dedicated test (tests/socketio-verify.spec.ts) loads widget with ?nopoll=1 (polling disabled), sends a message, measures wall-clock latency until it appears in the dashboard. Result: 276ms (sub-second). The 10s polling interval cannot explain this — Socket.IO is genuinely delivering.
+  - Realtime log confirms the full event flow: [connect] agent → [connect] visitor → [join] conversation room → [publish] message:new → [publish] conversation:new.
+  - This is NOT a sandbox-only artifact. The .env loading issue is sandbox-specific (in production, Docker Compose passes env explicitly), but the path: '/' mismatch and the session-status race would occur in any deployment. All three fixes are genuine architectural fixes, not sandbox workarounds.
+
+- Bugs found and fixed during real verification:
+  1. Missing Department ↔ Conversation Prisma relation → PrismaClientValidationError on findMany.
+  2. Realtime service not loading parent .env → secret mismatch → all token verification + internal publish auth failed silently.
+  3. Dashboard realtime useEffect firing before session ready → /api/realtime-token 401 → socket never connected.
+  4. Socket.IO client path mismatch (default '/socket.io/' vs server '/') → handshake never matched.
+  5. Widget script using absolute URLs (localhost:3000) → CORS errors through Caddy.
+  6. Test selector matching two elements (system greeting + agent reply) → strict mode violation.
+
+- tenantId-explicit convention: confirmed via grep-based test (tests/module2.spec.ts test 5). All new Module 2 write paths pass tenantId explicitly:
+  - /api/widget/[slug]/contact: contact.create({ tenantId })
+  - /api/widget/[slug]/messages: conversation.create({ tenantId }), message.create({ tenantId }), conversation.updateMany({ where: { id, tenantId } })
+  - /api/conversations: conversation.create({ tenantId })
+  - /api/conversations/[id]: conversation.updateMany({ where: { id, tenantId } }), participant.upsert({ create: { tenantId } })
+  - /api/conversations/[id]/messages: message.create({ tenantId }), conversation.updateMany({ where: { id, tenantId } })
+  - /api/routing-rules: routingRule.create({ tenantId }), routingRule.updateMany({ where: { id, tenantId } })
+  - /lib/routing-engine: conversation.updateMany({ where: { id, tenantId } }), participant.upsert({ create: { tenantId } }), message.create({ tenantId })
+
+Stage Summary:
+- Module 2 complete and verified end-to-end with REAL Socket.IO delivery (276ms latency, polling disabled).
+- All 7 tests pass: 3 Module 1 smoke tests + 3 Module 2 tests + 1 Socket.IO verification test.
+- Realtime service runs on ports 3003 (Socket.IO) + 3004 (internal publish). Both must be running for real-time delivery; polling safety net (10s) catches messages if realtime is down.
+- Fresh-restart stability confirmed: schema relation fix, widget relative-URL fix, env loading fix, session-status fix, path fix all hold after clean server restart.
+- Polling is clearly labeled as safety net in code comments; Socket.IO is primary.
