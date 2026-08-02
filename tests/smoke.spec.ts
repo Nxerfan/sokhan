@@ -21,7 +21,8 @@ import { test, expect, type Page } from '@playwright/test'
  * getByRole('button', { name: ... }) which matches the accessible name.
  */
 
-const BASE = 'http://localhost:3000'
+// Use port 81 (Caddy gateway) for consistency — Socket.IO needs Caddy for XTransformPort
+const BASE = 'http://localhost:81'
 
 /** Unique credentials per test invocation. */
 function creds(testTitle: string) {

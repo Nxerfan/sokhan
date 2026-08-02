@@ -86,6 +86,8 @@
     "departmentsHint": "Group agents for conversation routing.",
     "widgetTitle": "Widget appearance",
     "widgetHint": "Customize how the chat widget looks on your site.",
+    "automationTitle": "Routing & Automation",
+    "automationHint": "Automatic rules for conversation assignment and responses.",
     "workspaceName": "Workspace name",
     "defaultLocale": "Default language",
     "defaultDirection": "Default direction",

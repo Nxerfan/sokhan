@@ -86,6 +86,8 @@
     "departmentsHint": "گروه‌بندی کارشناسان برای مسیریابی گفت‌وگوها.",
     "widgetTitle": "ظاهر ویجت",
     "widgetHint": "شکل و رنگ ویجت گفت‌وگو را در سایت خود سفارشی کنید.",
+    "automationTitle": "مسیریابی و اتوماسیون",
+    "automationHint": "قوانین خودکار برای تخصیص گفت‌وگوها و پاسخ‌های خودکار.",
     "workspaceName": "نام فضای کاری",
     "defaultLocale": "زبان پیش‌فرض",
     "defaultDirection": "جهت پیش‌فرض",

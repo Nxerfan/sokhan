@@ -1,7 +1,7 @@
-// Live Chat SaaS — Module 1 (Foundation) schema
+// Live Chat SaaS — Module 1+2 schema
 // Tenant isolation is enforced in the application layer via a Prisma client
-// extension (see src/lib/db.ts). In the cloud Postgres deployment this maps to
-// Row-Level Security policies on the same tenant_id columns.
+// extension (see src/lib/db.ts) PLUS explicit tenantId on every write (Module 2
+// convention — the extension is unreliable for create in Turbopack dev mode).
 
 generator client {
   provider = "prisma-client-js"
@@ -12,8 +12,7 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-/// A workspace/tenant. Root isolation boundary. In self-hosted editions a
-/// single tenant row exists (DEFAULT_TENANT).
+/// A workspace/tenant. Root isolation boundary.
 model Tenant {
   id              String   @id @default(cuid())
   slug            String   @unique
@@ -27,6 +26,9 @@ model Tenant {
   memberships     Membership[]
   departments     Department[]
   widgetConfig    WidgetConfig?
+  contacts        Contact[]
+  conversations   Conversation[]
+  routingRules    RoutingRule[]
 }
 
 /// Global identity. A user may belong to multiple tenants via Membership.
@@ -41,6 +43,9 @@ model User {
   updatedAt    DateTime @updatedAt
 
   memberships  Membership[]
+  assignedConversations Conversation[] @relation("AssignedAgent")
+  sentMessages  Message[]
+  participants  Participant[]
 }
 
 /// Authorization pivot: binds a User to a Tenant with a role.
@@ -71,6 +76,7 @@ model Department {
 
   tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   members   DepartmentMember[]
+  conversations Conversation[]
 
   @@index([tenantId])
 }
@@ -101,4 +107,113 @@ model WidgetConfig {
   updatedAt       DateTime @updatedAt
 
   tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+}
+
+// ============================================================
+// Module 2 — Realtime messaging entities
+// ============================================================
+
+/// A visitor/customer identified by (tenantId, identifier). Deduped by email
+/// if provided, otherwise by a generated visitorId stored in widget localStorage.
+model Contact {
+  id          String   @id @default(cuid())
+  tenantId    String
+  identifier  String   // email or visitorId
+  identifierType String @default("visitorId") // email | visitorId
+  name        String?
+  email       String?
+  avatarUrl   String?
+  locale      String   @default("fa")
+  metadata    Json     // set in app code on create
+  lastSeenAt  DateTime @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversations Conversation[]
+
+  @@unique([tenantId, identifier])
+  @@index([tenantId])
+}
+
+/// A conversation between a contact and agents. Channel-agnostic.
+model Conversation {
+  id             String   @id @default(cuid())
+  tenantId       String
+  contactId      String
+  assignedUserId String?
+  departmentId   String?
+  status         String   @default("open") // open | pending | closed
+  priority       String   @default("normal") // low | normal | high
+  channel        String   @default("widget") // widget | whatsapp | telegram | instagram
+  tags           Json     // set in app code on create — []
+  lastMessageAt  DateTime @default(now())
+  lastMessagePreview String @default("")
+  unreadCount    Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  tenant         Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  contact        Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  assignedUser   User?    @relation("AssignedAgent", fields: [assignedUserId], references: [id], onDelete: SetNull)
+  department     Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  messages       Message[]
+  participants   Participant[]
+
+  @@index([tenantId, status])
+  @@index([tenantId, assignedUserId])
+  @@index([tenantId, departmentId])
+}
+
+/// A message in a conversation. senderType distinguishes agent/contact/ai/system.
+model Message {
+  id              String   @id @default(cuid())
+  conversationId  String
+  tenantId        String
+  senderType      String   @default("contact") // agent | contact | ai | system
+  senderUserId    String?
+  contentType     String   @default("text") // text | image | file | system
+  content         Json     // { text?: string, attachments?: [{url, type, name}] }
+  status          String   @default("sent") // sent | delivered | read
+  createdAt       DateTime @default(now())
+
+  conversation    Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  senderUser      User?        @relation(fields: [senderUserId], references: [id], onDelete: SetNull)
+
+  @@index([conversationId, createdAt])
+  @@index([tenantId, createdAt])
+}
+
+/// Tracks which agents are participating in a conversation + their read state.
+model Participant {
+  id              String   @id @default(cuid())
+  conversationId  String
+  userId          String
+  tenantId        String
+  lastReadAt      DateTime @default(now())
+  muted           Boolean  @default(false)
+  createdAt       DateTime @default(now())
+
+  conversation    Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user            User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, userId])
+  @@index([tenantId])
+}
+
+/// Rule-based automation: trigger (event + conditions) → action.
+model RoutingRule {
+  id          String   @id @default(cuid())
+  tenantId    String
+  name        String
+  enabled     Boolean  @default(true)
+  priority    Int      @default(0)
+  trigger     Json     // { event: "conversation_created", conditions: {...} }
+  action      Json     // { type: "assign_department"|"assign_user"|"add_tag"|"send_message", ... }
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, enabled])
 }
