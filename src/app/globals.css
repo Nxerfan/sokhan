@@ -1,13 +1,31 @@
+@import "@fontsource/vazirmatn/400.css";
+@import "@fontsource/vazirmatn/500.css";
+@import "@fontsource/vazirmatn/600.css";
+@import "@fontsource/vazirmatn/700.css";
+@import "@fontsource/space-grotesk/500.css";
+@import "@fontsource/space-grotesk/600.css";
+@import "@fontsource/space-grotesk/700.css";
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/500.css";
 @import "tailwindcss";
 @import "tw-animate-css";
 
 @custom-variant dark (&:is(.dark *));
 
+/* ============================================================
+   Design system tokens — Sukhan brand (ADR-6 redline)
+   Ink (primary anchor) · Saffron (action accent) · Turquoise
+   (secondary accent) · warm stone neutrals. Deliberately NOT
+   indigo/blue. Customer widget palette is NOT bound to these —
+   see WidgetConfig for per-tenant theming.
+   ============================================================ */
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: "Vazirmatn", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Space Grotesk", "Vazirmatn", ui-sans-serif, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -25,6 +43,7 @@
   --color-input: var(--input);
   --color-border: var(--border);
   --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
   --color-accent-foreground: var(--accent-foreground);
   --color-accent: var(--accent);
   --color-muted-foreground: var(--muted-foreground);
@@ -37,6 +56,12 @@
   --color-popover: var(--popover);
   --color-card-foreground: var(--card-foreground);
   --color-card: var(--card);
+  --color-saffron: var(--saffron);
+  --color-saffron-foreground: var(--saffron-foreground);
+  --color-turquoise: var(--turquoise);
+  --color-turquoise-foreground: var(--turquoise-foreground);
+  --color-ink: var(--ink);
+  --color-ink-foreground: var(--ink-foreground);
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -45,78 +70,155 @@
 
 :root {
   --radius: 0.625rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
+
+  /* Warm stone surfaces (NOT cold zinc) */
+  --background: oklch(0.985 0.004 75);          /* #FAF7F2 warm off-white */
+  --foreground: oklch(0.21 0.012 250);          /* #0E1116 ink, slightly cool */
   --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
+  --card-foreground: oklch(0.21 0.012 250);
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  --popover-foreground: oklch(0.21 0.012 250);
+
+  /* Ink as primary (buttons/anchors) */
+  --primary: oklch(0.21 0.012 250);
+  --primary-foreground: oklch(0.975 0.006 75);
+
+  --secondary: oklch(0.95 0.006 75);
+  --secondary-foreground: oklch(0.21 0.012 250);
+  --muted: oklch(0.95 0.006 75);
+  --muted-foreground: oklch(0.5 0.01 75);
+  --accent: oklch(0.93 0.02 75);
+  --accent-foreground: oklch(0.21 0.012 250);
+
+  /* Brand signal colors */
+  --saffron: oklch(0.73 0.15 75);               /* #E09A2B */
+  --saffron-foreground: oklch(0.18 0.02 75);
+  --turquoise: oklch(0.62 0.1 185);             /* #1F8F8F */
+  --turquoise-foreground: oklch(0.99 0 0);
+  --ink: oklch(0.21 0.012 250);
+  --ink-foreground: oklch(0.975 0.006 75);
+
+  /* Semantic */
+  --destructive: oklch(0.55 0.18 25);           /* #C44545 muted rose */
+  --destructive-foreground: oklch(0.99 0 0);
+  --border: oklch(0.9 0.006 75);
+  --input: oklch(0.9 0.006 75);
+  --ring: var(--saffron);
+
+  --chart-1: oklch(0.73 0.15 75);
+  --chart-2: oklch(0.62 0.1 185);
+  --chart-3: oklch(0.55 0.13 150);
+  --chart-4: oklch(0.62 0.16 40);
+  --chart-5: oklch(0.5 0.18 295);
+
+  /* Sidebar (nav rail) — warm tinted */
+  --sidebar: oklch(0.97 0.005 75);
+  --sidebar-foreground: oklch(0.21 0.012 250);
+  --sidebar-primary: var(--saffron);
+  --sidebar-primary-foreground: var(--saffron-foreground);
+  --sidebar-accent: oklch(0.93 0.015 75);
+  --sidebar-accent-foreground: oklch(0.21 0.012 250);
+  --sidebar-border: oklch(0.9 0.006 75);
+  --sidebar-ring: var(--saffron);
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
+  --background: oklch(0.17 0.008 255);          /* #15171C warm charcoal */
+  --foreground: oklch(0.96 0.004 75);
+  --card: oklch(0.21 0.008 255);
+  --card-foreground: oklch(0.96 0.004 75);
+  --popover: oklch(0.21 0.008 255);
+  --popover-foreground: oklch(0.96 0.004 75);
+
+  --primary: oklch(0.96 0.004 75);
+  --primary-foreground: oklch(0.17 0.008 255);
+
+  --secondary: oklch(0.26 0.008 255);
+  --secondary-foreground: oklch(0.96 0.004 75);
+  --muted: oklch(0.26 0.008 255);
+  --muted-foreground: oklch(0.7 0.008 75);
+  --accent: oklch(0.3 0.012 255);
+  --accent-foreground: oklch(0.96 0.004 75);
+
+  --saffron: oklch(0.78 0.14 75);
+  --saffron-foreground: oklch(0.16 0.02 75);
+  --turquoise: oklch(0.68 0.1 185);
+  --turquoise-foreground: oklch(0.12 0.01 185);
+  --ink: oklch(0.96 0.004 75);
+  --ink-foreground: oklch(0.17 0.008 255);
+
+  --destructive: oklch(0.65 0.17 25);
+  --destructive-foreground: oklch(0.99 0 0);
   --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --input: oklch(1 0 0 / 14%);
+  --ring: var(--saffron);
+
+  --chart-1: oklch(0.78 0.14 75);
+  --chart-2: oklch(0.68 0.1 185);
+  --chart-3: oklch(0.62 0.13 150);
+  --chart-4: oklch(0.68 0.16 40);
+  --chart-5: oklch(0.6 0.18 295);
+
+  --sidebar: oklch(0.2 0.008 255);
+  --sidebar-foreground: oklch(0.96 0.004 75);
+  --sidebar-primary: var(--saffron);
+  --sidebar-primary-foreground: var(--saffron-foreground);
+  --sidebar-accent: oklch(0.26 0.008 255);
+  --sidebar-accent-foreground: oklch(0.96 0.004 75);
   --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  --sidebar-ring: var(--saffron);
 }
 
 @layer base {
   * {
     @apply border-border outline-ring/50;
   }
+  html {
+    -webkit-tap-highlight-color: transparent;
+  }
   body {
     @apply bg-background text-foreground;
+    font-family: var(--font-sans);
+    font-feature-settings: "ss01", "cv01";
   }
+  h1, h2, h3, h4 {
+    font-family: var(--font-display);
+    letter-spacing: -0.01em;
+  }
+  /* Persian digits stay as-is unless a user opts in (Q8 deferred). */
+  [dir="rtl"] body {
+    font-feature-settings: "ss01", "cv01", "ss02";
+  }
+}
+
+/* Saffron utility helpers — used for brand accents (CTAs, unread pips, active nav) */
+@layer utilities {
+  .bg-saffron { background-color: var(--saffron); }
+  .text-saffron { color: var(--saffron); }
+  .border-saffron { border-color: var(--saffron); }
+  .bg-turquoise { background-color: var(--turquoise); }
+  .text-turquoise { color: var(--turquoise); }
+  .bg-ink { background-color: var(--ink); }
+  .text-ink { color: var(--ink); }
+  .font-display { font-family: var(--font-display); }
+  .font-mono { font-family: var(--font-mono); }
+
+  /* Subtle saffron pulse for unread indicators */
+  @keyframes saffron-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 oklch(0.73 0.15 75 / 0.5); }
+    50% { box-shadow: 0 0 0 4px oklch(0.73 0.15 75 / 0); }
+  }
+  .animate-saffron-pulse { animation: saffron-pulse 2s ease-in-out infinite; }
+
+  /* Custom scrollbar for long lists */
+  .scroll-thin {
+    scrollbar-width: thin;
+    scrollbar-color: var(--muted-foreground) transparent;
+  }
+  .scroll-thin::-webkit-scrollbar { width: 6px; height: 6px; }
+  .scroll-thin::-webkit-scrollbar-thumb {
+    background-color: oklch(0.5 0.01 75 / 0.4);
+    border-radius: 9999px;
+  }
+  .scroll-thin::-webkit-scrollbar-track { background: transparent; }
 }

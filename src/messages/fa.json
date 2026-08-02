@@ -1,0 +1,132 @@
+{
+  "common": {
+    "appName": "سُخن",
+    "tagline": "گفت‌وگوی زنده، برای دو بازار",
+    "loading": "در حال بارگذاری…",
+    "save": "ذخیره",
+    "cancel": "انصراف",
+    "delete": "حذف",
+    "edit": "ویرایش",
+    "create": "ایجاد",
+    "search": "جست‌وجو…",
+    "actions": "عملیات",
+    "back": "بازگشت",
+    "confirm": "تأیید"
+  },
+  "theme": {
+    "toggle": "تغییر پوسته",
+    "light": "روشن",
+    "dark": "تیره"
+  },
+  "locale": {
+    "switch": "تغییر زبان",
+    "fa": "فارسی",
+    "en": "English"
+  },
+  "command": {
+    "placeholder": "دستور بنویسید یا جست‌وجو کنید…",
+    "noResults": "نتیجه‌ای یافت نشد.",
+    "groupNavigation": "ناوبری",
+    "groupActions": "عملیات",
+    "groupSettings": "تنظیمات"
+  },
+  "nav": {
+    "inbox": "صندوق ورودی",
+    "contacts": "مخاطبین",
+    "conversations": "گفت‌وگوها",
+    "analytics": "تحلیل‌ها",
+    "automation": "اتوماسیون",
+    "integrations": "اتصال‌ها",
+    "settings": "تنظیمات",
+    "members": "اعضا",
+    "departments": "دپارتمان‌ها",
+    "widget": "ویجت",
+    "general": "عمومی",
+    "billing": "صورتحساب"
+  },
+  "auth": {
+    "loginTitle": "خوش آمدید",
+    "loginSubtitle": " وارد فضای کاری خود شوید",
+    "signupTitle": "فضای کاری خود را بسازید",
+    "signupSubtitle": "از ثبت‌نام تا ویجت زنده، در کمتر از پنج دقیقه",
+    "email": "ایمیل",
+    "password": "رمز عبور",
+    "name": "نام شما",
+    "workspaceName": "نام فضای کاری",
+    "workspaceSlug": "آدرس فضای کاری",
+    "login": "ورود",
+    "signup": "ایجاد فضای کاری",
+    "noAccount": "فضای کاری ندارید؟",
+    "haveAccount": "قبلاً فضای کاری دارید؟",
+    "createOne": "ایجاد کنید",
+    "signInInstead": "وارد شوید",
+    "invalidCredentials": "ایمیل یا رمز عبور نادرست است",
+    "emailTaken": "این ایمیل قبلاً ثبت شده است",
+    "slugTaken": "این آدرس فضای کاری گرفته شده است",
+    "demoNote": "نسخه نمایشی: با ساخت فضای کاری فوراً شروع کنید — بدون نیاز به کارت."
+  },
+  "dashboard": {
+    "greeting": "خوش آمدید، {name}",
+    "unread": "خوانده‌نشده",
+    "onlineAgents": "افراد آنلاین",
+    "openConversations": "گفت‌وگوهای باز",
+    "avgResponse": "میانگین اولین پاسخ",
+    "today": "امروز",
+    "noConversations": "هنوز گفت‌وگویی وجود ندارد",
+    "noConversationsHint": "برای شروع گفت‌وگو با بازدیدکنندگان، ویجت را در سایت خود قرار دهید.",
+    "comingSoon": "در ماژول دوم",
+    "comingSoonHint": "پیام‌رسانی زنده، مسیریابی و اتوماسیون در ادامه اضافه می‌شوند."
+  },
+  "settings": {
+    "generalTitle": "عمومی",
+    "generalHint": "نام فضای کاری، زبان و جهت پیش‌فرض.",
+    "membersTitle": "اعضا",
+    "membersHint": "مدیریت کارشناسان و نقش‌های آن‌ها.",
+    "departmentsTitle": "دپارتمان‌ها",
+    "departmentsHint": "گروه‌بندی کارشناسان برای مسیریابی گفت‌وگوها.",
+    "widgetTitle": "ظاهر ویجت",
+    "widgetHint": "شکل و رنگ ویجت گفت‌وگو را در سایت خود سفارشی کنید.",
+    "workspaceName": "نام فضای کاری",
+    "defaultLocale": "زبان پیش‌فرض",
+    "defaultDirection": "جهت پیش‌فرض",
+    "inviteEmail": "دعوت با ایمیل",
+    "role": "نقش",
+    "roles": {
+      "owner": "مالک",
+      "admin": "مدیر",
+      "manager": "سرپرست",
+      "agent": "کارشناس",
+      "viewer": "بیننده"
+    },
+    "addDepartment": "افزودن دپارتمان",
+    "departmentName": "نام دپارتمان",
+    "noMembers": "هنوز عضوی وجود ندارد",
+    "noDepartments": "هنوز دپارتمانی وجود ندارد",
+    "accentColor": "رنگ تأکیدی",
+    "launcherShape": "شکل دکمه",
+    "launcherShapes": {
+      "tab": "زبانه",
+      "rounded": "گرد",
+      "pill": "قرص"
+    },
+    "position": "موقعیت",
+    "positions": {
+      "bottom-start": "پایین — آغاز",
+      "bottom-end": "پایین — پایان"
+    },
+    "avatarUrl": "آدرس تصویر کارشناس",
+    "logoUrl": "آدرس لوگو",
+    "greetingFa": "پیام خوش‌آمد (فارسی)",
+    "greetingEn": "پیام خوش‌آمد (انگلیسی)",
+    "embedSnippet": "کد جاسازی",
+    "embedHint": "این کد را پیش از بسته شدن تگ </body> در سایت خود قرار دهید.",
+    "copy": "کپی",
+    "copied": "کپی شد",
+    "saved": "ذخیره شد",
+    "shapes": { "tab": "زبانه", "rounded": "مربع گرد", "pill": "قرص" }
+  },
+  "footer": {
+    "rights": "تمامی حقوق محفوظ است.",
+    "agplNotice": "متن‌باز هسته تحت AGPL-3.0. کد منبع در صورت درخواست در دسترس است."
+  }
+}

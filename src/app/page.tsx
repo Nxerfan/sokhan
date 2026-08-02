@@ -1,31 +1,14 @@
 'use client'
 
+import { useSession } from 'next-auth/react'
+import { AuthScreen } from '@/components/auth/auth-screen'
+import { DashboardShell } from '@/components/dashboard/dashboard-shell'
+import { LoadingScreen } from '@/components/loading-screen'
+
 export default function Home() {
-  return (
-    <div style={{
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'center',
-      justifyContent: 'center',
-      minHeight: '100vh',
-      gap: '2rem',
-      padding: '1rem'
-    }}>
-      <div style={{
-        position: 'relative',
-        width: '6rem',
-        height: '6rem'
-      }}>
-        <img
-          src="/logo.svg"
-          alt="Z.ai Logo"
-          style={{
-            width: '100%',
-            height: '100%',
-            objectFit: 'contain'
-          }}
-        />
-      </div>
-    </div>
-  )
+  const { data: session, status } = useSession()
+
+  if (status === 'loading') return <LoadingScreen />
+  if (!session) return <AuthScreen />
+  return <DashboardShell />
 }

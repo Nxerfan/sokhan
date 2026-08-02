@@ -1,0 +1,132 @@
+{
+  "common": {
+    "appName": "Sukhan",
+    "tagline": "Live chat, built for two markets",
+    "loading": "Loading…",
+    "save": "Save",
+    "cancel": "Cancel",
+    "delete": "Delete",
+    "edit": "Edit",
+    "create": "Create",
+    "search": "Search…",
+    "actions": "Actions",
+    "back": "Back",
+    "confirm": "Confirm"
+  },
+  "theme": {
+    "toggle": "Toggle theme",
+    "light": "Light",
+    "dark": "Dark"
+  },
+  "locale": {
+    "switch": "Switch language",
+    "fa": "فارسی",
+    "en": "English"
+  },
+  "command": {
+    "placeholder": "Type a command or search…",
+    "noResults": "No results found.",
+    "groupNavigation": "Navigation",
+    "groupActions": "Actions",
+    "groupSettings": "Settings"
+  },
+  "nav": {
+    "inbox": "Inbox",
+    "contacts": "Contacts",
+    "conversations": "Conversations",
+    "analytics": "Analytics",
+    "automation": "Automation",
+    "integrations": "Integrations",
+    "settings": "Settings",
+    "members": "Members",
+    "departments": "Departments",
+    "widget": "Widget",
+    "general": "General",
+    "billing": "Billing"
+  },
+  "auth": {
+    "loginTitle": "Welcome back",
+    "loginSubtitle": "Sign in to your workspace",
+    "signupTitle": "Create your workspace",
+    "signupSubtitle": "From signup to a live widget in under five minutes",
+    "email": "Email",
+    "password": "Password",
+    "name": "Your name",
+    "workspaceName": "Workspace name",
+    "workspaceSlug": "Workspace URL",
+    "login": "Sign in",
+    "signup": "Create workspace",
+    "noAccount": "Don't have a workspace?",
+    "haveAccount": "Already have a workspace?",
+    "createOne": "Create one",
+    "signInInstead": "Sign in instead",
+    "invalidCredentials": "Invalid email or password",
+    "emailTaken": "This email is already registered",
+    "slugTaken": "This workspace URL is taken",
+    "demoNote": "Demo: create a workspace to get started instantly — no card required."
+  },
+  "dashboard": {
+    "greeting": "Welcome, {name}",
+    "unread": "Unread",
+    "onlineAgents": "Online agents",
+    "openConversations": "Open conversations",
+    "avgResponse": "Avg. first response",
+    "today": "Today",
+    "noConversations": "No conversations yet",
+    "noConversationsHint": "Embed your widget to start chatting with visitors.",
+    "comingSoon": "Coming in Module 2",
+    "comingSoonHint": "Real-time messaging, routing and automation land next."
+  },
+  "settings": {
+    "generalTitle": "General",
+    "generalHint": "Workspace name, default language and direction.",
+    "membersTitle": "Members",
+    "membersHint": "Manage agents and their roles.",
+    "departmentsTitle": "Departments",
+    "departmentsHint": "Group agents for conversation routing.",
+    "widgetTitle": "Widget appearance",
+    "widgetHint": "Customize how the chat widget looks on your site.",
+    "workspaceName": "Workspace name",
+    "defaultLocale": "Default language",
+    "defaultDirection": "Default direction",
+    "inviteEmail": "Invite by email",
+    "role": "Role",
+    "roles": {
+      "owner": "Owner",
+      "admin": "Admin",
+      "manager": "Manager",
+      "agent": "Agent",
+      "viewer": "Viewer"
+    },
+    "addDepartment": "Add department",
+    "departmentName": "Department name",
+    "noMembers": "No members yet",
+    "noDepartments": "No departments yet",
+    "accentColor": "Accent color",
+    "launcherShape": "Launcher shape",
+    "launcherShapes": {
+      "tab": "Tab",
+      "rounded": "Rounded",
+      "pill": "Pill"
+    },
+    "position": "Position",
+    "positions": {
+      "bottom-start": "Bottom start",
+      "bottom-end": "Bottom end"
+    },
+    "avatarUrl": "Agent avatar URL",
+    "logoUrl": "Logo URL",
+    "greetingFa": "Greeting (Persian)",
+    "greetingEn": "Greeting (English)",
+    "embedSnippet": "Embed snippet",
+    "embedHint": "Paste this before the closing </body> tag on your site.",
+    "copy": "Copy",
+    "copied": "Copied",
+    "saved": "Saved",
+    "shapes": { "tab": "Tab", "rounded": "Rounded square", "pill": "Pill" }
+  },
+  "footer": {
+    "rights": "All rights reserved.",
+    "agplNotice": "Open-core under AGPL-3.0. Source available on request."
+  }
+}

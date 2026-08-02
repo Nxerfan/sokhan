@@ -1,8 +1,7 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+// Live Chat SaaS — Module 1 (Foundation) schema
+// Tenant isolation is enforced in the application layer via a Prisma client
+// extension (see src/lib/db.ts). In the cloud Postgres deployment this maps to
+// Row-Level Security policies on the same tenant_id columns.
 
 generator client {
   provider = "prisma-client-js"
@@ -13,20 +12,93 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  name      String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+/// A workspace/tenant. Root isolation boundary. In self-hosted editions a
+/// single tenant row exists (DEFAULT_TENANT).
+model Tenant {
+  id              String   @id @default(cuid())
+  slug            String   @unique
+  name            String
+  defaultLocale   String   @default("fa")
+  defaultDirection String  @default("rtl")
+  plan            String   @default("free")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  memberships     Membership[]
+  departments     Department[]
+  widgetConfig    WidgetConfig?
 }
 
-model Post {
+/// Global identity. A user may belong to multiple tenants via Membership.
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String?
+  passwordHash String?
+  avatarUrl    String?
+  locale       String   @default("fa")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  memberships  Membership[]
+}
+
+/// Authorization pivot: binds a User to a Tenant with a role.
+/// Roles: owner | admin | manager | agent | viewer
+model Membership {
   id        String   @id @default(cuid())
-  title     String
-  content   String?
-  published Boolean  @default(false)
-  authorId  String
+  userId    String
+  tenantId  String
+  role      String   @default("agent")
+  status    String   @default("active") // active | invited | suspended
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, tenantId])
+  @@index([tenantId])
+}
+
+/// Lightweight team grouping used for routing (Module 2).
+model Department {
+  id        String   @id @default(cuid())
+  tenantId  String
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  members   DepartmentMember[]
+
+  @@index([tenantId])
+}
+
+model DepartmentMember {
+  departmentId String
+  userId       String
+
+  department   Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+
+  @@id([departmentId, userId])
+}
+
+/// Customer-facing chat widget appearance. Per ADR-7 redline: the product's
+/// own ink/saffron/turquoise palette is NOT imposed on customer widgets; each
+/// tenant configures its own accent, launcher, position, avatar and greeting.
+model WidgetConfig {
+  id              String   @id @default(cuid())
+  tenantId        String   @unique
+  accentColor     String   @default("#E09A2B")
+  launcherShape   String   @default("tab") // tab | rounded | pill
+  position        String   @default("bottom-start") // bottom-start | bottom-end
+  avatarUrl       String?
+  logoUrl         String?
+  greetingTexts   Json     // { "fa": "...", "en": "..." } — set in app code on create
+  defaultLocale   String   @default("fa")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 }
