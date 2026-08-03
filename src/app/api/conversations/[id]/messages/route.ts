@@ -1,6 +1,6 @@
 import { NextResponse, NextRequest } from 'next/server'
 import { withSessionTenant, hasRole } from '@/lib/auth'
-import { db } from '@/lib/db'
+import { db, getCurrentTenantId } from '@/lib/db'
 import { publishToRealtime, room, EVENTS } from '@/lib/realtime-publish'
 
 /**
@@ -14,7 +14,7 @@ export async function GET(
   const { id } = await params
   const result = await withSessionTenant(async () => {
     const messages = await db.message.findMany({
-      where: { conversationId: id },
+      where: { conversationId: id, tenantId: getCurrentTenantId()! },
       orderBy: { createdAt: 'asc' },
       take: 200,
     })
@@ -41,8 +41,8 @@ export async function POST(
       return { error: 'empty_message' as const }
     }
 
-    // Verify conversation exists in this tenant
-    const conversation = await db.conversation.findFirst({ where: { id } })
+    // Verify conversation exists in this tenant — tenantId explicit (defense-in-depth)
+    const conversation = await db.conversation.findFirst({ where: { id, tenantId: getCurrentTenantId()! } })
     if (!conversation) {
       return { error: 'not_found' as const }
     }

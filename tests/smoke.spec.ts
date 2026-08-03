@@ -22,7 +22,7 @@ import { test, expect, type Page } from '@playwright/test'
  */
 
 // Use port 81 (Caddy gateway) for consistency — Socket.IO needs Caddy for XTransformPort
-const BASE = 'http://localhost:81'
+const BASE = 'http://localhost:3000'
 
 /** Unique credentials per test invocation. */
 function creds(testTitle: string) {

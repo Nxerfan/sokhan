@@ -39,7 +39,7 @@ export async function DELETE(req: NextRequest) {
     }
     const id = new URL(req.url).searchParams.get('id')
     if (!id) return { error: 'invalid_id' as const }
-    await db.department.delete({ where: { id } })
+    await db.department.deleteMany({ where: { id, tenantId: session.user.workspaceId! } })
     return { ok: true as const }
   })
   if (!result) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })

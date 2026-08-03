@@ -1,6 +1,6 @@
 import { NextResponse, NextRequest } from 'next/server'
 import { withSessionTenant, hasRole } from '@/lib/auth'
-import { db } from '@/lib/db'
+import { db, getCurrentTenantId } from '@/lib/db'
 import { publishToRealtime, room, EVENTS } from '@/lib/realtime-publish'
 
 /**
@@ -14,7 +14,7 @@ export async function GET(
   const { id } = await params
   const result = await withSessionTenant(async () => {
     const conversation = await db.conversation.findFirst({
-      where: { id },
+      where: { id, tenantId: getCurrentTenantId()! },
       include: {
         contact: { select: { id: true, name: true, email: true, avatarUrl: true, locale: true } },
         assignedUser: { select: { id: true, name: true } },
@@ -55,7 +55,7 @@ export async function PATCH(
       where: { id, tenantId: session.user.workspaceId! },
       data,
     })
-    const conversation = await db.conversation.findFirst({ where: { id } })
+    const conversation = await db.conversation.findFirst({ where: { id, tenantId: getCurrentTenantId()! } })
 
     // If assigned to a user, add them as participant — tenantId explicit
     if (body.assignedUserId) {

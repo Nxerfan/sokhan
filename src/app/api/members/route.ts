@@ -1,7 +1,6 @@
 import { NextResponse, NextRequest } from 'next/server'
 import { withSessionTenant, hasRole, getCurrentTenantId } from '@/lib/auth'
 import { db } from '@/lib/db'
-
 export async function GET() {
   const result = await withSessionTenant(async () => {
     return db.membership.findMany({
@@ -65,10 +64,12 @@ export async function PATCH(req: NextRequest) {
     const role = ['admin', 'manager', 'agent', 'viewer'].includes(body.role)
       ? body.role
       : 'agent'
-    const membership = await db.membership.update({
-      where: { id: body.memberId },
+    // updateMany with tenantId — defense-in-depth (Module 2 convention)
+    await db.membership.updateMany({
+      where: { id: body.memberId, tenantId: getCurrentTenantId()! },
       data: { role },
     })
+    const membership = await db.membership.findFirst({ where: { id: body.memberId, tenantId: getCurrentTenantId()! } })
     return { membership } as const
   })
   if (!result) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })

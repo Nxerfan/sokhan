@@ -101,3 +101,48 @@ Stage Summary:
 - Realtime service runs on ports 3003 (Socket.IO) + 3004 (internal publish). Both must be running for real-time delivery; polling safety net (10s) catches messages if realtime is down.
 - Fresh-restart stability confirmed: schema relation fix, widget relative-URL fix, env loading fix, session-status fix, path fix all hold after clean server restart.
 - Polling is clearly labeled as safety net in code comments; Socket.IO is primary.
+
+---
+Task ID: 4
+Agent: main (Senior Full-Stack Engineer — session handoff)
+Task: Fix four items before Module 3: (1) widget-test.html auto-embed, (2) socket race condition, (3) server persistence for manual testing, (4) cross-tenant isolation audit.
+
+Work Log:
+
+- **CRITICAL: Cross-tenant data leak found and fixed.**
+  - Root cause: `TENANT_SCOPED_MODELS` in `src/lib/db.ts` only contained 4 Module 1 models (`Membership`, `Department`, `DepartmentMember`, `WidgetConfig`). The 5 Module 2 models (`Contact`, `Conversation`, `Message`, `Participant`, `RoutingRule`) were MISSING — the Prisma extension never auto-injected `tenantId` on any read or write for them. Prior sessions manually patched writes but NEVER audited reads.
+  - 8 leaking read paths identified by code audit:
+    1. `/api/conversations` GET — `findMany({ where: { status } })` — NO tenantId → returned ALL tenants' conversations
+    2. `/api/conversations/[id]` GET — `findFirst({ where: { id } })` — NO tenantId → any agent reads any conversation
+    3. `/api/conversations/[id]` PATCH — post-update `findFirst({ where: { id } })` — NO tenantId
+    4. `/api/conversations/[id]/messages` GET — `findMany({ where: { conversationId } })` — NO tenantId
+    5. `/api/conversations/[id]/messages` POST — `findFirst({ where: { id } })` — NO tenantId
+    6. `/api/contacts` GET — `findMany({})` — NO where clause at all
+    7. `/api/routing-rules` GET — `findMany({ orderBy })` — NO where clause
+    8. `/api/routing-rules` DELETE — `delete({ where: { id } })` — NO tenantId
+  - Fix (source): Added `Contact`, `Conversation`, `Message`, `Participant`, `RoutingRule` to `TENANT_SCOPED_MODELS` in `db.ts`. The extension now auto-injects `tenantId` on ALL operations for these models.
+  - Fix (defense-in-depth): Added explicit `tenantId: getCurrentTenantId()!` to every leaking read query. Converted `delete()` to `deleteMany({ where: { id, tenantId } })` and `update()` to `updateMany({ where: { id, tenantId } })` where needed.
+  - Also found: `.env` was missing `NEXTAUTH_SECRET` (lost at some point during prior sessions). Without it, NextAuth couldn't create stable JWTs — all session creation failed silently (`JWEDecryptionFailed`). Re-added `NEXTAUTH_SECRET` and `NEXTAUTH_URL`.
+  - Verification: Playwright two-tenant test passes (Tenant A creates conversation, Tenant B's inbox shows 0 conversations, cannot read A's conversation by ID, cannot read A's messages, 0 contacts, 0 routing rules; control: Tenant A sees own conversation). Also verified via direct curl API test (all 6 checks pass).
+
+- **widget-test.html auto-embed: fixed.**
+  - Rewrote `public/widget-test.html` to auto-embed the widget via `?slug=<workspace-slug>` query param. The page validates the slug (alphanumeric + hyphens only, prevents XSS) and injects `<script src="/api/widget/<slug>/script">` — the exact snippet a real customer would use.
+  - No `/api/widget/latest` endpoint exists in this codebase (it was on a disconnected experimental branch). No fallback needed — the recommended flow is: log into dashboard → Settings → Widget → copy the embed snippet (which includes the correct slug) → use `widget-test.html?slug=your-slug`.
+
+- **Socket race condition: fixed.**
+  - Root cause: the widget only connected its Socket.IO client AFTER sending the first message (it needed a `conversationId` to join a room). If an agent replied faster than socket.io-client could load+connect+join, the reply was published before the widget was listening — only caught 10s later by polling.
+  - Fix: `identifyVisitor()` now calls `connectSocket()` IMMEDIATELY after getting the visitor token (before any conversation exists). The socket connects to the tenant room. When a conversation is created (first message), the widget emits `conversation:join` on the already-connected socket, rather than only attempting to connect+join reactively.
+  - The `connect` event handler already checks `state.conversationId` and joins the room if set — so if the socket is still connecting when the conversation is created, it joins automatically on connect.
+
+- **Server persistence: confirmed.**
+  - Both Next.js (port 3000) and the realtime service (ports 3003+3004) survive 65+ seconds of idle time using `setsid` + `disown` to detach from the bash session. Caddy (port 81) also stays up.
+  - For Module 3 (Docker packaging), this will be handled by Docker Compose's `restart: unless-stopped` policy — no additional process manager needed. The current `setsid` approach is adequate for dev/testing.
+
+Stage Summary:
+- Cross-tenant data leak: FIXED and VERIFIED via Playwright two-tenant test (passes) + direct curl API test (all 6 checks pass).
+- widget-test.html: auto-embeds via `?slug=` param, no dev-only fallback endpoint.
+- Socket race: socket warmed up during visitor identification, conversation room joined on already-connected socket.
+- Server persistence: confirmed 65s+ idle survival for all three services (Next.js, realtime, Caddy).
+- `/api/widget/latest`: does NOT exist in this codebase — no action needed.
+- Dev-server persistence approach (setsid+disown) is fine for dev; Docker Compose will handle it properly in Module 3.
+

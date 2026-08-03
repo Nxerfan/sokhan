@@ -224,10 +224,18 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean): st
       state.contactId = data.contactId;
       state.conversationId = data.conversationId;
       state.token = data.realtimeToken;
+
+      // WARM UP the socket connection IMMEDIATELY after identification —
+      // BEFORE any conversation exists. This fixes the race condition where
+      // an agent replies faster than the socket can load+connect+join, causing
+      // the reply to be missed (only caught later by the 10s polling fallback).
+      // The socket connects to the tenant room now; when a conversation is
+      // created later, we emit conversation:join on the already-connected socket.
+      connectSocket();
+
       // Load existing messages if there's an open conversation
       if (state.conversationId) {
         loadMessages();
-        connectSocket();
       }
     })
     .catch(function(e){ console.error('[sukhan] identify failed', e); });
@@ -312,8 +320,14 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean): st
       }
       if (data.conversationId && data.conversationId !== state.conversationId) {
         state.conversationId = data.conversationId;
-        // First message — connect socket now that we have a conversation
-        connectSocket();
+        // New conversation just created. The socket was already warmed up
+        // during identifyVisitor(). If it's connected, join the conversation
+        // room NOW so we don't miss rapid agent replies. If it's still
+        // connecting, the 'connect' handler will join the room automatically
+        // (it checks state.conversationId on connect).
+        if (state.socket && state.connected) {
+          state.socket.emit('conversation:join', state.conversationId);
+        }
       }
       // Start polling for new messages (fallback if Socket.IO fails through proxy)
       startPolling();

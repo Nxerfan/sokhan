@@ -14,12 +14,24 @@ import { PrismaClient, type Prisma } from '@prisma/client'
  * becomes a defense-in-depth check rather than the sole boundary.
  *
  * Tenant-scoped models (must declare here):
+ *
+ * CRITICAL: Every model that has a `tenantId` column MUST be listed here.
+ * If a model is missing from this list, the extension will NOT auto-inject
+ * tenantId on reads or writes, causing cross-tenant data leaks.
+ *
+ * Module 1 models: Membership, Department, DepartmentMember, WidgetConfig
+ * Module 2 models: Contact, Conversation, Message, Participant, RoutingRule
  */
 const TENANT_SCOPED_MODELS = [
   'Membership',
   'Department',
   'DepartmentMember',
   'WidgetConfig',
+  'Contact',
+  'Conversation',
+  'Message',
+  'Participant',
+  'RoutingRule',
 ] as const
 
 type TenantScopedModel = (typeof TENANT_SCOPED_MODELS)[number]

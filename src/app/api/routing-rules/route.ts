@@ -1,11 +1,11 @@
 import { NextResponse, NextRequest } from 'next/server'
 import { withSessionTenant, hasRole } from '@/lib/auth'
-import { db } from '@/lib/db'
+import { db, getCurrentTenantId } from '@/lib/db'
 
 /** GET: list routing rules for the tenant */
 export async function GET() {
   const result = await withSessionTenant(async () => {
-    return db.routingRule.findMany({ orderBy: { priority: 'asc' } })
+    return db.routingRule.findMany({ where: { tenantId: getCurrentTenantId()! }, orderBy: { priority: 'asc' } })
   })
   if (!result) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
   return NextResponse.json({ rules: result.result })
@@ -68,7 +68,7 @@ export async function DELETE(req: NextRequest) {
     }
     const id = new URL(req.url).searchParams.get('id')
     if (!id) return { error: 'invalid_id' as const }
-    await db.routingRule.delete({ where: { id } })
+    await db.routingRule.deleteMany({ where: { id, tenantId: getCurrentTenantId()! } })
     return { ok: true as const }
   })
   if (!result) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })

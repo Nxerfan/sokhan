@@ -1,6 +1,6 @@
 import { NextResponse, NextRequest } from 'next/server'
 import { withSessionTenant, hasRole } from '@/lib/auth'
-import { db } from '@/lib/db'
+import { db, getCurrentTenantId } from '@/lib/db'
 import { publishToRealtime, room, EVENTS } from '@/lib/realtime-publish'
 
 /**
@@ -13,7 +13,7 @@ export async function GET(req: NextRequest) {
     const departmentId = url.searchParams.get('departmentId')
     const assignedUserId = url.searchParams.get('assignedUserId')
 
-    const where: any = {}
+    const where: any = { tenantId: getCurrentTenantId()! }
     if (status !== 'all') where.status = status
     if (departmentId) where.departmentId = departmentId
     if (assignedUserId) where.assignedUserId = assignedUserId

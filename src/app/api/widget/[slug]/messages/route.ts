@@ -40,7 +40,7 @@ export async function GET(
   }
 
   const messages = await db.message.findMany({
-    where: { conversationId },
+    where: { conversationId, tenantId },
     orderBy: { createdAt: 'asc' },
     take: 100,
   })
