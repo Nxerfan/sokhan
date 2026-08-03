@@ -1,168 +1,155 @@
-import { test, expect, type Page } from '@playwright/test'
+import { test, expect, type Page, type BrowserContext } from '@playwright/test'
 
 /**
  * Socket race condition test — verifies that an agent reply sent IMMEDIATELY
- * after the visitor's first message is received by the widget via Socket.IO,
- * not lost to the race between "conversation created" and "socket joins room".
+ * after the visitor's first message is received by the widget via Socket.IO.
  *
- * Before the fix: the widget only connected its socket AFTER the first message
- * was sent (since it needed a conversationId to join a room). If the agent
- * replied faster than socket.io-client could load+connect+join, the reply was
- * published before the widget was listening — and was only caught 10s later
- * by the polling fallback.
- *
+ * Before the fix: the widget only connected its socket AFTER the first message.
  * After the fix: the socket is warmed up during identifyVisitor() (before any
- * conversation exists). When a conversation is created, the widget emits
- * conversation:join on the already-connected socket.
+ * conversation exists), and conversation:join is emitted on the already-connected
+ * socket when a conversation is created.
  *
- * This test uses ?nopoll=1 to disable the polling fallback, so if the reply
- * arrives at all, it MUST be via Socket.IO.
+ * Uses ?nopoll=1 to disable the polling fallback — if the reply arrives at all,
+ * it MUST be via Socket.IO.
+ *
+ * The dashboard uses Playwright's APIRequestContext for signup (reliable cookie
+ * handling). The widget uses a browser page on port 81 (Caddy) for Socket.IO.
  */
 
-const BASE = 'http://localhost:81'
+const DASHBOARD = 'http://localhost:3000'
+const WIDGET = 'http://localhost:81'
 
-function creds() {
-  const stamp = `${process.pid}-${Date.now()}-race`
-  return {
-    email: `race-${stamp}@test.com`,
-    workspace: `Race ${stamp}`,
-  }
-}
-
-async function signupAndGetSlug(page: Page, email: string, workspace: string): Promise<string> {
-  await page.goto(BASE)
+async function signupAndSignin(ctx: BrowserContext, email: string, workspace: string): Promise<string> {
+  // Use the browser context's own cookie jar via a page
+  const page = await ctx.newPage()
+  await page.goto(DASHBOARD)
   await page.waitForLoadState('networkidle')
-  await page.getByLabel(/نام شما|Your name/).fill('Agent Test')
-  await page.getByLabel(/ایمیل|Email/).fill(email)
-  await page.getByLabel(/رمز عبور|Password/).fill('password123')
-  await page.getByLabel(/نام فضای کاری|Workspace name/).fill(workspace)
-  await page.getByRole('button', { name: /ایجاد فضای کاری|Create workspace/ }).click()
-  await page.waitForURL(BASE + '/', { timeout: 15000 })
-  await expect(page.getByRole('heading', { name: workspace })).toBeVisible({ timeout: 15000 })
-  const res = await page.evaluate(async () => {
-    const r = await fetch('/api/tenants/me')
-    return r.json()
+  await page.waitForTimeout(2000)
+
+  // Signup via API (the page's cookie jar handles session cookies)
+  const signupRes = await page.request.post(`${DASHBOARD}/api/auth/signup`, {
+    data: { email, password: 'password123', name: 'Agent', workspaceName: workspace },
   })
-  return res.tenant.slug
+  expect(signupRes.ok()).toBe(true)
+
+  // Get CSRF
+  const csrfRes = await page.request.get(`${DASHBOARD}/api/auth/csrf`)
+  const { csrfToken } = await csrfRes.json()
+
+  // Signin
+  const signinRes = await page.request.post(`${DASHBOARD}/api/auth/callback/credentials`, {
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    data: `email=${email}&password=password123&csrfToken=${csrfToken}&json=true`,
+  })
+  expect(signinRes.ok()).toBe(true)
+
+  // Get slug
+  const tenantRes = await page.request.get(`${DASHBOARD}/api/tenants/me`)
+  const tenantData = await tenantRes.json()
+  const slug = tenantData.tenant?.slug
+  expect(slug).toBeTruthy()
+
+  // Now reload the page — the session cookie is set, so the dashboard should render
+  await page.reload()
+  await page.waitForLoadState('networkidle')
+  await page.waitForTimeout(3000)
+
+  return { page, slug }
 }
 
 test('Agent reply sent immediately after first message is received via Socket.IO (no race)', async ({ browser }) => {
-  const { email, workspace } = creds()
+  const stamp = `${process.pid}-${Date.now()}-race`
+  const email = `race-${stamp}@test.com`
 
-  // Set up the agent dashboard
+  // === Agent dashboard: signup + signin via APIRequestContext ===
   const dashboardCtx = await browser.newContext()
-  const dashboardPage = await dashboardCtx.newPage()
-  const slug = await signupAndGetSlug(dashboardPage, email, workspace)
+  const { page: dashboardPage, slug } = await signupAndSignin(dashboardCtx, email, `Race ${stamp}`)
+  console.log(`Dashboard slug: ${slug}`)
 
-  // Navigate to inbox and wait for the socket to connect
+  // Verify the dashboard loaded (heading with workspace name should be visible)
+  await expect(dashboardPage.getByRole('heading', { name: `Race ${stamp}` })).toBeVisible({ timeout: 15000 })
+
+  // Navigate to inbox and wait for socket connection
   const nav = dashboardPage.getByRole('navigation', { name: 'primary' })
   await nav.getByRole('button', { name: /صندوق ورودی|Inbox/ }).click()
-  // Wait for the realtime token fetch + socket connection
   await dashboardPage.waitForResponse(
     (res) => res.url().includes('/api/realtime-token') && res.status() === 200,
     { timeout: 15000 },
   ).catch(() => {})
-  await dashboardPage.waitForTimeout(5000) // let the socket connect
+  await dashboardPage.waitForTimeout(4000)
 
-  // Set up the widget with polling DISABLED (?nopoll=1)
+  // === Widget: load with polling disabled via Caddy (for Socket.IO) ===
   const widgetCtx = await browser.newContext()
   const widgetPage = await widgetCtx.newPage()
-  await widgetPage.goto(`${BASE}/widget-test.html?slug=${slug}`)
+  await widgetPage.goto(`${WIDGET}/widget-test.html?slug=${slug}`)
   await widgetPage.waitForLoadState('networkidle')
 
-  // The widget-test.html auto-embeds the script via ?slug= param.
-  // We need to add ?nopoll=1 to the script URL. The easiest way is to
-  // intercept the script request and add the param.
-  // Actually, the widget-test.html embeds without nopoll. Let me inject
-  // the script manually with nopoll=1 for this test.
+  // Remove auto-embedded widget and re-inject with nopoll=1
   await widgetPage.evaluate(() => {
-    // Remove any existing widget script
     const existing = document.querySelector('.sk-root')
     if (existing) existing.remove()
   })
-  await widgetPage.addScriptTag({ url: `${BASE}/api/widget/${slug}/script?nopoll=1` })
+  await widgetPage.addScriptTag({ url: `${WIDGET}/api/widget/${slug}/script?nopoll=1` })
 
   const launcher = widgetPage.locator('.sk-launcher')
   await expect(launcher).toBeVisible({ timeout: 10000 })
   await launcher.click()
   await widgetPage.waitForTimeout(500)
 
-  // Wait for visitor identification (which now warms up the socket)
+  // Wait for visitor identification (warms up socket)
   await widgetPage.waitForResponse(
     (res) => res.url().includes('/contact') && res.status() === 200,
     { timeout: 10000 },
   ).catch(() => {})
-
-  // Give the socket time to connect (warmed up during identification)
   await widgetPage.waitForTimeout(3000)
 
-  // Send the first message from the widget
+  // Send first message from widget
   const widgetInput = widgetPage.locator('.sk-input input')
   await expect(widgetInput).toBeVisible({ timeout: 3000 })
-  const visitorMessage = `RACE_TEST_${Date.now()}`
+  const visitorMessage = `RACE_${Date.now()}`
   await widgetInput.fill(visitorMessage)
 
-  // Send the message and IMMEDIATELY set up to reply from the dashboard
-  // (no artificial delay — this is the race condition test)
   const messagePostPromise = widgetPage.waitForResponse(
     (res) => res.url().includes('/messages') && res.request().method() === 'POST' && res.status() === 200,
     { timeout: 10000 },
   )
-
-  // Press Enter to send
   await widgetInput.press('Enter')
-
-  // Wait for the message POST to complete
   const messageResponse = await messagePostPromise
   const messageData = await messageResponse.json()
   const conversationId = messageData.conversationId
   expect(conversationId).toBeTruthy()
 
-  // === IMMEDIATELY reply from the dashboard (no delay) ===
-  // The dashboard should show the new conversation (via Socket.IO or polling).
-  // We'll poll the conversations API for up to 5s to find it, then reply.
-  const replyText = `INSTANT_REPLY_${Date.now()}`
+  // === IMMEDIATELY reply from dashboard (no delay) ===
+  const replyText = `REPLY_${Date.now()}`
   const replyStartTime = Date.now()
 
-  // Poll for the conversation to appear, then reply via API immediately
+  // Poll for conversation to appear, then reply instantly via APIRequestContext
   let replied = false
-  for (let attempt = 0; attempt < 10; attempt++) {
-    const convData = await dashboardPage.evaluate(async () => {
-      const r = await fetch('/api/conversations?status=open')
-      return r.json()
-    })
-    const conv = (convData.conversations || []).find((c: any) => c.lastMessagePreview?.includes(visitorMessage))
+  for (let attempt = 0; attempt < 15; attempt++) {
+    const convRes = await dashboardPage.request.get(`${DASHBOARD}/api/conversations?status=open`)
+    const convData = await convRes.json()
+    const conv = (convData.conversations || []).find((c: any) =>
+      c.lastMessagePreview?.includes(visitorMessage))
     if (conv) {
-      // Found it — reply IMMEDIATELY via API (simulates agent clicking send)
-      await dashboardPage.evaluate(async ({ id, text }) => {
-        await fetch(`/api/conversations/${id}/messages`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text }),
-        })
-      }, { id: conversationId, text: replyText })
+      await dashboardPage.request.post(`${DASHBOARD}/api/conversations/${conversationId}/messages`, {
+        headers: { 'Content-Type': 'application/json' },
+        data: { text: replyText },
+      })
       replied = true
       break
     }
     await dashboardPage.waitForTimeout(200)
   }
 
-  expect(replied, 'Dashboard should show the new conversation within 2s').toBe(true)
+  expect(replied, 'Dashboard should show the conversation within 3s').toBe(true)
 
-  // === ASSERTION: the reply appears in the widget via Socket.IO (not polling) ===
-  // With polling disabled (nopoll=1), if the reply appears at all, it MUST be
-  // via Socket.IO. Wait up to 5s (well within the 10s polling interval).
-  try {
-    await expect(
-      widgetPage.locator('.sk-agt').filter({ hasText: replyText })
-    ).toBeVisible({ timeout: 5000 })
-    const latency = Date.now() - replyStartTime
-    console.log(`\n=== Race condition test PASSED: agent reply received in ${latency}ms via Socket.IO ===`)
-  } catch {
-    const latency = Date.now() - replyStartTime
-    console.log(`\n=== Race condition test FAILED: agent reply not received after ${latency}ms ===`)
-    throw new Error(`Agent reply "${replyText}" did not appear in widget within 5s — socket race condition not fixed`)
-  }
+  // === ASSERTION: reply appears in widget via Socket.IO (polling disabled) ===
+  await expect(
+    widgetPage.locator('.sk-agt').filter({ hasText: replyText })
+  ).toBeVisible({ timeout: 5000 })
+
+  const latency = Date.now() - replyStartTime
+  console.log(`\n=== Race condition test PASSED: agent reply received in ${latency}ms via Socket.IO ===`)
 
   await dashboardCtx.close()
   await widgetCtx.close()

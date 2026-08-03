@@ -15,37 +15,41 @@ import { test, expect, type Page } from '@playwright/test'
  *   5. tenantId-explicit convention grep check (separate test)
  */
 
-// IMPORTANT: use port 81 (Caddy gateway) NOT port 3000 directly.
-// Caddy handles the XTransformPort query param and forwards to the realtime
-// service on port 3003. Bypassing Caddy (using :3000 directly) breaks Socket.IO.
+// IMPORTANT: use port 81 (Caddy gateway) for the widget (Socket.IO needs Caddy).
+// The dashboard signup uses Playwright's APIRequestContext for reliable cookie handling.
 const BASE = 'http://localhost:81'
+const DASHBOARD = 'http://localhost:3000'
 
 function creds(label: string) {
   const stamp = `${process.pid}-${Date.now()}-${label}`
   return {
     email: `m2-${stamp}@test.com`,
     workspace: `M2 ${stamp}`,
-    // The slug is derived from the workspace name; the signup route slugifies it
     slug: `m2-${stamp}`.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, ''),
   }
 }
 
 async function signupAndGetSlug(page: Page, email: string, workspace: string): Promise<string> {
+  // API-based signup (reliable, no hydration issues)
+  await page.request.post(`${DASHBOARD}/api/auth/signup`, {
+    data: { email, password: 'password123', name: 'Agent Test', workspaceName: workspace },
+  })
+  const csrfRes = await page.request.get(`${DASHBOARD}/api/auth/csrf`)
+  const { csrfToken } = await csrfRes.json()
+  await page.request.post(`${DASHBOARD}/api/auth/callback/credentials`, {
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    data: `email=${email}&password=password123&csrfToken=${csrfToken}&json=true`,
+  })
+  const tenantRes = await page.request.get(`${DASHBOARD}/api/tenants/me`)
+  const tenantData = await tenantRes.json()
+  const slug = tenantData.tenant?.slug
+
+  // Navigate to the dashboard via Caddy (for Socket.IO) — the session cookie is already set
   await page.goto(BASE)
   await page.waitForLoadState('networkidle')
-  await page.getByLabel(/نام شما|Your name/).fill('Agent Test')
-  await page.getByLabel(/ایمیل|Email/).fill(email)
-  await page.getByLabel(/رمز عبور|Password/).fill('password123')
-  await page.getByLabel(/نام فضای کاری|Workspace name/).fill(workspace)
-  await page.getByRole('button', { name: /ایجاد فضای کاری|Create workspace/ }).click()
-  await page.waitForURL(BASE + '/', { timeout: 15000 })
+  await page.waitForTimeout(3000)
   await expect(page.getByRole('heading', { name: workspace })).toBeVisible({ timeout: 15000 })
-  // Fetch the tenant to get the slug
-  const res = await page.evaluate(async () => {
-    const r = await fetch('/api/tenants/me')
-    return r.json()
-  })
-  return res.tenant.slug
+  return slug
 }
 
 async function createDepartment(page: Page, name: string): Promise<string> {

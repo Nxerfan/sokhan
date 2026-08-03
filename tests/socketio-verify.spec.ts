@@ -17,6 +17,7 @@ import { test, expect, type Page } from '@playwright/test'
  */
 
 const BASE = 'http://localhost:81'
+const DASHBOARD = 'http://localhost:3000'
 
 function creds() {
   const stamp = `${process.pid}-${Date.now()}-socketio`
@@ -27,20 +28,26 @@ function creds() {
 }
 
 async function signupAndGetSlug(page: Page, email: string, workspace: string): Promise<string> {
+  // API-based signup (reliable, no hydration issues)
+  await page.request.post(`${DASHBOARD}/api/auth/signup`, {
+    data: { email, password: 'password123', name: 'Agent Test', workspaceName: workspace },
+  })
+  const csrfRes = await page.request.get(`${DASHBOARD}/api/auth/csrf`)
+  const { csrfToken } = await csrfRes.json()
+  await page.request.post(`${DASHBOARD}/api/auth/callback/credentials`, {
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    data: `email=${email}&password=password123&csrfToken=${csrfToken}&json=true`,
+  })
+  const tenantRes = await page.request.get(`${DASHBOARD}/api/tenants/me`)
+  const tenantData = await tenantRes.json()
+  const slug = tenantData.tenant?.slug
+
+  // Navigate to the dashboard via Caddy (for Socket.IO)
   await page.goto(BASE)
   await page.waitForLoadState('networkidle')
-  await page.getByLabel(/نام شما|Your name/).fill('Agent Test')
-  await page.getByLabel(/ایمیل|Email/).fill(email)
-  await page.getByLabel(/رمز عبور|Password/).fill('password123')
-  await page.getByLabel(/نام فضای کاری|Workspace name/).fill(workspace)
-  await page.getByRole('button', { name: /ایجاد فضای کاری|Create workspace/ }).click()
-  await page.waitForURL(BASE + '/', { timeout: 15000 })
+  await page.waitForTimeout(3000)
   await expect(page.getByRole('heading', { name: workspace })).toBeVisible({ timeout: 15000 })
-  const res = await page.evaluate(async () => {
-    const r = await fetch('/api/tenants/me')
-    return r.json()
-  })
-  return res.tenant.slug
+  return slug
 }
 
 test('Socket.IO delivers widget→dashboard in real-time (polling disabled)', async ({ browser }) => {
