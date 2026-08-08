@@ -29,6 +29,8 @@ model Tenant {
   contacts        Contact[]
   conversations   Conversation[]
   routingRules    RoutingRule[]
+  subscriptions   Subscription[]
+  invoices        Invoice[]
 }
 
 /// Global identity. A user may belong to multiple tenants via Membership.
@@ -150,6 +152,10 @@ model Conversation {
   lastMessageAt  DateTime @default(now())
   lastMessagePreview String @default("")
   unreadCount    Int      @default(0)
+  csatRating     Int?     // 1-5, null = not yet rated
+  csatComment    String?
+  csatAt         DateTime?
+  firstResponseAt DateTime? // when the first agent reply was sent
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -216,4 +222,75 @@ model RoutingRule {
   tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@index([tenantId, enabled])
+}
+
+// ============================================================
+// Module 3 — Billing & payments (Iran-first gateways)
+// ============================================================
+
+/// Catalog of subscription plans. The slug is the canonical identifier used
+/// throughout the app (e.g. `free`, `pro`, `business`, `enterprise`). Limits
+/// are stored as JSON so we can evolve the schema without migrations.
+model Plan {
+  id          String   @id @default(cuid())
+  slug        String   @unique // free | pro | business | enterprise
+  name        String
+  priceToman  Int      @default(0) // 0 for free / contact-sales tiers
+  interval    String   @default("month") // month | year | once
+  limits      Json     // { agents, conversations, departments } — -1 = unlimited
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  subscriptions Subscription[]
+  invoices      Invoice[]
+}
+
+/// A tenant's subscription to a plan. A tenant has at most one active
+/// subscription at a time (status: active). New subscriptions start as
+/// `pending` until the payment callback verifies the payment.
+model Subscription {
+  id          String   @id @default(cuid())
+  tenantId    String
+  planId      String
+  status      String   @default("pending") // pending | active | canceled | expired
+  gateway     String?  // zarinpal | idpay | zarinlink
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+  canceledAt  DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  plan        Plan     @relation(fields: [planId], references: [id], onDelete: Restrict)
+  invoices    Invoice[]
+
+  @@index([tenantId, status])
+}
+
+/// An invoice for a subscription payment. Tracks the lifecycle of a single
+/// payment attempt: pending → paid (or failed). The `authority` is the
+/// gateway-specific token returned by `createPayment` and used to verify on
+/// callback.
+model Invoice {
+  id              String   @id @default(cuid())
+  tenantId        String
+  subscriptionId  String
+  planId          String
+  amountToman     Int
+  gateway         String   // zarinpal | idpay | zarinlink
+  authority       String?  // gateway token (Authority / track_id / token)
+  refId           String?  // gateway reference id returned on verify
+  status          String   @default("pending") // pending | paid | failed
+  callbackUrl     String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  paidAt          DateTime?
+
+  tenant          Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  subscription    Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  plan            Plan         @relation(fields: [planId], references: [id], onDelete: Restrict)
+
+  @@index([tenantId, status])
+  @@index([subscriptionId])
 }

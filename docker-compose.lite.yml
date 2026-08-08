@@ -1,0 +1,112 @@
+# ============================================================
+# Sukhan Live Chat SaaS — Lite Docker Compose
+# ============================================================
+# Includes: Next.js app (SQLite), realtime service (in-memory), Caddy.
+# No Postgres, no Redis — for small VPS / single-user deployments.
+#
+# Usage:
+#   1. Copy .env.docker.example to .env and fill in values.
+#   2. docker compose -f docker-compose.lite.yml up -d
+#
+# Required env (in .env):
+#   - NEXTAUTH_SECRET  (generate with: openssl rand -base64 32)
+#
+# Lite vs Full:
+#   - Database: SQLite file (in a volume) instead of Postgres
+#   - Realtime adapter: in-memory (single instance — no horizontal scaling)
+#   - Resource usage: ~512MB RAM (vs ~1GB for full)
+#   - Backup: copy the SQLite file (vs pg_dump + uploads)
+#
+# Migrating to Full: see SELF_HOSTING.md → "Lite vs Full" section.
+# ============================================================
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sukhan:latest
+    container_name: sukhan-app-lite
+    restart: unless-stopped
+    command: ["web"]
+    environment:
+      # Fail-fast: ${VAR:?error} makes docker-compose refuse to start if unset.
+      NEXTAUTH_SECRET: '${NEXTAUTH_SECRET:?NEXTAUTH_SECRET is required (generate with: openssl rand -base64 32)}'
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost}
+      # SQLite — file lives in the sqlite-data volume for persistence.
+      DATABASE_URL: file:/app/data/sukhan.db
+      # No REDIS_URL — realtime uses the in-memory adapter (single instance).
+      REALTIME_INTERNAL_URL: http://realtime:3004
+      ZARINPAL_MERCHANT_ID: ${ZARINPAL_MERCHANT_ID:-}
+      IDPAY_API_KEY: ${IDPAY_API_KEY:-}
+      NEXT_PUBLIC_APP_NAME: ${NEXT_PUBLIC_APP_NAME:-Sukhan}
+    volumes:
+      - sqlite-data:/app/data
+      - uploads:/app/uploads
+      - logs:/app/logs
+    depends_on:
+      - realtime
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    networks:
+      - sukhan
+
+  realtime:
+    image: sukhan:latest
+    container_name: sukhan-realtime-lite
+    restart: unless-stopped
+    command: ["realtime"]
+    environment:
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?NEXTAUTH_SECRET is required}
+      # No REDIS_URL — uses the in-memory adapter. Single instance only.
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3004/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - sukhan
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: sukhan-caddy-lite
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    environment:
+      # If DOMAIN is empty/unset in .env, default to ":80" (HTTP-only).
+      # When set to a real domain (e.g. chat.example.com), Caddy auto-provisions HTTPS.
+      DOMAIN: ${DOMAIN:-:80}
+      ACME_EMAIL: ${ACME_EMAIL:-admin@example.com}
+    depends_on:
+      - app
+      - realtime
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:80/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - sukhan
+
+volumes:
+  sqlite-data:
+  uploads:
+  logs:
+  caddy-data:
+  caddy-config:
+
+networks:
+  sukhan:
+    driver: bridge

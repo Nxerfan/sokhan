@@ -2,6 +2,7 @@ import type { NextAuthOptions } from 'next-auth'
 import CredentialsProvider from 'next-auth/providers/credentials'
 import bcrypt from 'bcryptjs'
 import { db } from '@/lib/db'
+import '@/lib/env-check' // fails loudly if NEXTAUTH_SECRET is missing
 
 /**
  * NextAuth options (ADR-8). JWT sessions carry userId + email + name + the

@@ -6,14 +6,17 @@ import { NavRail } from './nav-rail'
 import { TopBar } from './top-bar'
 import { CommandPalette } from './command-palette'
 import { useDashboardStore } from './nav-store'
-import { InboxPlaceholder, ComingSoonView } from './views/placeholders'
+import { ComingSoonView } from './views/placeholders'
 import { InboxView } from './views/inbox-view'
 import { MembersPanel } from './views/members-panel'
 import { DepartmentsPanel } from './views/departments-panel'
 import { WidgetPanel } from './views/widget-panel'
 import { GeneralPanel } from './views/general-panel'
 import { RoutingRulesPanel } from './views/routing-rules-panel'
-import { Users, BarChart3, Workflow, Plug, CreditCard } from 'lucide-react'
+import { BillingPanel } from './views/billing-panel'
+import { ContactsPanel } from './views/contacts-panel'
+import { AnalyticsPanel } from './views/analytics-panel'
+import { Users, BarChart3, Workflow, Plug } from 'lucide-react'
 
 type TenantInfo = { id: string; name: string; slug: string }
 
@@ -41,12 +44,8 @@ export function DashboardShell() {
         <TopBar workspaceName={workspaceName} />
         <main className="flex flex-1 flex-col overflow-y-auto scroll-thin">
           {view === 'inbox' && <InboxView />}
-          {view === 'contacts' && (
-            <ComingSoonView icon={Users} title={t('nav.contacts')} hint={t('dashboard.comingSoonHint')} />
-          )}
-          {view === 'analytics' && (
-            <ComingSoonView icon={BarChart3} title={t('nav.analytics')} hint={t('dashboard.comingSoonHint')} />
-          )}
+          {view === 'contacts' && <ContactsPanel />}
+          {view === 'analytics' && <AnalyticsPanel />}
           {view === 'automation' && <RoutingRulesPanel departments={departments} />}
           {view === 'integrations' && (
             <ComingSoonView icon={Plug} title={t('nav.integrations')} hint={t('dashboard.comingSoonHint')} />
@@ -55,9 +54,7 @@ export function DashboardShell() {
           {view === 'departments' && <DepartmentsPanel />}
           {view === 'widget' && tenant && <WidgetPanel slug={tenant.slug} />}
           {view === 'general' && <GeneralPanel />}
-          {view === 'billing' && (
-            <ComingSoonView icon={CreditCard} title={t('nav.billing')} hint={t('dashboard.comingSoonHint')} />
-          )}
+          {view === 'billing' && <BillingPanel />}
         </main>
       </div>
       <CommandPalette />

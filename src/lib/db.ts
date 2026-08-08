@@ -21,6 +21,7 @@ import { PrismaClient, type Prisma } from '@prisma/client'
  *
  * Module 1 models: Membership, Department, DepartmentMember, WidgetConfig
  * Module 2 models: Contact, Conversation, Message, Participant, RoutingRule
+ * Module 3 models: Subscription, Invoice (Plan is global — NOT tenant-scoped)
  */
 const TENANT_SCOPED_MODELS = [
   'Membership',
@@ -32,6 +33,8 @@ const TENANT_SCOPED_MODELS = [
   'Message',
   'Participant',
   'RoutingRule',
+  'Subscription',
+  'Invoice',
 ] as const
 
 type TenantScopedModel = (typeof TENANT_SCOPED_MODELS)[number]

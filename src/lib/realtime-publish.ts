@@ -10,8 +10,10 @@
  * endpoint. The function signature stays the same.
  */
 
+import { AUTH_SECRET } from './env-check'
+
 const REALTIME_INTERNAL_URL = process.env.REALTIME_INTERNAL_URL || 'http://localhost:3004'
-const INTERNAL_SECRET = process.env.NEXTAUTH_SECRET || 'dev-secret-change-me'
+const INTERNAL_SECRET = AUTH_SECRET
 
 export interface RealtimeEvent {
   room: string

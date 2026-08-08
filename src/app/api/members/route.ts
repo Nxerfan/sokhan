@@ -1,6 +1,7 @@
 import { NextResponse, NextRequest } from 'next/server'
 import { withSessionTenant, hasRole, getCurrentTenantId } from '@/lib/auth'
 import { db } from '@/lib/db'
+import { enforceCurrentTenantPlanLimit, PlanLimitExceededError } from '@/lib/payments/gating'
 export async function GET() {
   const result = await withSessionTenant(async () => {
     return db.membership.findMany({
@@ -23,6 +24,16 @@ export async function POST(req: NextRequest) {
       ? body.role
       : 'agent'
     if (!email) return { error: 'invalid_email' as const }
+
+    // Plan gating: check agent limit before adding a new member.
+    try {
+      await enforceCurrentTenantPlanLimit('agents')
+    } catch (e) {
+      if (e instanceof PlanLimitExceededError) {
+        return { planLimit: e.result }
+      }
+      throw e
+    }
 
     // Module-1 simplification: if the user exists globally, attach them to this
     // workspace; otherwise create a placeholder user (no password) that will
@@ -51,6 +62,19 @@ export async function POST(req: NextRequest) {
   })
   if (!result) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
   if ('forbidden' in result.result) return NextResponse.json({ error: 'forbidden' }, { status: 403 })
+  if ('planLimit' in result.result) {
+    const r = result.result as { planLimit: { current: number; limit: number; planSlug: string } }
+    return NextResponse.json(
+      {
+        error: 'plan_limit_exceeded',
+        limit: 'agents',
+        current: r.planLimit.current,
+        max: r.planLimit.limit,
+        plan: r.planLimit.planSlug,
+      },
+      { status: 402 },
+    )
+  }
   if ('error' in result.result) return NextResponse.json({ error: result.result.error }, { status: 400 })
   return NextResponse.json({ membership: result.result.membership })
 }

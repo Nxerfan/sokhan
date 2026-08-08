@@ -130,5 +130,60 @@
   "footer": {
     "rights": "تمامی حقوق محفوظ است.",
     "agplNotice": "متن‌باز هسته تحت AGPL-3.0. کد منبع در صورت درخواست در دسترس است."
+  },
+  "billing": {
+    "title": "صورتحساب",
+    "subtitle": "مدیریت پلن، روش پرداخت و میزان استفاده.",
+    "currentPlan": "پلن فعلی",
+    "currentPlanHint": "اشتراک فعال و میزان استفادهٔ فعلی شما.",
+    "current": "فعلی",
+    "free": "رایگان",
+    "toman": "تومان",
+    "tomanPerMonth": "تومان / ماه",
+    "unlimited": "نامحدود",
+    "noUsageData": "اطلاعات استفاده در دسترس نیست.",
+    "subscriptionStatus": "وضعیت",
+    "gateway": "درگاه",
+    "renewsOn": "تمدید در",
+    "choosePlan": "انتخاب پلن",
+    "chooseGateway": "انتخاب درگاه پرداخت",
+    "chooseGatewayHint": "درگاه‌های ایران‌محور. برای تکمیل پرداخت منتقل می‌شوید.",
+    "selectPlan": "ابتدا یک پلن انتخاب کنید.",
+    "subscribe": "پرداخت",
+    "subscribeFailed": "پرداخت ناموفق بود",
+    "planActivated": "پلن فعال شد",
+    "redirectingToGateway": "در حال انتقال به درگاه…",
+    "testModeRedirect": "حالت آزمایشی — شبیه‌سازی پرداخت…",
+    "paymentSuccess": "پرداخت موفق — پلن شما فعال شد.",
+    "paymentFailed": "پرداخت ناموفق بود",
+    "paymentCanceled": "پرداخت لغو شد.",
+    "invoices": "فاکتورهای اخیر",
+    "testModeNotice": "درگاه‌ها در حالت آزمایشی هستند — پرداخت‌ها شبیه‌سازی می‌شوند و همیشه موفقند. برای فعال‌سازی پرداخت واقعی، متغیرهای محیطی ZARINPAL_MERCHANT_ID، IDPAY_API_KEY و ZARINLINK_URL را تنظیم کنید.",
+    "usage": {
+      "agents": "کارشناسان",
+      "conversations": "گفت‌وگوها (این ماه)",
+      "departments": "دپارتمان‌ها"
+    },
+    "limits": {
+      "agents": "کارشناسان",
+      "conversations": "گفت‌وگو / ماه",
+      "departments": "دپارتمان"
+    },
+    "status": {
+      "pending": "در انتظار",
+      "active": "فعال",
+      "canceled": "لغو شده",
+      "expired": "منقضی"
+    },
+    "invoiceStatus": {
+      "pending": "در انتظار",
+      "paid": "پرداخت شده",
+      "failed": "ناموفق"
+    },
+    "enterprise": {
+      "name": "سازمانی",
+      "hint": "حجم سفارشی، SLA و استقرار درون‌سازمانی.",
+      "contactSales": "تماس با فروش"
+    }
   }
 }

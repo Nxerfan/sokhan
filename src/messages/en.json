@@ -130,5 +130,60 @@
   "footer": {
     "rights": "All rights reserved.",
     "agplNotice": "Open-core under AGPL-3.0. Source available on request."
+  },
+  "billing": {
+    "title": "Billing",
+    "subtitle": "Manage your plan, payment method and usage.",
+    "currentPlan": "Current plan",
+    "currentPlanHint": "Your active subscription and current usage.",
+    "current": "Current",
+    "free": "Free",
+    "toman": "Toman",
+    "tomanPerMonth": "Toman / month",
+    "unlimited": "Unlimited",
+    "noUsageData": "Usage data unavailable.",
+    "subscriptionStatus": "Status",
+    "gateway": "Gateway",
+    "renewsOn": "Renews on",
+    "choosePlan": "Choose a plan",
+    "chooseGateway": "Choose a payment gateway",
+    "chooseGatewayHint": "Iran-first gateways. You will be redirected to complete payment.",
+    "selectPlan": "Please select a plan first.",
+    "subscribe": "Subscribe",
+    "subscribeFailed": "Subscription failed",
+    "planActivated": "Plan activated",
+    "redirectingToGateway": "Redirecting to gateway…",
+    "testModeRedirect": "Test mode — simulating payment…",
+    "paymentSuccess": "Payment successful — your plan is now active.",
+    "paymentFailed": "Payment failed",
+    "paymentCanceled": "Payment was canceled.",
+    "invoices": "Recent invoices",
+    "testModeNotice": "Gateways are running in test mode — payments are simulated and always succeed. Set ZARINPAL_MERCHANT_ID, IDPAY_API_KEY, ZARINLINK_URL env vars to enable real payments.",
+    "usage": {
+      "agents": "Agents",
+      "conversations": "Conversations (this month)",
+      "departments": "Departments"
+    },
+    "limits": {
+      "agents": "Agents",
+      "conversations": "Conversations / month",
+      "departments": "Departments"
+    },
+    "status": {
+      "pending": "Pending",
+      "active": "Active",
+      "canceled": "Canceled",
+      "expired": "Expired"
+    },
+    "invoiceStatus": {
+      "pending": "Pending",
+      "paid": "Paid",
+      "failed": "Failed"
+    },
+    "enterprise": {
+      "name": "Enterprise",
+      "hint": "Custom volume, SLA and on-prem deployment.",
+      "contactSales": "Contact sales"
+    }
   }
 }

@@ -1,0 +1,66 @@
+# Build context exclusions — keeps the image small + build fast by not
+# sending dev-only files to the Docker daemon.
+#
+# Anything not listed here gets sent to the daemon as part of the build
+# context (COPY . . in the builder stage). Large or unnecessary files
+# slow down the build and bloat the image.
+
+# Dependencies (reinstalled inside the image from lockfiles)
+node_modules
+**/node_modules
+
+# Next.js build output (rebuilt inside the image)
+.next
+out
+build
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Logs + runtime data
+*.log
+dev.log
+server.log
+realtime.log
+test-results
+uploads
+logs
+db
+*.db
+
+# Tests + examples (not needed in the image)
+tests
+examples
+download
+playwright.config.ts
+playwright-report
+
+# Screenshots + docs (not needed at runtime)
+screenshot-*.png
+*.md
+!SELF_HOSTING.md
+README.md
+
+# Env files (passed via docker-compose environment, not baked into image)
+.env
+.env.*
+!.env.docker.example
+
+# Editor + OS cruft
+.DS_Store
+.vscode
+.idea
+*.swp
+*.swo
+
+# Sandbox-specific tooling
+skills
+.zscripts
+.claude
+.z-ai-config
+TODO
+
+# The sandbox Caddyfile — we use docker/Caddyfile instead.
+Caddyfile

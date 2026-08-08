@@ -1,0 +1,50 @@
+# ============================================================
+# Sukhan Caddy reverse proxy (Docker edition)
+# ============================================================
+# Routes traffic to the Next.js app and the realtime Socket.IO service.
+# Uses the SAME XTransformPort query-param pattern as the sandbox
+# Caddyfile so widget + dashboard clients don't need to know they're
+# talking to Docker services — they just use relative URLs with
+# ?XTransformPort=3003 for Socket.IO handshakes.
+#
+# Set DOMAIN env var to your domain (e.g. chat.example.com) for auto-HTTPS
+# via Let's Encrypt. Leave empty for HTTP-only on port 80 (local/testing).
+# ============================================================
+
+{
+    # Email for Let's Encrypt certificate expiry notifications.
+    # Only used when DOMAIN is set.
+    email {$ACME_EMAIL:admin@example.com}
+
+    # Disable the admin API (not needed in production).
+    admin off
+}
+
+# Site address: if DOMAIN is set, use it (enables auto-HTTPS on 80+443).
+# Otherwise fall back to :80 (HTTP only, for local testing).
+{$DOMAIN::80} {
+    # Socket.IO traffic — identified by ?XTransformPort=<port> query.
+    # The widget + dashboard connect with ?XTransformPort=3003 to reach
+    # the realtime Socket.IO server (instead of going to the Next.js app).
+    @transform_port_query {
+        query XTransformPort=*
+    }
+    handle @transform_port_query {
+        reverse_proxy realtime:{query.XTransformPort} {
+            header_up Host {host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+            header_up X-Real-IP {remote_host}
+        }
+    }
+
+    # Everything else → Next.js app.
+    handle {
+        reverse_proxy app:3000 {
+            header_up Host {host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+            header_up X-Real-IP {remote_host}
+        }
+    }
+}

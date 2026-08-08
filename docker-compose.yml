@@ -1,0 +1,163 @@
+# ============================================================
+# Sukhan Live Chat SaaS — Full Docker Compose
+# ============================================================
+# Includes: Next.js app, realtime service, Postgres, Redis, Caddy.
+# Best for: production, multi-user/multi-tenant, horizontal scaling.
+#
+# Usage:
+#   1. Copy .env.docker.example to .env and fill in values.
+#   2. docker compose up -d
+#   3. docker compose ps   (all services should be "healthy")
+#
+# Required env (set in .env):
+#   - NEXTAUTH_SECRET  (generate with: openssl rand -base64 32)
+#   - POSTGRES_PASSWORD
+#
+# Optional env (in .env):
+#   - DOMAIN            (your domain for auto-HTTPS; leave empty for HTTP)
+#   - ACME_EMAIL        (Let's Encrypt notifications)
+#   - NEXTAUTH_URL      (defaults to http://localhost)
+#   - ZARINPAL_MERCHANT_ID, IDPAY_API_KEY (payment gateways)
+# ============================================================
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sukhan:latest
+    container_name: sukhan-app
+    restart: unless-stopped
+    command: ["web"]
+    environment:
+      # Fail-fast: ${VAR:?error} makes docker-compose refuse to start if unset.
+      NEXTAUTH_SECRET: '${NEXTAUTH_SECRET:?NEXTAUTH_SECRET is required (generate with: openssl rand -base64 32)}'
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost}
+      # Postgres connection string — built from POSTGRES_PASSWORD.
+      DATABASE_URL: postgresql://sukhan:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/sukhan?schema=public
+      # Redis for realtime adapter + future caching/queues.
+      REDIS_URL: redis://redis:6379
+      # Internal publish URL — server-to-server HTTP to the realtime service.
+      REALTIME_INTERNAL_URL: http://realtime:3004
+      # Payment gateway credentials (optional — empty if not configured).
+      ZARINPAL_MERCHANT_ID: ${ZARINPAL_MERCHANT_ID:-}
+      IDPAY_API_KEY: ${IDPAY_API_KEY:-}
+      # Public branding.
+      NEXT_PUBLIC_APP_NAME: ${NEXT_PUBLIC_APP_NAME:-Sukhan}
+    volumes:
+      - uploads:/app/uploads
+      - logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # /api returns 200 from the catch-all route — basic liveness check.
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    networks:
+      - sukhan
+
+  realtime:
+    # Reuses the same image (built once, runs in realtime mode via command).
+    image: sukhan:latest
+    container_name: sukhan-realtime
+    restart: unless-stopped
+    command: ["realtime"]
+    environment:
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?NEXTAUTH_SECRET is required}
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # /health returns JSON { ok: true, connections: N, redis: bool }
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3004/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - sukhan
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: sukhan-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sukhan
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: sukhan
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # pg_isready returns 0 when Postgres is ready to accept connections.
+      test: ["CMD-SHELL", "pg_isready -U sukhan -d sukhan"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - sukhan
+
+  redis:
+    image: redis:7-alpine
+    container_name: sukhan-redis
+    restart: unless-stopped
+    # Appendonly enabled for durability across container restarts.
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - sukhan
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: sukhan-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # The Docker-specific Caddyfile (NOT the sandbox Caddyfile).
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    environment:
+      # If DOMAIN is empty/unset in .env, default to ":80" (HTTP-only).
+      # When set to a real domain (e.g. chat.example.com), Caddy auto-provisions HTTPS.
+      DOMAIN: ${DOMAIN:-:80}
+      ACME_EMAIL: ${ACME_EMAIL:-admin@example.com}
+    depends_on:
+      - app
+      - realtime
+    healthcheck:
+      # Caddy responds to any request with a status line — HEAD / is enough.
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:80/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - sukhan
+
+volumes:
+  postgres-data:
+  redis-data:
+  caddy-data:
+  caddy-config:
+  uploads:
+  logs:
+
+networks:
+  sukhan:
+    driver: bridge

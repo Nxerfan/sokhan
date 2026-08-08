@@ -287,6 +287,18 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean): st
         if (!state.open) {
           pulseDot.style.display = 'block';
         }
+        // If this is a system message about conversation closure, show CSAT survey
+        if (msg.senderType === 'system' && msg.content && msg.content.text &&
+            (msg.content.text.indexOf('closed') >= 0 || msg.content.text.indexOf('بسته') >= 0 ||
+             msg.content.text.indexOf('resolved') >= 0 || msg.content.text.indexOf('حل') >= 0)) {
+          showCsatSurvey();
+        }
+      });
+      // Listen for conversation status changes (closed → show CSAT)
+      state.socket.on('conversation:updated', function(data){
+        if (data && data.changes && data.changes.status === 'closed') {
+          showCsatSurvey();
+        }
       });
       state.socket.on('typing:start', function(data){
         if (data.senderType === 'agent') {
@@ -432,6 +444,99 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean): st
 
   function scrollBody(){
     if (bodyEl) bodyEl.scrollTop = bodyEl.scrollHeight;
+  }
+
+  // ---- CSAT Survey (shown when conversation is closed) ----
+  var csatShown = false;
+  function showCsatSurvey(){
+    if (csatShown || !state.conversationId || !state.token) return;
+    csatShown = true;
+
+    var csatOverlay = el('div', 'sk-csat');
+    css(csatOverlay, {
+      position:'absolute', top:'0', left:'0', right:'0', bottom:'0',
+      background:'rgba(0,0,0,.5)', display:'flex', alignItems:'center', justifyContent:'center',
+      zIndex:'10', opacity:'0', transition:'opacity .2s ease'
+    });
+
+    var csatCard = el('div', 'sk-csat-card');
+    var accent = (state.config && state.config.accentColor) || '#E09A2B';
+    css(csatCard, {
+      background:'#fff', borderRadius:'16px', padding:'24px', maxWidth:'280px', width:'90%',
+      textAlign:'center', fontFamily:'inherit', boxShadow:'0 20px 60px rgba(0,0,0,.3)'
+    });
+
+    var title = el('div', '', state.locale === 'fa' ? 'چقدر راضی بودید؟' : 'How satisfied were you?');
+    css(title, { fontSize:'16px', fontWeight:'600', marginBottom:'16px', color:'#0E1116' });
+
+    var stars = el('div', 'sk-csat-stars');
+    css(stars, { display:'flex', justifyContent:'center', gap:'8px', marginBottom:'16px' });
+
+    for (var i = 1; i <= 5; i++) {
+      (function(rating) {
+        var star = el('button', 'sk-star');
+        star.innerHTML = '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#ccc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>';
+        css(star, { background:'none', border:'none', cursor:'pointer', padding:'0', transition:'transform .1s' });
+        star.onmouseenter = function(){ star.style.transform = 'scale(1.2)'; };
+        star.onmouseleave = function(){ star.style.transform = 'scale(1)'; };
+        star.onclick = function() {
+          // Highlight selected + all lower stars
+          var allStars = stars.querySelectorAll('.sk-star svg');
+          for (var s = 0; s < allStars.length; s++) {
+            if (s < rating) {
+              allStars[s].setAttribute('stroke', accent);
+              allStars[s].setAttribute('fill', accent);
+            } else {
+              allStars[s].setAttribute('stroke', '#ccc');
+              allStars[s].setAttribute('fill', 'none');
+            }
+          }
+          // Submit after a short delay
+          setTimeout(function() { submitCsat(rating, null); }, 300);
+        };
+        stars.appendChild(star);
+      })(i);
+    }
+
+    var skip = el('button', '', state.locale === 'fa' ? 'نادیده بگیر' : 'Skip');
+    css(skip, { background:'none', border:'none', color:'#888', fontSize:'12px', cursor:'pointer', marginTop:'8px' });
+    skip.onclick = function() { removeCsat(); };
+
+    csatCard.appendChild(title);
+    csatCard.appendChild(stars);
+    csatCard.appendChild(skip);
+    csatOverlay.appendChild(csatCard);
+    panel.appendChild(csatOverlay);
+
+    // Fade in
+    setTimeout(function(){ csatOverlay.style.opacity = '1'; }, 10);
+
+    function removeCsat(){
+      csatOverlay.style.opacity = '0';
+      setTimeout(function(){ if (csatOverlay.parentNode) csatOverlay.parentNode.removeChild(csatOverlay); }, 200);
+    }
+
+    function submitCsat(rating, comment) {
+      fetch('/api/widget/' + SLUG + '/csat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + state.token },
+        body: JSON.stringify({ conversationId: state.conversationId, rating: rating, comment: comment })
+      })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var msg = data.ok
+          ? (state.locale === 'fa' ? 'ممنون از بازخورد شما!' : 'Thanks for your feedback!')
+          : (state.locale === 'fa' ? 'خطا در ثبت امتیاز' : 'Error submitting rating');
+        title.textContent = msg;
+        stars.style.display = 'none';
+        skip.textContent = state.locale === 'fa' ? 'بستن' : 'Close';
+        setTimeout(removeCsat, 2000);
+      })
+      .catch(function(){
+        title.textContent = state.locale === 'fa' ? 'خطا در ثبت امتیاز' : 'Error submitting rating';
+        setTimeout(removeCsat, 2000);
+      });
+    }
   }
 
   function injectStyles(accent){

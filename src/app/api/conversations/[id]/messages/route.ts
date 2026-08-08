@@ -61,6 +61,7 @@ export async function POST(
     })
 
     // Update conversation metadata + reset unread — tenantId explicit (Module 2 convention)
+    // Also set firstResponseAt if this is the first agent reply (null → now)
     await db.conversation.updateMany({
       where: { id, tenantId: session.user.workspaceId! },
       data: {
@@ -68,6 +69,7 @@ export async function POST(
         lastMessagePreview: text.slice(0, 120) || (attachments ? '[attachment]' : ''),
         unreadCount: 0,
         status: conversation.status === 'closed' ? 'open' : conversation.status,
+        firstResponseAt: conversation.firstResponseAt ? undefined : new Date(),
       },
     })
 

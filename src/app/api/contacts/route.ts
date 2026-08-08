@@ -18,6 +18,7 @@ export async function GET() {
         identifierType: true,
         lastSeenAt: true,
         createdAt: true,
+        _count: { select: { conversations: true } },
       },
     })
   })

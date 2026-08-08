@@ -1,21 +1,17 @@
 import crypto from 'crypto'
+import { AUTH_SECRET } from './env-check'
 
 /**
  * Realtime token — a lightweight HMAC-signed token used to authenticate
  * Socket.IO connections for BOTH agents (dashboard) and visitors (widget).
  *
- * This is separate from NextAuth's JWT because the realtime service is a
- * separate process that should not depend on NextAuth internals. The token
- * is signed with the same NEXTAUTH_SECRET, so the realtime service can verify
- * it without any NextAuth dependency.
+ * Uses the same NEXTAUTH_SECRET as NextAuth (via env-check safeguard), so
+ * the realtime service can verify tokens without any NextAuth dependency.
  *
  * Format: base64url(payload).base64url(hmac_sha256(payload, secret))
- *
- * Agent token payload:  { type: 'agent', userId, tenantId, role }
- * Visitor token payload: { type: 'visitor', contactId, tenantId, slug }
  */
 
-const SECRET = process.env.NEXTAUTH_SECRET || 'dev-secret-change-me'
+const SECRET = AUTH_SECRET
 
 function b64url(input: string | Buffer): string {
   const buf = typeof input === 'string' ? Buffer.from(input) : input

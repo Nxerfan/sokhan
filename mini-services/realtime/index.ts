@@ -5,13 +5,22 @@ import { readFileSync } from 'fs'
 import { resolve } from 'path'
 
 /**
- * Sukhan Realtime Service (Module 2)
+ * Sukhan Realtime Service (Module 2 + Module 3 Docker)
  *
  * Two HTTP servers:
  *   - Port 3003: Socket.IO server (path: '/') — handles realtime connections
  *     from the widget and dashboard, forwarded by Caddy via XTransformPort.
  *   - Port 3004: Internal HTTP server — handles /internal/publish calls from
  *     Next.js API routes. NOT exposed through Caddy; server-to-server only.
+ *
+ * Redis (optional, enabled when REDIS_URL is set):
+ *   - Socket.IO adapter (@socket.io/redis-adapter) for cross-instance
+ *     broadcast of socket events (typing, read receipts, etc.). Required
+ *     when running multiple realtime replicas behind a load balancer.
+ *   - Pub/sub subscription on 'sukhan:realtime:publish' — an alternative
+ *     to the HTTP /internal/publish endpoint. Next.js can publish events
+ *     via Redis PUBLISH (lower latency, no HTTP overhead). The HTTP
+ *     endpoint is kept as a fallback for backwards compatibility.
  *
  * IMPORTANT: loads NEXTAUTH_SECRET from the parent project's .env so token
  * signing/verification matches the Next.js app. Without this, the realtime
@@ -21,31 +30,55 @@ import { resolve } from 'path'
  * No database access — this service is a pure message broker.
  */
 
-// Load .env from the parent project (sandbox: the mini-service runs in its own
-// process and doesn't inherit the parent's env). In production with Docker
-// Compose, the env is passed explicitly and this file load is a no-op.
-try {
-  const envPath = resolve(process.cwd(), '..', '..', '.env')
-  const envContent = readFileSync(envPath, 'utf-8')
-  for (const line of envContent.split('\n')) {
-    const trimmed = line.trim()
-    if (!trimmed || trimmed.startsWith('#')) continue
-    const eqIdx = trimmed.indexOf('=')
-    if (eqIdx === -1) continue
-    const key = trimmed.slice(0, eqIdx).trim()
-    const value = trimmed.slice(eqIdx + 1).trim()
-    if (!process.env[key]) process.env[key] = value
+// Load .env AND .env.local from the parent project (sandbox: the mini-service
+// runs in its own process and doesn't inherit the parent's env, and bun doesn't
+// auto-load .env.local like Next.js does). In production with Docker Compose,
+// the env is passed explicitly and this file load is a no-op.
+//
+// Load order: .env first, then .env.local — .env.local OVERWRITES values from
+// .env (matching Next.js behavior where .env.local takes precedence).
+function loadEnvFile(filePath: string, overwrite = false) {
+  try {
+    const envContent = readFileSync(filePath, 'utf-8')
+    for (const line of envContent.split('\n')) {
+      const trimmed = line.trim()
+      if (!trimmed || trimmed.startsWith('#')) continue
+      const eqIdx = trimmed.indexOf('=')
+      if (eqIdx === -1) continue
+      const key = trimmed.slice(0, eqIdx).trim()
+      const value = trimmed.slice(eqIdx + 1).trim()
+      if (overwrite || !process.env[key]) process.env[key] = value
+    }
+    console.log('[env] loaded', filePath)
+  } catch {
+    // file doesn't exist — skip
   }
-  console.log('[env] loaded .env from', envPath)
-} catch (e) {
-  console.log('[env] no parent .env found, using process.env directly')
 }
+
+const parentDir = resolve(process.cwd(), '..', '..')
+loadEnvFile(resolve(parentDir, '.env'))
+loadEnvFile(resolve(parentDir, '.env.local'), true) // overwrite — .env.local takes precedence
 
 const SOCKET_PORT = 3003
 const INTERNAL_PORT = 3004
-const SECRET = process.env.NEXTAUTH_SECRET || 'dev-secret-change-me'
+
+// Fail loudly if NEXTAUTH_SECRET is missing — don't silently fall back.
+// This prevents the mysterious auth failures that took hours to debug.
+if (!process.env.NEXTAUTH_SECRET) {
+  console.error('\n❌ FATAL: NEXTAUTH_SECRET is not set.')
+  console.error('   Create a .env.local file with: NEXTAUTH_SECRET=<random-32-byte-base64>')
+  console.error('   Generate one with: openssl rand -base64 32\n')
+  process.exit(1)
+}
+const SECRET = process.env.NEXTAUTH_SECRET
+const REDIS_URL = process.env.REDIS_URL
 
 console.log('[secret] using NEXTAUTH_SECRET:', SECRET.slice(0, 8) + '...')
+if (REDIS_URL) {
+  console.log('[redis] REDIS_URL set — will enable adapter + pub/sub subscription')
+} else {
+  console.log('[redis] REDIS_URL not set — using in-memory adapter (single instance only)')
+}
 
 // ============================================================
 // Token verification (mirrors src/lib/realtime-token.ts)
@@ -157,19 +190,94 @@ io.on('connection', (socket: AuthenticatedSocket) => {
 })
 
 // ============================================================
+// Redis adapter + pub/sub (optional, when REDIS_URL is set)
+// ============================================================
+//
+// The adapter enables cross-instance broadcast of Socket.IO events. With
+// multiple realtime replicas behind a load balancer, a socket event emitted
+// on instance A is delivered to sockets connected to instances B, C, etc.
+//
+// The pub/sub subscription is an alternative to the HTTP /internal/publish
+// endpoint. When REDIS_URL is set, Next.js API routes SHOULD publish via
+// Redis PUBLISH to the 'sukhan:realtime:publish' channel. The HTTP endpoint
+// is kept as a fallback for backwards compatibility.
+//
+// To avoid duplicate delivery when multiple realtime instances each receive
+// the same Redis publish, we use `io.local.to(room).emit(...)` on the Redis
+// subscription path — `local` means "emit only to sockets on THIS instance".
+// Each realtime instance receives the Redis publish and emits to its own
+// local sockets. The HTTP endpoint, by contrast, uses `io.to(room).emit(...)`
+// (with adapter fan-out) so a single HTTP POST reaches all instances' sockets.
+const PUBLISH_CHANNEL = 'sukhan:realtime:publish'
+let redisEnabled = false
+
+async function setupRedis() {
+  if (!REDIS_URL) return
+
+  try {
+    const { createClient } = await import('redis')
+    const { createAdapter } = await import('@socket.io/redis-adapter')
+
+    const pubClient = createClient({ url: REDIS_URL })
+    const subClient = pubClient.duplicate()
+    const publishSubscriber = pubClient.duplicate()
+
+    pubClient.on('error', (e: Error) => console.error('[redis] pub client error:', e.message))
+    subClient.on('error', (e: Error) => console.error('[redis] sub client error:', e.message))
+    publishSubscriber.on('error', (e: Error) => console.error('[redis] publish-subscriber error:', e.message))
+
+    await Promise.all([
+      pubClient.connect(),
+      subClient.connect(),
+      publishSubscriber.connect(),
+    ])
+
+    // Adapter for cross-instance Socket.IO event broadcast (typing, read receipts, etc.)
+    io.adapter(createAdapter(pubClient, subClient))
+
+    // Subscribe to the app-level publish channel (alternative to the HTTP endpoint)
+    await publishSubscriber.subscribe(PUBLISH_CHANNEL, (message: string) => {
+      try {
+        const { room, event, payload } = JSON.parse(message)
+        if (room && event) {
+          // io.local = emit only to sockets on THIS instance (no adapter fan-out).
+          // Each realtime instance receives the Redis publish and emits to its
+          // own local sockets — no duplication.
+          io.local.to(room).emit(event, payload)
+          console.log(`[publish:redis] room=${room} event=${event}`)
+        }
+      } catch (e) {
+        console.error('[publish:redis] invalid message:', e instanceof Error ? e.message : e)
+      }
+    })
+
+    redisEnabled = true
+    console.log(`[redis] adapter + publish channel "${PUBLISH_CHANNEL}" subscribed`)
+  } catch (e) {
+    console.error(
+      '[redis] setup failed — falling back to in-memory adapter:',
+      e instanceof Error ? e.message : e
+    )
+    console.error(
+      '[redis] multi-instance broadcast will NOT work. Set REDIS_URL correctly or use a single realtime replica.'
+    )
+  }
+}
+
+// ============================================================
 // Internal HTTP server (port 3004 — server-to-server only)
 // ============================================================
 const internalServer = createServer((req: IncomingMessage, res: ServerResponse) => {
   if (req.method === 'GET' && req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, connections: io.engine.clientsCount }))
+    res.end(JSON.stringify({ ok: true, connections: io.engine.clientsCount, redis: redisEnabled }))
     return
   }
 
   if (req.method === 'POST' && req.url === '/internal/publish') {
     const authHeader = req.headers['x-internal-secret']
     if (authHeader !== SECRET) {
-      console.log('[publish] forbidden — secret mismatch')
+      console.log('[publish:http] forbidden — secret mismatch')
       res.writeHead(403)
       res.end('forbidden')
       return
@@ -180,8 +288,11 @@ const internalServer = createServer((req: IncomingMessage, res: ServerResponse) 
       try {
         const { room: roomName, event, payload } = JSON.parse(body)
         if (roomName && event) {
+          // When Redis adapter is enabled, io.to() broadcasts across all
+          // instances via the adapter. When it's not, this emits locally.
+          // Either way, the HTTP endpoint works correctly as a fallback.
           io.to(roomName).emit(event, payload)
-          console.log(`[publish] room=${roomName} event=${event}`)
+          console.log(`[publish:http] room=${roomName} event=${event}`)
         }
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end('{"ok":true}')
@@ -198,7 +309,7 @@ const internalServer = createServer((req: IncomingMessage, res: ServerResponse) 
 })
 
 // ============================================================
-// Start both servers
+// Start both servers (Redis is set up async, non-blocking)
 // ============================================================
 socketServer.listen(SOCKET_PORT, () => {
   console.log(`Sukhan realtime Socket.IO on port ${SOCKET_PORT}`)
@@ -206,6 +317,12 @@ socketServer.listen(SOCKET_PORT, () => {
 
 internalServer.listen(INTERNAL_PORT, () => {
   console.log(`Sukhan realtime internal HTTP on port ${INTERNAL_PORT}`)
+})
+
+// Set up Redis after servers are listening — non-blocking.
+// If Redis is unavailable, the service continues with the in-memory adapter.
+setupRedis().catch((e) => {
+  console.error('[redis] setup threw:', e instanceof Error ? e.message : e)
 })
 
 // Graceful shutdown
