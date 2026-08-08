@@ -1,5 +1,5 @@
 import crypto from 'crypto'
-import { AUTH_SECRET } from './env-check'
+import { getAuthSecret } from './env-check'
 
 /**
  * Realtime token — a lightweight HMAC-signed token used to authenticate
@@ -11,7 +11,7 @@ import { AUTH_SECRET } from './env-check'
  * Format: base64url(payload).base64url(hmac_sha256(payload, secret))
  */
 
-const SECRET = AUTH_SECRET
+const SECRET = getAuthSecret()
 
 function b64url(input: string | Buffer): string {
   const buf = typeof input === 'string' ? Buffer.from(input) : input
