@@ -31,6 +31,10 @@ model Tenant {
   routingRules    RoutingRule[]
   subscriptions   Subscription[]
   invoices        Invoice[]
+  faqPairs        FaqPair[]
+  products        Product[]
+  aiConfig        AiConfig?
+  connectorConfigs ConnectorConfig[]
 }
 
 /// Global identity. A user may belong to multiple tenants via Membership.
@@ -293,4 +297,87 @@ model Invoice {
 
   @@index([tenantId, status])
   @@index([subscriptionId])
+}
+
+// ============================================================
+// Module 4 — AI features (FAQ auto-responder + Product Q&A)
+// ============================================================
+
+/// Tenant-level AI configuration. One row per tenant (created on first use).
+/// Both features default to OFF — tenants must explicitly opt in.
+model AiConfig {
+  id              String   @id @default(cuid())
+  tenantId        String   @unique
+  faqEnabled      Boolean  @default(false)
+  productQaEnabled Boolean @default(false)
+  /// Monthly AI action counter (reset by the gating module on calendar month).
+  /// Actual counting is done via Message.senderType='ai' — this is a cached value.
+  aiActionCount   Int      @default(0)
+  aiActionResetAt DateTime @default(now())
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+}
+
+/// FAQ question/answer pairs for the smart auto-responder.
+model FaqPair {
+  id          String   @id @default(cuid())
+  tenantId    String
+  question    String
+  answer      String
+  enabled     Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, enabled])
+}
+
+/// Internal product catalog — unified source of truth for AI product Q&A.
+/// Products can be added manually or synced from external stores (WooCommerce, etc.).
+model Product {
+  id          String   @id @default(cuid())
+  tenantId    String
+  name        String
+  description String   @default("")
+  price       Int      @default(0) // in Toman
+  currency    String   @default("IRT")
+  availability String  @default("in_stock") // in_stock | out_of_stock | limited
+  sku         String?
+  externalId  String?  // ID from external store (e.g., WooCommerce product ID)
+  externalSource String? // woocommerce | manual | csv
+  metadata    Json     // set in app code on create // additional fields from external source
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, externalSource])
+}
+
+// ============================================================
+// Module 4 — External store connectors
+// ============================================================
+
+/// Per-tenant connector configuration for an external store integration
+/// (WooCommerce, Shopify, Basalam, etc.). The `config` JSON holds the
+/// source-specific credentials (e.g. WooCommerce consumerKey/consumerSecret,
+/// Shopify access token). One row per (tenantId, type) — re-saving overwrites
+/// the previous config so credentials can be rotated.
+model ConnectorConfig {
+  id         String    @id @default(cuid())
+  tenantId   String
+  type       String   // woocommerce | shopify | basalam | ...
+  config     Json     // source-specific credentials, e.g. { storeUrl, consumerKey, consumerSecret }
+  lastSyncAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  tenant     Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, type])
+  @@index([tenantId])
 }

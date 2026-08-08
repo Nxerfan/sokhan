@@ -42,7 +42,9 @@
     "departments": "دپارتمان‌ها",
     "widget": "ویجت",
     "general": "عمومی",
-    "billing": "صورتحساب"
+    "billing": "صورتحساب",
+    "faq": "FAQ هوش مصنوعی",
+    "products": "محصولات"
   },
   "auth": {
     "loginTitle": "خوش آمدید",
@@ -125,7 +127,11 @@
     "copy": "کپی",
     "copied": "کپی شد",
     "saved": "ذخیره شد",
-    "shapes": { "tab": "زبانه", "rounded": "مربع گرد", "pill": "قرص" }
+    "shapes": {
+      "tab": "زبانه",
+      "rounded": "مربع گرد",
+      "pill": "قرص"
+    }
   },
   "footer": {
     "rights": "تمامی حقوق محفوظ است.",

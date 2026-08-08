@@ -23,6 +23,8 @@ export interface PlanLimit {
   conversations: number
   /** Max departments. -1 = unlimited. */
   departments: number
+  /** Max AI actions (FAQ matches + product Q&A) per month. -1 = unlimited. 0 = AI disabled. */
+  aiActions: number
 }
 
 export interface Plan {
@@ -44,7 +46,7 @@ export const PLANS: Plan[] = [
     name: 'Free',
     priceToman: 0,
     interval: 'month',
-    limits: { agents: 2, conversations: 100, departments: 1 },
+    limits: { agents: 2, conversations: 100, departments: 1, aiActions: 0 },
     contactSales: false,
   },
   {
@@ -52,7 +54,7 @@ export const PLANS: Plan[] = [
     name: 'Pro',
     priceToman: 290_000,
     interval: 'month',
-    limits: { agents: 5, conversations: 1_000, departments: 5 },
+    limits: { agents: 5, conversations: 1_000, departments: 5, aiActions: 500 },
     contactSales: false,
   },
   {
@@ -60,7 +62,7 @@ export const PLANS: Plan[] = [
     name: 'Business',
     priceToman: 890_000,
     interval: 'month',
-    limits: { agents: 20, conversations: 5_000, departments: -1 },
+    limits: { agents: 20, conversations: 5_000, departments: -1, aiActions: 2_000 },
     contactSales: false,
   },
   {
@@ -68,7 +70,7 @@ export const PLANS: Plan[] = [
     name: 'Enterprise',
     priceToman: 0,
     interval: 'month',
-    limits: { agents: -1, conversations: -1, departments: -1 },
+    limits: { agents: -1, conversations: -1, departments: -1, aiActions: -1 },
     contactSales: true,
   },
 ]

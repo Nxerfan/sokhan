@@ -16,6 +16,8 @@ import { RoutingRulesPanel } from './views/routing-rules-panel'
 import { BillingPanel } from './views/billing-panel'
 import { ContactsPanel } from './views/contacts-panel'
 import { AnalyticsPanel } from './views/analytics-panel'
+import { FaqPanel } from './views/faq-panel'
+import { ProductsPanel } from './views/products-panel'
 import { Users, BarChart3, Workflow, Plug } from 'lucide-react'
 
 type TenantInfo = { id: string; name: string; slug: string }
@@ -55,6 +57,8 @@ export function DashboardShell() {
           {view === 'widget' && tenant && <WidgetPanel slug={tenant.slug} />}
           {view === 'general' && <GeneralPanel />}
           {view === 'billing' && <BillingPanel />}
+          {view === 'faq' && <FaqPanel />}
+          {view === 'products' && <ProductsPanel />}
         </main>
       </div>
       <CommandPalette />

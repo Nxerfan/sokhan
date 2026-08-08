@@ -80,6 +80,15 @@ async function countUsage(tenantId: string, limit: LimitKind): Promise<number> {
     case 'departments': {
       return db.department.count({ where: { tenantId } })
     }
+    case 'aiActions': {
+      // AI actions (FAQ matches + product Q&A) this calendar month.
+      // Tracked via Message records where senderType = 'ai'.
+      const now = new Date()
+      const startOfMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
+      return db.message.count({
+        where: { tenantId, senderType: 'ai', createdAt: { gte: startOfMonth } },
+      })
+    }
     default:
       return 0
   }

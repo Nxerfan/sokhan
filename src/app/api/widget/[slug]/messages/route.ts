@@ -127,5 +127,108 @@ export async function POST(
     })
   }
 
-  return NextResponse.json({ message, conversationId: conversation.id })
+  // === AI features (Module 4) — fire AFTER the visitor message is persisted ===
+  // Both features are opt-in (default OFF) and respect the AI usage cap.
+  // If the cap is hit, they gracefully stop firing (fall through to human routing).
+  let aiResponse: { text: string; source: 'faq' | 'product' } | null = null
+  try {
+    aiResponse = await tryAiResponse(text, tenantId, conversation.id)
+  } catch (e) {
+    console.error('[widget:messages] AI error:', e instanceof Error ? e.message : e)
+  }
+
+  if (aiResponse) {
+    // Persist the AI message — senderType='ai', visibly distinguishable
+    const aiMessage = await db.message.create({
+      data: {
+        conversationId: conversation.id,
+        tenantId,
+        senderType: 'ai',
+        senderUserId: null,
+        contentType: 'text',
+        content: { text: aiResponse.text, source: aiResponse.source },
+        status: 'sent',
+      },
+    })
+
+    // Publish the AI response to realtime
+    await publishToRealtime({
+      room: room.conversation(conversation.id),
+      event: EVENTS.MESSAGE_NEW,
+      payload: { ...aiMessage, isNewConversation: false },
+    })
+
+    // Update conversation preview with the AI response
+    await db.conversation.updateMany({
+      where: { id: conversation.id, tenantId },
+      data: {
+        lastMessageAt: new Date(),
+        lastMessagePreview: `[AI] ${aiResponse.text.slice(0, 116)}`,
+      },
+    })
+  }
+
+  return NextResponse.json({ message, conversationId: conversation.id, aiResponse })
+}
+
+/**
+ * Try to generate an AI response for the visitor's message.
+ * Checks: AI config (feature toggles), plan cap (aiActions).
+ * Order: FAQ matching first, then product Q&A.
+ * Returns null if no AI feature fires (falls through to human routing).
+ */
+async function tryAiResponse(
+  visitorMessage: string,
+  tenantId: string,
+  conversationId: string,
+): Promise<{ text: string; source: 'faq' | 'product' } | null> {
+  const { db } = await import('@/lib/db')
+  const { checkPlanLimit } = await import('@/lib/payments/gating')
+  const { matchFaq, answerProductQuestion } = await import('@/lib/ai')
+
+  // Load AI config
+  let aiConfig = await db.aiConfig.findUnique({ where: { tenantId } })
+  if (!aiConfig) {
+    // Default config — both features OFF
+    return null
+  }
+
+  // Check plan cap for AI actions
+  const capCheck = await checkPlanLimit(tenantId, 'aiActions')
+  if (!capCheck.allowed) {
+    // Cap hit — graceful fallback to human routing
+    return null
+  }
+
+  // Feature 1: FAQ matching (if enabled)
+  if (aiConfig.faqEnabled) {
+    const faqPairs = await db.faqPair.findMany({
+      where: { tenantId, enabled: true },
+      select: { id: true, question: true, answer: true },
+    })
+
+    if (faqPairs.length > 0) {
+      const match = await matchFaq(visitorMessage, faqPairs)
+      if (match.matched && match.answer) {
+        return { text: match.answer, source: 'faq' }
+      }
+    }
+  }
+
+  // Feature 2: Product Q&A (if enabled)
+  if (aiConfig.productQaEnabled) {
+    const products = await db.product.findMany({
+      where: { tenantId },
+      select: { id: true, name: true, description: true, price: true, availability: true },
+    })
+
+    if (products.length > 0) {
+      const result = await answerProductQuestion(visitorMessage, products)
+      if (result.answered && result.answer) {
+        return { text: result.answer, source: 'product' }
+      }
+    }
+  }
+
+  return null
 }

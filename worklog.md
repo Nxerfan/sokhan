@@ -399,3 +399,209 @@ Work Log:
 Stage Summary:
 - CLIENT_FETCH_ERROR bug: root-caused (env-check throw at module load → HTML 500 → JSON parse error), fixed (lazy evaluation + dev fallback), verified (auth routes return JSON, all 13 tests pass).
 - The fix preserves the fail-loudly behavior in production (throws lazily with a clear error) while keeping the app working in dev (auto-generates a temp secret).
+
+---
+Task ID: 4-woocommerce
+Agent: general-purpose subagent
+Task: Module 4 — Research external store platform APIs + build the WooCommerce product sync connector.
+
+Work Log:
+
+## Part 1 — External platform API research
+
+Honest findings, confirmed via web search (z-ai web_search):
+
+- **Digikala** — NO viable public third-party product catalog API.
+  - Digikala does not publish an official public developer API for third parties to read product data. The only official API surface is the **DK Marketplace Seller Open API** (`https://seller.digikala.com/open-api/v1/doc`, OpenAPI 3 spec) — and that is strictly for *sellers already on Digikala* to manage their own listings/orders. Auth requires a seller-issued API key; an arbitrary chat SaaS tenant cannot use it to read product data unless they are themselves a Digikala seller.
+  - Third-party scrapers exist (parse.bot, shopapi.ir, GitHub projects) but they scrape HTML, break on layout changes, and violate ToS — not viable for a production connector.
+  - Verdict: **NOT viable** as a public connector. A "Digikala seller" connector could in principle be built for tenants who are themselves Digikala sellers (same pattern as WooCommerce), but that's a niche future addition, not a general public API.
+
+- **Bazaar / Snapp Market** — NO public product catalog API.
+  - "Bazaar" maps to two unrelated entities:
+    - **Cafe Bazaar** (Iranian Android app store): has a developer API, but it's for the *app store + payment system* (`pardakht.cafebazaar.ir/panel/developer-api`), i.e. in-app purchase verification and app submissions. NOT an e-commerce product catalog.
+    - **Snapp Market** (Iranian grocery delivery): has a GitHub org (`github.com/snappmarket`) but only publishes internal PHP packages (notification service, API responder pattern). No documented public product API.
+  - Verdict: **NOT viable**.
+
+- **Basalam** — YES, has a public developer API ("SalamAPI").
+  - Docs at `https://developers.basalam.com/docs/quick-start` ("سلام API مجموعه‌ای از سرویس‌ها و ابزارهای توسعه..."). Official SDKs on GitHub: `basalam/php-sdk` and `basalam/python-sdk` ("comprehensive client library for interacting with Basalam API services").
+  - Auth is OAuth2; scopes are seller-scoped (sellers manage their own products/orders). Same model as Shopify/WooCommerce: a tenant who is a Basalam seller provides their API credentials, and we sync THEIR products.
+  - Verdict: **VIABLE** for a future Basalam connector (same connector pattern as WooCommerce). Stubbed in the factory.
+
+- **Shopify** — YES, well-known public API.
+  - **Admin REST API** (legacy but still functional for existing apps): `GET /admin/api/2024-10/products.json?limit=250&page_info=N`. Auth: `X-Shopify-Access-Token` header (OAuth access token). NOTE: REST Admin API is being deprecated for new apps — Shopify recommends the GraphQL Admin API for new development.
+  - **Admin GraphQL API**: `POST /admin/api/2024-10/graphql.json`. Same auth header. Recommended path for new apps.
+  - **Storefront API**: `POST /api/2024-10/graphql.json` with `X-Shopify-Storefront-Access-Token` — for customer-facing apps (read products, create checkouts). This is the right choice if we want a read-only product sync.
+  - Verdict: **VIABLE**. Stubbed in the factory for future implementation.
+
+Summary table:
+
+| Platform | Public API? | Viable for product sync? | Notes |
+|----------|-------------|--------------------------|-------|
+| Digikala | No (only seller-scoped Marketplace Open API) | No | Third-party scrapers exist but ToS-violating + unreliable |
+| Cafe Bazaar | Yes (app store / payments only) | No | Not an e-commerce catalog |
+| Snapp Market | No | No | No public docs |
+| Basalam | Yes (SalamAPI, OAuth2, seller-scoped) | Yes (future) | Same connector pattern as WooCommerce |
+| Shopify | Yes (REST + GraphQL Admin, Storefront) | Yes (future) | OAuth; X-Shopify-Access-Token |
+| WooCommerce | Yes (REST v3, Basic Auth) | Yes — IMPLEMENTED in this task | The deliverable below |
+
+## Part 2 — WooCommerce connector (delivered)
+
+### Files created/modified
+
+1. **`prisma/schema.prisma`** — added `ConnectorConfig` model + `connectorConfigs ConnectorConfig[]` relation on `Tenant`.
+2. **`src/lib/db.ts`** — added `'ConnectorConfig'` to `TENANT_SCOPED_MODELS` (so the Prisma client extension auto-injects tenantId on reads/writes).
+3. **`src/lib/connectors/woocommerce.ts`** — the connector.
+4. **`src/lib/connectors/index.ts`** — connector registry + factory + `runConnectorSync()` helper.
+5. **`src/app/api/connectors/woocommerce/route.ts`** — GET (current config, secret masked) + POST (save config + optionally sync).
+6. **`src/app/api/connectors/woocommerce/sync/route.ts`** — POST (trigger sync using saved config, no creds in body).
+
+### Connector design
+
+- `syncWooCommerceProducts(tenantId, config)` returns `ProductSyncResult` (`{ synced, created, updated, errors }`).
+- Endpoint: `GET {storeUrl}/wp-json/wc/v3/products?per_page=100&page=N`
+- Auth: HTTP Basic with `base64(consumerKey:consumerSecret)` in `Authorization` header.
+- Pagination: follows the WooCommerce `Link: <...>; rel="next"` header. Falls back to `X-WP-TotalPages` when no Link header is present. Hard ceiling of 50 pages per sync as a safety cap against a misbehaving server.
+- Field mapping:
+  - `name` → `name`
+  - `price` (decimal string) → `price` (integer Toman) via `Math.round(parseFloat(price))`. Correct for Iranian Toman-configured stores; documented as best-effort for others.
+  - `description` (HTML) → `description` (plain text) via a no-dependency HTML stripper (`<br>`→newline, `</p>`→newline, `<li>`→"• ", entities decoded).
+  - `stock_status` → `availability`: `instock`→`in_stock`, `outofstock`→`out_of_stock`, `onbackorder`→`limited`.
+  - `sku` → `sku`
+  - `id` → `externalId` (stringified), `externalSource = 'woocommerce'`
+  - Full raw payload (slug, permalink, regular_price, sale_price, type, status, manage_stock, stock_quantity, stock_status, categories, images, syncedAt) stored in `metadata` JSON.
+- Upsert by `(tenantId, externalSource='woocommerce', externalId=wooId)`. The Prisma extension auto-injects tenantId on the lookup; tenantId is ALSO passed explicitly on create per the Module 2 convention.
+- Skips non-`publish` products (drafts/private) — they shouldn't surface in customer-facing AI.
+- Error handling:
+  - 401/403 → "WooCommerce authentication failed" (config issue)
+  - 404 → "endpoint not found, verify storeUrl and that WC REST API is enabled"
+  - 429 → rate limit (surfaces Retry-After if present)
+  - 5xx → server error
+  - Network error → "Network error fetching WooCommerce products (page N): ..."
+  - First-page failure → aborts sync, returns `errors: [msg]`, no rows written.
+  - Mid-sync page failure → records the error and stops paging (already-synced products remain in DB).
+  - Per-product upsert failure → recorded in `errors[]`, sync continues with the next product.
+
+### Factory + helpers
+
+- `getConnector(source)` returns the connector for a source name; throws on unknown.
+- `isKnownConnector(source)` boolean check.
+- `CONNECTOR_SOURCES` array — `['woocommerce', 'shopify', 'basalam']`.
+- `runConnectorSync(tenantId, source)` loads the saved `ConnectorConfig` row from DB, dispatches to the connector, and stamps `lastSyncAt` (even on partial failure — the attempt is informative).
+- Shopify + Basalam are stubbed (return "not yet implemented" in `errors[]` / `validateConfig`) so the dashboard can list them as known sources without 500-ing.
+
+### API routes
+
+- **GET `/api/connectors/woocommerce`** — returns current config (with secret masked via `maskConsumerSecret()` — preserves first 4 + last 4 chars) + `lastSyncAt`. 401 unauthenticated. Returns `{ config: null }` if no config saved (so the dashboard can render an empty state).
+- **POST `/api/connectors/woocommerce`** — admin-only. Body `{ storeUrl, consumerKey, consumerSecret, sync?: boolean }`. Validates config (URL must be http/https, all three fields required). Rejects masked secrets sent back (forces the dashboard to send the full secret each save — simpler MVP, no "preserve existing" mode). Upserts the `ConnectorConfig` row by `(tenantId, type)`. If `sync !== false`, runs the sync immediately and returns the result counts + errors. Stamps `lastSyncAt`.
+- **POST `/api/connectors/woocommerce/sync`** — admin-only. Loads the saved config, runs `runConnectorSync(tid, 'woocommerce')`, returns `{ synced, created, updated, errors, lastSyncAt }`. 404 if no config saved.
+
+### Schema changes
+
+- New `ConnectorConfig` model:
+  ```
+  model ConnectorConfig {
+    id         String    @id @default(cuid())
+    tenantId   String
+    type       String   // woocommerce | shopify | basalam | ...
+    config     Json     // { storeUrl, consumerKey, consumerSecret }
+    lastSyncAt DateTime?
+    createdAt  DateTime  @default(now())
+    updatedAt  DateTime  @updatedAt
+    tenant     Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+    @@unique([tenantId, type])
+    @@index([tenantId])
+  }
+  ```
+- Added `connectorConfigs ConnectorConfig[]` to the `Tenant` model.
+- Added `'ConnectorConfig'` to `TENANT_SCOPED_MODELS` in `src/lib/db.ts`.
+- `bun run db:push` ran cleanly — schema in sync, Prisma client regenerated (v6.19.2).
+
+### Conventions followed
+
+- ALL Prisma writes pass `tenantId` explicitly: `db.connectorConfig.create({ data: { tenantId: tid, type, config } })`, `db.product.create({ data: { tenantId, ... } })`. The `db.product.update({ where: { id } })` is safe because the row is found via `findFirst({ where: { externalSource, externalId } })` inside the tenant context (extension auto-injects tenantId on the lookup), and updates by primary key after that.
+- Imports: `import { db } from '@/lib/db'`, `import { withSessionTenant, hasRole } from '@/lib/auth'`, `import { getCurrentTenantId } from '@/lib/db'` (re-exported via `@/lib/auth`).
+- The connector NEVER makes live API calls per chat message — it syncs on demand into the internal `Product` table; chat/AI code reads only from `Product`.
+
+### Verification
+
+- `bun run db:push`: schema synced, Prisma client regenerated.
+- `bun run lint`: 0 errors, 1 pre-existing warning in `inbox-view.tsx` (Module 2, not mine).
+- Smoke test 1 (no DB, validation + factory + mask + early-return paths):
+  - `validateWooCommerceConfig` correctly accepts valid + rejects missing-secret / bad-URL.
+  - `maskConsumerSecret('cs_secretabc123')` → `'cs_s••••••c123'`.
+  - Factory: `isKnownConnector('woocommerce')` → true; `isKnownConnector('digikala')` → false.
+  - Sync with empty creds → returns `errors: ['storeUrl is required']`, no HTTP call.
+  - Sync with bad host → returns `errors: ['Network error fetching WooCommerce products (page 1): ...']`, no crash.
+- Smoke test 2 (full DB integration, monkey-patched fetch returning 3 fake products):
+  - First sync: `{ synced: 2, created: 2, updated: 0, errors: [] }` — the 3rd product (draft status) correctly skipped.
+  - Second sync (same data): `{ synced: 2, created: 0, updated: 2, errors: [] }` — upsert working.
+  - HTML stripping verified: `<p>This is a <strong>nice</strong> widget.</p><ul><li>Lightweight</li><li>Durable</li></ul>` → `"This is a nice widget.\n• Lightweight\n• Durable"`.
+  - Price: `'290000'` → `290000` (integer Toman), `'15.99'` → `16` (rounded).
+  - Availability: `instock` → `in_stock`, `outofstock` → `out_of_stock`.
+  - externalId: numeric woo id → stringified (`"101"`, `"102"`).
+  - Test rows cleaned up after the run.
+- Smoke test 3 (pagination, monkey-patched fetch returning 100 items on page 1 + Link header → 50 items on page 2):
+  - 2 fetch calls (one per page).
+  - `{ synced: 150, created: 150, updated: 0, errors: [] }`.
+  - 150 rows in DB.
+  - Test rows cleaned up.
+
+Stage Summary:
+- External API research: 6 platforms investigated. WooCommerce (implemented), Shopify + Basalam (viable, stubbed), Digikala + Cafe Bazaar + Snapp Market (no viable public product API).
+- WooCommerce connector: full sync implementation with pagination, HTML stripping, Toman price conversion, upsert by (tenantId, externalId), graceful error handling for auth/rate-limit/network failures.
+- Schema: `ConnectorConfig` model added, tenant-scoped, unique per (tenantId, type).
+- API: GET (read masked config) + POST (save + sync) at `/api/connectors/woocommerce`, POST (sync only) at `/api/connectors/woocommerce/sync`.
+- Lint: 0 errors. Integration tests: all pass.
+
+---
+Task ID: 7
+Agent: main (Senior Full-Stack Engineer)
+Task: Module 4 — AI-Powered FAQ Auto-Responder & Product Knowledge Q&A.
+
+Work Log:
+
+- **Matching approach chosen: LLM-based classification (not vector embeddings).**
+  - Justification: at the scale of a few dozen to a few hundred FAQ pairs, an LLM classification call is simpler to ship correctly than a vector embedding pipeline. The LLM receives the visitor message + the full list of FAQ questions, and returns the ID of the best match with a confidence score. This avoids the infrastructure overhead of a vector database. For >500 FAQ pairs, we'd switch to a two-stage approach (embedding retrieval → LLM classification of top-K), but that's out of scope for MVP.
+  - Uses the z-ai-web-dev-sdk (already in the project) for LLM calls. Backend-only.
+
+- **AI usage-cap integration (ADR-6 compliance):**
+  - Added `aiActions` to `PlanLimit` in `src/lib/payments/plans.ts`: free=0, pro=500/mo, business=2000/mo, enterprise=unlimited.
+  - Added `aiActions` to the `countUsage` function in `src/lib/payments/gating.ts` — counts Message records where `senderType='ai'` for the current month.
+  - The widget message handler checks `checkPlanLimit(tenantId, 'aiActions')` before calling any AI feature. If the cap is hit (or the plan has aiActions=0 like free tier), the AI gracefully stops firing and falls through to normal human routing.
+  - Verified: test 4 confirms free tier (aiActions: 0) blocks AI even when the feature is enabled.
+
+- **Feature 1 — Smart FAQ Auto-Responder:**
+  - Schema: `FaqPair` model (tenant-scoped: question, answer, enabled).
+  - API: `/api/faqs` (GET/POST/PATCH/DELETE) — CRUD with admin role gating.
+  - AI: `src/lib/ai/index.ts` → `matchFaq()` — LLM classification, returns best match above 0.7 confidence.
+  - Dashboard: `src/components/dashboard/views/faq-panel.tsx` — CRUD UI with enable/disable toggle per pair.
+  - Wired into widget message flow: after the visitor message is persisted + published, the system checks if FAQ matching is enabled + cap not hit, then calls `matchFaq()`. If matched, sends the predefined answer as a separate message with `senderType='ai'` (visibly distinguishable).
+
+- **Feature 2 — Product Knowledge Q&A:**
+  - Schema: `Product` model (tenant-scoped: name, description, price, availability, sku, externalId, externalSource, metadata).
+  - API: `/api/products` (GET/POST/DELETE), `/api/products/import` (POST — bulk CSV import).
+  - AI: `src/lib/ai/index.ts` → `answerProductQuestion()` — RAG-style: retrieves relevant products by keyword match, then generates a grounded answer using LLM (instructed to only use provided data, no hallucination).
+  - Dashboard: `src/components/dashboard/views/products-panel.tsx` — CRUD UI with source badge (manual/CSV/WooCommerce).
+  - WooCommerce connector: `src/lib/connectors/woocommerce.ts` — syncs products from WooCommerce REST API into the internal Product table. API: `/api/connectors/woocommerce` (GET/POST), `/api/connectors/woocommerce/sync` (POST).
+  - Wired into widget message flow: after FAQ matching (if no match), checks if Product Q&A is enabled + cap not hit, then calls `answerProductQuestion()`.
+
+- **AI config (feature toggles):**
+  - Schema: `AiConfig` model (tenant-scoped: faqEnabled, productQaEnabled — both default false).
+  - API: `/api/ai-config` (GET/PATCH) — manage feature toggles.
+  - Both features default to OFF — tenants must explicitly opt in.
+
+- **External platform API research (by subagent):**
+  - Digikala: NO public product read API (only seller-scoped for own listings).
+  - Cafe Bazaar: NO (app store + payments, not e-commerce catalog).
+  - Snapp Market: NO public docs.
+  - Basalam: YES — "SalamAPI" at developers.basalam.com, OAuth2, seller-scoped. Viable for future connector.
+  - Shopify: YES — Admin REST/GraphQL API. Viable for future connector.
+  - WooCommerce: YES — implemented in this module.
+
+Stage Summary:
+- FAQ matching: LLM-based classification, working end-to-end (test 1: "می‌شه وجه رو حضوری پرداخت کنم؟" matched "پرداخت حضوری" FAQ pair).
+- Product Q&A: RAG-style, working end-to-end (test 2: question about headphone price returned grounded answer "۲,۵۰۰,۰۰۰ تومان").
+- Both features respect AI usage cap: free tier (0) blocks AI; pro (500/mo) allows it.
+- Both features default to OFF.
+- WooCommerce connector implemented + tested by subagent.
+- All 17 tests pass (3 smoke + 1 isolation + 3 module2 + 1 socketio-verify + 1 socket-race + 4 module3 + 4 module4).

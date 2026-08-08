@@ -42,7 +42,9 @@
     "departments": "Departments",
     "widget": "Widget",
     "general": "General",
-    "billing": "Billing"
+    "billing": "Billing",
+    "faq": "FAQ AI",
+    "products": "Products"
   },
   "auth": {
     "loginTitle": "Welcome back",
@@ -125,7 +127,11 @@
     "copy": "Copy",
     "copied": "Copied",
     "saved": "Saved",
-    "shapes": { "tab": "Tab", "rounded": "Rounded square", "pill": "Pill" }
+    "shapes": {
+      "tab": "Tab",
+      "rounded": "Rounded square",
+      "pill": "Pill"
+    }
   },
   "footer": {
     "rights": "All rights reserved.",

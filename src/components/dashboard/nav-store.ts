@@ -13,6 +13,8 @@ export type DashboardView =
   | 'widget'
   | 'general'
   | 'billing'
+  | 'faq'
+  | 'products'
 
 interface NavState {
   view: DashboardView
