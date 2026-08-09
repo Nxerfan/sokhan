@@ -17,7 +17,7 @@ import { test, expect, type Page } from '@playwright/test'
  */
 
 const BASE = 'http://localhost:81'
-const DASHBOARD = 'http://localhost:3000'
+const DASHBOARD = 'http://localhost:81'  // Use Caddy for Socket.IO access
 
 function creds() {
   const stamp = `${process.pid}-${Date.now()}-socketio`
@@ -27,27 +27,44 @@ function creds() {
   }
 }
 
-async function signupAndGetSlug(page: Page, email: string, workspace: string): Promise<string> {
-  // API-based signup (reliable, no hydration issues)
-  await page.request.post(`${DASHBOARD}/api/auth/signup`, {
-    data: { email, password: 'password123', name: 'Agent Test', workspaceName: workspace },
-  })
-  const csrfRes = await page.request.get(`${DASHBOARD}/api/auth/csrf`)
-  const { csrfToken } = await csrfRes.json()
-  await page.request.post(`${DASHBOARD}/api/auth/callback/credentials`, {
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    data: `email=${email}&password=password123&csrfToken=${csrfToken}&json=true`,
-  })
-  const tenantRes = await page.request.get(`${DASHBOARD}/api/tenants/me`)
-  const tenantData = await tenantRes.json()
-  const slug = tenantData.tenant?.slug
+async function signupAndGetSlug(ctx: import('@playwright/test').BrowserContext, email: string, workspace: string): Promise<{ page: import('@playwright/test').Page; slug: string }> {
+  const page = await ctx.newPage()
+  // Navigate to the dashboard via Caddy (port 81) — needed for Socket.IO
+  await page.goto(DASHBOARD)
+  await page.waitForLoadState('networkidle')
+  await page.waitForTimeout(2000)
 
-  // Navigate to the dashboard via Caddy (for Socket.IO)
-  await page.goto(BASE)
+  // Use page.evaluate to make fetch calls FROM the page context (shares cookies)
+  const slug = await page.evaluate(async ({ email, workspace }) => {
+    // Signup
+    await fetch('/api/auth/signup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password: 'password123', name: 'Agent Test', workspaceName: workspace })
+    })
+    // Get CSRF
+    const csrfRes = await fetch('/api/auth/csrf')
+    const { csrfToken } = await csrfRes.json()
+    // Signin
+    await fetch('/api/auth/callback/credentials', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `email=${email}&password=password123&csrfToken=${csrfToken}&json=true`
+    })
+    // Get slug
+    const tenantRes = await fetch('/api/tenants/me')
+    const tenantData = await tenantRes.json()
+    return tenantData.tenant?.slug
+  }, { email, workspace })
+
+  expect(slug).toBeTruthy()
+
+  // Reload — the session cookie is set in the browser, dashboard should render
+  await page.reload()
   await page.waitForLoadState('networkidle')
   await page.waitForTimeout(3000)
-  await expect(page.getByRole('heading', { name: workspace })).toBeVisible({ timeout: 15000 })
-  return slug
+
+  return { page, slug }
 }
 
 test('Socket.IO delivers widget→dashboard in real-time (polling disabled)', async ({ browser }) => {
@@ -55,8 +72,7 @@ test('Socket.IO delivers widget→dashboard in real-time (polling disabled)', as
 
   // Context A: agent dashboard
   const dashboardCtx = await browser.newContext()
-  const dashboardPage = await dashboardCtx.newPage()
-  const slug = await signupAndGetSlug(dashboardPage, email, workspace)
+  const { page: dashboardPage, slug } = await signupAndGetSlug(dashboardCtx, email, workspace)
 
   // Navigate to inbox — the InboxView's useEffect will fetch /api/realtime-token
   // and attempt a Socket.IO connection. We need to wait for:

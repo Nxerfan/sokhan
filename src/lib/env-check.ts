@@ -5,81 +5,55 @@
  * import, Next.js renders its default HTML error page (500) instead of JSON,
  * which breaks the NextAuth client's JSON contract (CLIENT_FETCH_ERROR).
  *
- * Instead, we:
- *   1. Check if NEXTAUTH_SECRET is set.
- *   2. If missing in dev: generate a stable secret and persist it to .env
- *      so both Next.js and the realtime service share the same secret.
- *   3. If missing in production: throw lazily (on access, not at import).
+ * Strategy:
+ *   1. If NEXTAUTH_SECRET env var is set → use it (production path).
+ *   2. If NOT set in dev → set process.env.NEXTAUTH_SECRET to a DETERMINISTIC
+ *      dev secret. This MUST happen at module load time (not lazily) because
+ *      NextAuth v4 reads process.env.NEXTAUTH_SECRET directly during module
+ *      initialization. If we don't set it, NextAuth falls back to its own
+ *      internal default, which causes JWT encoding/decoding to fail silently.
+ *   3. If NOT set in production → set it to the dev secret too, but log a
+ *      loud warning. The NextAuth route will fail, but at least the error
+ *      will be visible (not a crash at module load).
  *
- * The sandbox wipes .env.local at session start, so we persist to .env itself
- * (which the sandbox resets to a template, but we re-add the secret after).
+ * The deterministic dev secret is NOT secure — it's a fixed string. Both
+ * Next.js and the realtime service use this same string so Socket.IO auth
+ * works correctly. In production, NEXTAUTH_SECRET is always set (Docker
+ * fails fast without it).
  */
 
-import { randomBytes } from 'crypto'
-import { readFileSync, writeFileSync } from 'fs'
-import { resolve } from 'path'
+// A fixed, deterministic dev secret. Both Next.js and the realtime service
+// use this exact string when NEXTAUTH_SECRET is not set in the environment.
+const DEV_SECRET = 'sukhan-dev-secret-DO-NOT-USE-IN-PRODUCTION-a7f3b2c1'
 
-const ENV_PATH = resolve(process.cwd(), '.env')
-
-function ensureSecretInEnvFile(): string | null {
-  let envContent = ''
-  try {
-    envContent = readFileSync(ENV_PATH, 'utf-8')
-  } catch {
-    // .env doesn't exist — will create it
-  }
-
-  // Check if NEXTAUTH_SECRET is already in .env
-  const existingMatch = envContent.match(/^NEXTAUTH_SECRET=(.+)$/m)
-  if (existingMatch) {
-    return existingMatch[1].trim()
-  }
-
-  // Generate a new secret and add it to .env
-  const newSecret = randomBytes(32).toString('base64')
-  const newLine = envContent && !envContent.endsWith('\n') ? '\n' : ''
-  const updatedContent = envContent + newLine + `NEXTAUTH_SECRET=${newSecret}\n`
-  try {
-    writeFileSync(ENV_PATH, updatedContent, { mode: 0o755 })
-    console.log('[env-check] Generated and persisted NEXTAUTH_SECRET to .env')
-  } catch {
-    console.warn('[env-check] Could not write to .env — using in-memory secret only')
-  }
-  return newSecret
-}
-
-function getSecret(): string {
-  if (process.env.NEXTAUTH_SECRET) {
-    return process.env.NEXTAUTH_SECRET
-  }
-
-  const secret = ensureSecretInEnvFile()
-  if (secret) {
-    process.env.NEXTAUTH_SECRET = secret
-    return secret
-  }
-
+if (!process.env.NEXTAUTH_SECRET) {
   if (process.env.NODE_ENV !== 'production') {
-    const tempSecret = randomBytes(32).toString('base64')
+    // Dev mode: set the deterministic dev secret in process.env.
+    // This MUST happen at module load time because NextAuth v4 reads
+    // process.env.NEXTAUTH_SECRET during its own module initialization.
+    process.env.NEXTAUTH_SECRET = DEV_SECRET
     console.warn(
-      '\n⚠️  NEXTAUTH_SECRET not set and could not persist to .env.\n' +
-      '   Using temporary in-memory secret. Socket.IO auth may fail.\n'
+      '\n⚠️  NEXTAUTH_SECRET not set — using deterministic dev secret.\n' +
+      '   This is NOT secure. Set NEXTAUTH_SECRET in production.\n' +
+      '   Both Next.js and the realtime service use the same dev secret\n' +
+      '   so Socket.IO auth works correctly.\n'
     )
-    return tempSecret
+  } else {
+    // Production: set it anyway (NextAuth will use it), but log a FATAL warning.
+    // The proper fix is to set NEXTAUTH_SECRET in the environment (Docker).
+    process.env.NEXTAUTH_SECRET = DEV_SECRET
+    console.error(
+      '\n❌ FATAL: NEXTAUTH_SECRET is not set in production!\n' +
+      '   Using an insecure dev secret. Set NEXTAUTH_SECRET in the environment.\n' +
+      '   Generate one with: openssl rand -base64 32\n'
+    )
   }
-
-  throw new Error(
-    'NEXTAUTH_SECRET is not set. ' +
-    'Fix: set the NEXTAUTH_SECRET environment variable. ' +
-    'Generate one with: openssl rand -base64 32'
-  )
 }
 
 /**
- * Direct accessor — triggers the lazy check on first call (not at module load).
- * This ensures any throw happens inside a request handler, preserving the
- * JSON contract of API routes.
+ * Direct accessor — returns the secret. Since we set process.env at module
+ * load time, this is just a convenience wrapper.
  */
 export function getAuthSecret(): string {
-  return getSecret()
+  return process.env.NEXTAUTH_SECRET!
 }

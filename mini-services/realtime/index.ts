@@ -62,8 +62,13 @@ loadEnvFile(resolve(parentDir, '.env.local'), true) // overwrite — .env.local 
 const SOCKET_PORT = 3003
 const INTERNAL_PORT = 3004
 
-// NEXTAUTH_SECRET check — in dev, auto-generate a temp secret if missing
-// (the sandbox wipes .env.local at session start). In production, exit.
+// NEXTAUTH_SECRET check — in dev, use a DETERMINISTIC dev secret (not random).
+// This ensures Next.js and the realtime service share the SAME secret even
+// when both start without NEXTAUTH_SECRET set in the environment.
+// A random per-process secret would cause Socket.IO auth to fail silently
+// (tokens signed by one process wouldn't verify in the other), degrading to
+// 8-10s polling. The deterministic dev secret avoids this.
+const DEV_SECRET = 'sukhan-dev-secret-DO-NOT-USE-IN-PRODUCTION-a7f3b2c1'
 if (!process.env.NEXTAUTH_SECRET) {
   if (process.env.NODE_ENV === 'production') {
     console.error('\n❌ FATAL: NEXTAUTH_SECRET is not set.')
@@ -71,17 +76,14 @@ if (!process.env.NEXTAUTH_SECRET) {
     console.error('   Generate one with: openssl rand -base64 32\n')
     process.exit(1)
   } else {
-    // Dev mode: auto-generate a temporary secret.
-    // NOTE: This means tokens signed by Next.js (using its own temp secret)
-    // won't match tokens verified here unless Next.js also generates the SAME
-    // temp secret. Since both use crypto.randomBytes, they'll be different.
-    // The fix is to persist the secret — but for dev, the realtime service
-    // will accept any token that matches its own secret, and Next.js will
-    // sign with its own. Socket.IO auth will fail, but the app won't crash.
-    // The polling fallback handles message delivery.
-    process.env.NEXTAUTH_SECRET = crypto.randomBytes(32).toString('base64')
-    console.warn('\n⚠️  NEXTAUTH_SECRET not set — using temporary dev secret.')
-    console.warn('   Socket.IO auth may fail. Fix: create .env.local with the secret.\n')
+    // Dev mode: use the deterministic dev secret (same as Next.js's env-check.ts)
+    process.env.NEXTAUTH_SECRET = DEV_SECRET
+    console.warn(
+      '\n⚠️  NEXTAUTH_SECRET not set — using deterministic dev secret.\n' +
+      '   This is NOT secure. Set NEXTAUTH_SECRET in production.\n' +
+      '   Both Next.js and this service use the same dev secret\n' +
+      '   so Socket.IO auth works correctly.\n'
+    )
   }
 }
 const SECRET = process.env.NEXTAUTH_SECRET

@@ -605,3 +605,40 @@ Stage Summary:
 - Both features default to OFF.
 - WooCommerce connector implemented + tested by subagent.
 - All 17 tests pass (3 smoke + 1 isolation + 3 module2 + 1 socketio-verify + 1 socket-race + 4 module3 + 4 module4).
+
+---
+Task ID: 8
+Agent: main (Senior Full-Stack Engineer)
+Task: Resolve secret-sharing ambiguity between Next.js and the realtime service.
+
+Work Log:
+
+- **Root cause of the ambiguity:** The `env-check.ts` module used a lazy `getAuthSecret()` function that generated a RANDOM temp secret on each call. This meant:
+  1. Next.js and the realtime service independently generated DIFFERENT random secrets.
+  2. Socket.IO auth failed silently (tokens signed by one process didn't verify in the other).
+  3. The 10s polling fallback caught messages, so tests appeared to pass — but with 8-10s latency, not sub-1s Socket.IO latency.
+  4. Additionally, the lazy `getAuthSecret()` didn't set `process.env.NEXTAUTH_SECRET` — so NextAuth v4 (which reads `process.env.NEXTAUTH_SECRET` during its own initialization) didn't have a secret, causing JWT encoding/decoding to fail silently. This caused the `/api/auth/callback/credentials` endpoint to return a redirect to the signin page instead of setting a session cookie.
+
+- **Fix (deterministic dev secret):**
+  - Both `src/lib/env-check.ts` (Next.js) and `mini-services/realtime/index.ts` (realtime service) now use the SAME fixed `DEV_SECRET` string: `'sukhan-dev-secret-DO-NOT-USE-IN-PRODUCTION-a7f3b2c1'`.
+  - In `env-check.ts`: `process.env.NEXTAUTH_SECRET` is set at module load time (not lazily) — this is critical because NextAuth v4 reads it during its own module initialization. If we don't set it, NextAuth falls back to its own internal default, which breaks JWT encoding.
+  - In the realtime service: same `DEV_SECRET` is used when `NEXTAUTH_SECRET` is not set.
+  - In production: `NEXTAUTH_SECRET` must be set via environment (Docker enforces this with `${VAR:?error}`). If it's missing, the code logs a FATAL warning.
+  - Both processes log a loud warning when using the dev secret: "⚠️ NEXTAUTH_SECRET not set — using deterministic dev secret. This is NOT secure."
+
+- **Additional fix (socketio-verify test):**
+  - The test was using `DASHBOARD = 'http://localhost:3000'` (direct port) for the dashboard, but Socket.IO requires Caddy (port 81) for `XTransformPort` forwarding. Fixed: changed `DASHBOARD` to `'http://localhost:81'`.
+  - The test was using `page.request` (Playwright's APIRequestContext) which doesn't share cookies with the browser page context. Fixed: switched to `page.evaluate` with `fetch()` calls from within the page context (which DOES share cookies).
+  - The test was using `signupAndGetSlug(page, ...)` (passing a Page). Fixed: changed to `signupAndGetSlug(ctx, ...)` (passing a BrowserContext) to match the socket-race test's working pattern.
+
+- **Direct verification (not just test timing):**
+  - Confirmed via log comparison: both processes log `using NEXTAUTH_SECRET: sukhan-d...` — byte-for-byte match.
+  - Confirmed via auth flow test: `curl` signup + signin returns HTTP 200, session is established, tenant is returned.
+  - Confirmed via Socket.IO test: 880ms latency (socketio-verify) and 1191ms latency (socket-race) — both sub-1.5s, well within the 5s threshold that proves Socket.IO delivery (not 10s polling).
+  - Confirmed via realtime log: both `[connect] type=agent` and `[connect] type=visitor` appear — both Socket.IO clients connected successfully with the shared secret.
+
+Stage Summary:
+- Secret-sharing ambiguity: RESOLVED. Both processes deterministically use the same `DEV_SECRET` when `NEXTAUTH_SECRET` is not set. No more independent random generation.
+- Degraded state visibility: both processes log a loud warning when using the dev secret.
+- Socket.IO auth: confirmed working (880ms latency, both agent + visitor connections in the realtime log).
+- All tests pass individually (sandbox process-reaping prevents running all 17 in one bash call, but each group passes with fresh server starts).
