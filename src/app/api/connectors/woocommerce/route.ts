@@ -6,7 +6,7 @@ import {
   maskConsumerSecret,
   syncWooCommerceProducts,
   type WooCommerceConfig,
-} from '@/lib/connectors'
+} from '@/lib/connectors/woocommerce'
 
 /**
  * WooCommerce connector config + on-demand sync endpoint.
