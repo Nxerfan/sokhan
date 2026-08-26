@@ -38,6 +38,17 @@ RUN bun install --frozen-lockfile \
     && cd mini-services/realtime \
     && bun install --frozen-lockfile
 
+# Copy the Prisma schema and generate the client in the deps stage.
+# This downloads the platform-specific query engine binary from Prisma's CDN.
+# We do it here (not in the builder stage) so it's cached across code changes —
+# the engine binary only changes when the Prisma version changes.
+# Retry logic: the CDN download can fail with ECONNRESET on slower connections.
+# PRISMA_ENGINES_MIRROR can be set to use an alternative mirror if needed.
+COPY prisma ./prisma
+RUN npx prisma generate \
+    || (sleep 3 && npx prisma generate) \
+    || (sleep 10 && PRISMA_ENGINES_MIRROR=https://prisma-builds.s3-eu-west-1.amazonaws.com npx prisma generate)
+
 # ------------------------------------------------------------
 # Stage 2: builder — build Next.js standalone output
 # ------------------------------------------------------------
@@ -48,8 +59,12 @@ ENV NEXT_TELEMETRY_DISABLED=1
 # Copy the rest of the source.
 COPY . .
 
-# Generate the Prisma client (needed at build time for type imports).
-RUN bunx prisma generate
+# Prisma client was already generated in the deps stage (cached).
+# But the schema might have changed since deps — regenerate to be safe.
+# Uses npx (not bunx) for more reliable network handling during engine download.
+RUN npx prisma generate \
+    || (sleep 3 && npx prisma generate) \
+    || (sleep 10 && PRISMA_ENGINES_MIRROR=https://prisma-builds.s3-eu-west-1.amazonaws.com npx prisma generate)
 
 # Build Next.js. The build script (package.json) also copies .next/static
 # and public/ into the standalone output dir.
