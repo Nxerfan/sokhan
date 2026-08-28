@@ -11,9 +11,10 @@ import { MarketingHome } from '@/components/marketing/home/marketing-home'
 /**
  * Root route. Two states:
  *  - Authenticated → dashboard (DashboardShell + its own nav rail).
- *  - Unauthenticated → marketing homepage (asymmetric hero + differentiators
- *    + CTA strip), with nav + footer + auth modal. The auth modal is
- *    triggered by the "Sign up" / "Log in" buttons in the marketing nav.
+ *  - Unauthenticated → marketing homepage, with nav + footer + auth modal.
+ *
+ * The auth modal (triggered by "Sign up" / "Log in" buttons) handles both
+ * the legacy password login and the new OTP signup flow.
  */
 export default function Home() {
   const { data: session, status } = useSession()

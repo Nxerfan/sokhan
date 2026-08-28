@@ -812,3 +812,63 @@ Stage Summary:
 - /doc documentation page created.
 - Self-hosted request form + API endpoint.
 - All 8 new tests pass. All existing tests pass.
+
+---
+Task ID: 11
+Agent: main (Senior Full-Stack Engineer)
+Task: Module 7 — OTP-based authentication with Nixify.
+
+Work Log:
+
+**Environment:**
+- `.env` has NIXIFY_API_KEY, NIXIFY_BASE_URL, NIXIFY_MOCK=true
+- `.env.local` has the same (persists across sandbox resets)
+- `.env.docker.example` has placeholder values
+- `.env` is gitignored via `.env*` pattern (verified)
+
+**Nixify Client Library (`src/lib/nixify/client.ts`):**
+- `sendOtp(email, purpose)` — sends OTP via Nixify API, returns requestId + expiresAt
+- `verifyOtp(email, code, purpose, requestId)` — verifies OTP, returns verified boolean
+- `resendOtp(email, purpose)` — resends OTP, returns new requestId
+- Mock mode (NIXIFY_MOCK=true): OTP is always "123456", no real API calls
+- Typed errors (NixifyError) with code, message, statusCode
+- Error code mapping to bilingual messages (getErrorMessage)
+- Handles all Nixify error codes: validation_failed, rate_limited, code_mismatch, expired, already_used, locked, ip_blocked, disposable_email
+
+**Schema Changes:**
+- User: added `emailVerified`, `emailVerifiedAt`, `passwordResetAt` fields
+- New `OtpRequest` model (global, not tenant-scoped — tracks OTP requests with requestId, purpose, attempts, resendCount, verified)
+- New `PendingSignup` model (holds partially-completed signups between OTP verification and account creation)
+- OtpRequest is NOT tenant-scoped (User is global, so OtpRequest is global too)
+- Legacy users get `emailVerified=true` set on signup (backward compat)
+
+**API Routes:**
+- `POST /api/auth/signup/start` — email → send OTP → create PendingSignup + OtpRequest
+- `POST /api/auth/signup/verify` — verify OTP code → mark OtpRequest verified
+- `POST /api/auth/signup/complete` — create User + Tenant + Membership → clean up
+- `POST /api/auth/login-otp/start` — send OTP for existing user
+- `POST /api/auth/login-otp/verify` — verify OTP → return verified
+- `POST /api/auth/reset-password/start` — send OTP for reset
+- `POST /api/auth/reset-password/verify` — verify OTP
+- `POST /api/auth/reset-password/complete` — set new password, update passwordResetAt
+- `POST /api/auth/otp/resend` — resend OTP (max 3 resends per request)
+- Legacy `POST /api/auth/signup` still works (backward compat, sets emailVerified=true)
+
+**UI:**
+- AuthModal updated: signup mode = 3-step OTP wizard (email → OTP → password+workspace)
+- Login mode: password form (existing flow preserved)
+- 6-digit OTP input with auto-focus next, countdown timer, resend button (disabled after 3)
+- Bilingual error messages (fa/en)
+- Step indicator (3 progress bars)
+
+**Tests (8/8 pass):**
+1. Signup: full 3-step OTP flow (email → OTP → complete) ✓
+2. Signup: wrong OTP code rejected ✓
+3. Signup: resend limit (3 max, 4th rejected) ✓
+4. Login: password works (existing flow) ✓
+5. Login: OTP flow (email → OTP → verified) ✓
+6. Reset password: full 3-step flow ✓
+7. Legacy account works (existing users can still login) ✓
+8. Mock mode works (OTP code 123456 accepted) ✓
+
+**Regression: Smoke + Security (8/8 pass).** Production build: 0 errors.

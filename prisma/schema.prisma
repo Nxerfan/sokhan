@@ -47,6 +47,9 @@ model User {
   passwordHash String?
   avatarUrl    String?
   hasUsedFreeTrial Boolean @default(false) // prevents re-creating free workspaces
+  emailVerified    Boolean    @default(false)
+  emailVerifiedAt  DateTime?
+  passwordResetAt  DateTime?
   locale       String   @default("fa")
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
@@ -54,6 +57,7 @@ model User {
   memberships  Membership[]
   assignedConversations Conversation[] @relation("AssignedAgent")
   sentMessages  Message[]
+  otpRequests  OtpRequest[]
   participants  Participant[]
 }
 
@@ -413,4 +417,41 @@ model SelfHostRequest {
   message   String?
   status    String   @default("pending") // pending | contacted | resolved
   createdAt DateTime @default(now())
+}
+
+// ============================================================
+// Module 7 — OTP-based authentication
+// ============================================================
+
+/// OTP verification request. Global (not tenant-scoped) — tied to user accounts.
+model OtpRequest {
+  id          String   @id @default(cuid())
+  userId      String?
+  email       String
+  purpose     String   // 'signup' | 'login' | 'reset_password'
+  requestId   String   @unique  // Nixify request_id
+  expiresAt   DateTime
+  attempts    Int      @default(0)
+  resendCount Int      @default(0)
+  verified    Boolean  @default(false)
+  verifiedAt  DateTime?
+  ipAddress   String?
+  createdAt   DateTime @default(now())
+
+  user        User?    @relation(fields: [userId], references: [id])
+
+  @@index([email, purpose])
+  @@index([requestId])
+}
+
+/// Holds partially-completed signups (between OTP verification and account creation).
+model PendingSignup {
+  id            String   @id @default(cuid())
+  email         String   @unique
+  nixifyRequestId String?
+  otpVerified   Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  expiresAt     DateTime
+
+  @@index([email])
 }
