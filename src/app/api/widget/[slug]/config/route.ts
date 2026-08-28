@@ -1,6 +1,18 @@
 import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 
+/** CORS headers for widget API responses. */
+function widgetHeaders(res: NextResponse): NextResponse {
+  res.headers.set('Access-Control-Allow-Origin', '*')
+  res.headers.set('Access-Control-Allow-Methods', 'GET, OPTIONS')
+  res.headers.set('Access-Control-Allow-Headers', 'Content-Type')
+  return res
+}
+
+export async function OPTIONS() {
+  return new NextResponse(null, { status: 204, headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type' } })
+}
+
 /**
  * Public widget configuration, resolved by tenant slug. No auth — this is the
  * customer-facing config consumed by the embedded widget script.
@@ -15,10 +27,10 @@ export async function GET(
     include: { widgetConfig: true },
   })
   if (!tenant || !tenant.widgetConfig) {
-    return NextResponse.json({ error: 'not_found' }, { status: 404 })
+    return widgetHeaders(NextResponse.json({ error: 'not_found' }, { status: 404 }))
   }
   const c = tenant.widgetConfig
-  return NextResponse.json({
+  return widgetHeaders(NextResponse.json({
     slug,
     name: tenant.name,
     accentColor: c.accentColor,
@@ -29,5 +41,5 @@ export async function GET(
     greetingTexts: c.greetingTexts as Record<string, string>,
     defaultLocale: c.defaultLocale,
     defaultDirection: tenant.defaultDirection,
-  })
+  }))
 }

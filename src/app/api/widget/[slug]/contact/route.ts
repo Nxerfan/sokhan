@@ -1,40 +1,66 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
-import { signToken, verifyToken, type VisitorTokenPayload } from '@/lib/realtime-token'
+import { signToken, type VisitorTokenPayload } from '@/lib/realtime-token'
+import { checkRateLimit, getClientIP } from '@/lib/rate-limit'
 
-/**
- * Visitor identification endpoint — called by the widget on first load or when
- * the visitor provides an email. Dedupes by (tenantId, identifier).
- *
- * Returns a realtime visitor token for Socket.IO auth + the contactId +
- * existing open conversation if any.
- */
+/** CORS + rate-limit headers for widget API responses. */
+function widgetHeaders(res: NextResponse): NextResponse {
+  res.headers.set('Access-Control-Allow-Origin', '*')
+  res.headers.set('Access-Control-Allow-Methods', 'POST, OPTIONS')
+  res.headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+  return res
+}
+
+/** Validate email format. */
+function isValidEmail(email: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 200
+}
+
+export async function OPTIONS() {
+  return new NextResponse(null, { status: 204, headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type, Authorization' } })
+}
+
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ slug: string }> },
 ) {
   const { slug } = await params
+
+  // Rate limit — per IP + per tenant
+  const ip = getClientIP(req)
+  const rateLimit = checkRateLimit(ip, slug)
+  if (!rateLimit.allowed) {
+    return widgetHeaders(NextResponse.json(
+      { error: 'rate_limited' },
+      { status: 429, headers: { 'Retry-After': String(Math.ceil((rateLimit.resetAt - Date.now()) / 1000)) } },
+    ))
+  }
+
   const tenant = await db.tenant.findUnique({
     where: { slug },
     include: { widgetConfig: true },
   })
   if (!tenant) {
-    return NextResponse.json({ error: 'not_found' }, { status: 404 })
+    return widgetHeaders(NextResponse.json({ error: 'not_found' }, { status: 404 }))
   }
 
   const body = await req.json()
-  const visitorId = String(body.visitorId ?? '').trim()
-  const email = String(body.email ?? '').trim().toLowerCase()
-  const name = String(body.name ?? '').trim()
+  const visitorId = String(body.visitorId ?? '').trim().slice(0, 100)
+  const email = String(body.email ?? '').trim().toLowerCase().slice(0, 200)
+  const name = String(body.name ?? '').trim().slice(0, 100)
 
   if (!visitorId && !email) {
-    return NextResponse.json({ error: 'visitorId_or_email_required' }, { status: 400 })
+    return widgetHeaders(NextResponse.json({ error: 'visitorId_or_email_required' }, { status: 400 }))
+  }
+
+  // Validate email format if provided
+  if (email && !isValidEmail(email)) {
+    return widgetHeaders(NextResponse.json({ error: 'invalid_email' }, { status: 400 }))
   }
 
   const identifier = email || visitorId
   const identifierType = email ? 'email' : 'visitorId'
 
-  // Find or create contact — tenantId passed explicitly (Module 2 convention)
   let contact = await db.contact.findUnique({
     where: { tenantId_identifier: { tenantId: tenant.id, identifier } },
   })
@@ -71,11 +97,11 @@ export async function POST(
   }
   const realtimeToken = signToken(tokenPayload)
 
-  return NextResponse.json({
+  return widgetHeaders(NextResponse.json({
     contactId: contact.id,
     conversationId: existingConversation?.id ?? null,
     realtimeToken,
     locale: tenant.defaultLocale,
     direction: tenant.defaultDirection,
-  })
+  }))
 }

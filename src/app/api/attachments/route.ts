@@ -28,8 +28,23 @@ export async function POST(req: NextRequest) {
       return { error: 'file_too_large' as const }
     }
 
-    // Generate a unique filename
-    const ext = path.extname(file.name) || ''
+    // File type whitelist — only safe image/document types.
+    // Prevents uploading HTML/SVG/JS files that could execute when served.
+    const ALLOWED_MIME = [
+      'image/jpeg', 'image/png', 'image/gif', 'image/webp',
+      'application/pdf',
+      'text/plain', 'text/csv',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // .docx
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // .xlsx
+    ]
+    const ALLOWED_EXT = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.pdf', '.txt', '.csv', '.docx', '.xlsx']
+    const ext = path.extname(file.name).toLowerCase()
+
+    if (!ALLOWED_MIME.includes(file.type) || !ALLOWED_EXT.includes(ext)) {
+      return { error: 'file_type_not_allowed' as const }
+    }
+
+    // Generate a unique filename (extension already validated)
     const filename = `${crypto.randomUUID()}${ext}`
     const uploadDir = path.join(process.cwd(), 'public', 'uploads')
     await mkdir(uploadDir, { recursive: true })

@@ -3,6 +3,22 @@ import { db } from '@/lib/db'
 import { verifyToken, type VisitorTokenPayload } from '@/lib/realtime-token'
 import { publishToRealtime, room, EVENTS } from '@/lib/realtime-publish'
 import { evaluateRoutingRules } from '@/lib/routing-engine'
+import { checkRateLimit, getClientIP } from '@/lib/rate-limit'
+
+const MAX_MESSAGE_LENGTH = 5000
+const MAX_MESSAGES_PER_CONVERSATION = 200
+
+/** CORS + rate-limit headers for widget API responses. */
+function widgetHeaders(res: NextResponse): NextResponse {
+  res.headers.set('Access-Control-Allow-Origin', '*')
+  res.headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+  res.headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+  return res
+}
+
+export async function OPTIONS() {
+  return new NextResponse(null, { status: 204, headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type, Authorization' } })
+}
 
 /**
  * Visitor message endpoint — widget sends a message here (REST, persisted),
@@ -17,18 +33,18 @@ export async function GET(
 ) {
   const { slug } = await params
   const token = req.headers.get('authorization')?.replace('Bearer ', '')
-  if (!token) return NextResponse.json({ error: 'no_token' }, { status: 401 })
+  if (!token) return widgetHeaders(NextResponse.json({ error: 'no_token' }, { status: 401 }))
 
   const payload = verifyToken(token)
   if (!payload || payload.type !== 'visitor') {
-    return NextResponse.json({ error: 'invalid_token' }, { status: 401 })
+    return widgetHeaders(NextResponse.json({ error: 'invalid_token' }, { status: 401 }))
   }
 
   const { contactId, tenantId } = payload as VisitorTokenPayload
   const conversationId = new URL(req.url).searchParams.get('conversationId')
 
   if (!conversationId) {
-    return NextResponse.json({ messages: [] })
+    return widgetHeaders(NextResponse.json({ messages: [] }))
   }
 
   // Verify the conversation belongs to this contact+tenant
@@ -36,7 +52,7 @@ export async function GET(
     where: { id: conversationId, tenantId, contactId },
   })
   if (!conversation) {
-    return NextResponse.json({ messages: [] })
+    return widgetHeaders(NextResponse.json({ messages: [] }))
   }
 
   const messages = await db.message.findMany({
@@ -45,7 +61,7 @@ export async function GET(
     take: 100,
   })
 
-  return NextResponse.json({ messages, conversationId })
+  return widgetHeaders(NextResponse.json({ messages, conversationId }))
 }
 
 export async function POST(
@@ -53,19 +69,30 @@ export async function POST(
   { params }: { params: Promise<{ slug: string }> },
 ) {
   const { slug } = await params
+
+  // Rate limit — per IP + per tenant
+  const ip = getClientIP(req)
+  const rateLimit = checkRateLimit(ip, slug)
+  if (!rateLimit.allowed) {
+    return widgetHeaders(NextResponse.json(
+      { error: 'rate_limited' },
+      { status: 429, headers: { 'Retry-After': String(Math.ceil((rateLimit.resetAt - Date.now()) / 1000)) } },
+    ))
+  }
+
   const token = req.headers.get('authorization')?.replace('Bearer ', '')
-  if (!token) return NextResponse.json({ error: 'no_token' }, { status: 401 })
+  if (!token) return widgetHeaders(NextResponse.json({ error: 'no_token' }, { status: 401 }))
 
   const payload = verifyToken(token)
   if (!payload || payload.type !== 'visitor') {
-    return NextResponse.json({ error: 'invalid_token' }, { status: 401 })
+    return widgetHeaders(NextResponse.json({ error: 'invalid_token' }, { status: 401 }))
   }
 
   const { contactId, tenantId } = payload as VisitorTokenPayload
   const body = await req.json()
-  const text = String(body.text ?? '').trim()
+  const text = String(body.text ?? '').trim().slice(0, MAX_MESSAGE_LENGTH)
   if (!text) {
-    return NextResponse.json({ error: 'empty_message' }, { status: 400 })
+    return widgetHeaders(NextResponse.json({ error: 'empty_message' }, { status: 400 }))
   }
 
   // Find or create the conversation — tenantId explicit on every write
