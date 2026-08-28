@@ -15,6 +15,7 @@ import { cn } from '@/lib/utils'
 const NAV_LINKS = [
   { href: '/features', key: 'features' },
   { href: '/pricing', key: 'pricing' },
+  { href: '/doc', key: 'docs' },
   { href: '/self-hosting', key: 'selfHost' },
 ] as const
 

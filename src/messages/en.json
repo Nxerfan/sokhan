@@ -44,7 +44,8 @@
     "general": "General",
     "billing": "Billing",
     "faq": "FAQ AI",
-    "products": "Products"
+    "products": "Products",
+    "websites": "Websites"
   },
   "auth": {
     "loginTitle": "Welcome back",
@@ -197,6 +198,7 @@
       "features": "Features",
       "pricing": "Pricing",
       "selfHost": "Self-hosting",
+      "docs": "Docs",
       "login": "Log in",
       "signup": "Sign up",
       "getStarted": "Get started",
@@ -445,15 +447,35 @@
       "agplTitle": "AGPL-3.0 in plain language",
       "agplSubtitle": "Sukhan is licensed under the GNU Affero General Public License v3.0. Here's what that actually means.",
       "agplRightsTitle": "Your rights",
-      "agplRights": ["Use — Run this software for any purpose, including commercially.", "Study — Read and modify the source code.", "Share — Redistribute the software, in original or modified form.", "Modify — Create derivative works."],
+      "agplRights": [
+        "Use — Run this software for any purpose, including commercially.",
+        "Study — Read and modify the source code.",
+        "Share — Redistribute the software, in original or modified form.",
+        "Modify — Create derivative works."
+      ],
       "agplObligationsTitle": "Your obligations",
-      "agplObligations": ["Share modifications — If you distribute modified versions, you must share the corresponding source code under the same AGPL-3.0 license.", "Network use clause — If you modify this software and offer it as a web service to others (over a network), you must make your modified source code available to your users."],
+      "agplObligations": [
+        "Share modifications — If you distribute modified versions, you must share the corresponding source code under the same AGPL-3.0 license.",
+        "Network use clause — If you modify this software and offer it as a web service to others (over a network), you must make your modified source code available to your users."
+      ],
       "agplScenariosTitle": "What this means in practice",
       "agplScenarios": [
-        { "scenario": "Running Sukhan unmodified for your own organization", "obligation": "None — no obligation to share anything." },
-        { "scenario": "Running Sukhan unmodified as a hosted service for customers", "obligation": "None — you're using the original code, which is already public." },
-        { "scenario": "Modifying Sukhan and using it internally only", "obligation": "None — internal use is not 'offering to others'." },
-        { "scenario": "Modifying Sukhan and offering it as a web service", "obligation": "You must make your modified source code available to those users." }
+        {
+          "scenario": "Running Sukhan unmodified for your own organization",
+          "obligation": "None — no obligation to share anything."
+        },
+        {
+          "scenario": "Running Sukhan unmodified as a hosted service for customers",
+          "obligation": "None — you're using the original code, which is already public."
+        },
+        {
+          "scenario": "Modifying Sukhan and using it internally only",
+          "obligation": "None — internal use is not 'offering to others'."
+        },
+        {
+          "scenario": "Modifying Sukhan and offering it as a web service",
+          "obligation": "You must make your modified source code available to those users."
+        }
       ],
       "agplNote": "This plain-language summary is for understanding only. The legally binding text is the full AGPL-3.0 license.",
       "agplReadFull": "Read the full AGPL-3.0 license",
@@ -467,16 +489,269 @@
       "dockerCopied": "Copied",
       "whySelfHostTitle": "Why self-host?",
       "whySelfHost": [
-        { "title": "Data sovereignty", "body": "Your customer conversations stay on your server. Nothing leaves your infrastructure unless you want it to." },
-        { "title": "No per-seat cost ceiling", "body": "Add as many agents as you want. There's no license fee, no per-seat billing, no usage metering." },
-        { "title": "Full source audit", "body": "Read every line. Modify anything. The AGPL-3.0 guarantees you always have the right to inspect and modify the code." },
-        { "title": "Custom integrations", "body": "Hook Sukhan into your internal systems. Build custom connectors. Modify the AI prompts to fit your domain." }
+        {
+          "title": "Data sovereignty",
+          "body": "Your customer conversations stay on your server. Nothing leaves your infrastructure unless you want it to."
+        },
+        {
+          "title": "No per-seat cost ceiling",
+          "body": "Add as many agents as you want. There's no license fee, no per-seat billing, no usage metering."
+        },
+        {
+          "title": "Full source audit",
+          "body": "Read every line. Modify anything. The AGPL-3.0 guarantees you always have the right to inspect and modify the code."
+        },
+        {
+          "title": "Custom integrations",
+          "body": "Hook Sukhan into your internal systems. Build custom connectors. Modify the AI prompts to fit your domain."
+        }
       ],
       "readGuide": "Read the full self-hosting guide",
       "cta": {
         "title": "Want help self-hosting?",
         "body": "The Enterprise plan includes a self-hosting license with priority support. Or fork the repo and run it yourself — both are valid.",
         "button": "Contact sales"
+      }
+    },
+    "doc": {
+      "kicker": "Documentation",
+      "title": "Embed the Sukhan widget in five minutes.",
+      "subtitle": "Two paths to a live widget: install the NPM package for a React/Next.js app, or paste a single script tag for plain HTML. Pick the one that fits your stack.",
+      "backToHome": "Back to home",
+      "quickStart": {
+        "title": "Quick start",
+        "subtitle": "Three steps from zero to a live chat widget on your page.",
+        "steps": [
+          {
+            "title": "Install",
+            "body": "Add the sukhan-widget package to your project. Works with npm, yarn, pnpm, or bun."
+          },
+          {
+            "title": "Set the env var",
+            "body": "Add your API key to .env.local. Find it in the Sukhan dashboard → Widget → Embed."
+          },
+          {
+            "title": "Import + render",
+            "body": "Call initSukhan() in a client-side useEffect. The widget auto-mounts the launcher button."
+          }
+        ]
+      },
+      "react": {
+        "title": "React / Next.js integration",
+        "subtitle": "The widget is SSR-safe: importing it in a Next.js server component is a no-op. Initialize it inside a useEffect in a client component.",
+        "codeTitle": "app/components/sukhan-chat.tsx",
+        "codeNote": "Expose the API key to the client by prefixing it with NEXT_PUBLIC_ in your .env.local — Next.js inlines NEXT_PUBLIC_* vars into the client bundle at build time."
+      },
+      "scriptTag": {
+        "title": "HTML / script-tag method",
+        "subtitle": "For non-React sites (plain HTML, WordPress, custom CMS). No build step, no bundler, no NPM. The script reads data-api-key at runtime.",
+        "codeTitle": "Paste this once before the closing body tag",
+        "codeNote": "The src URL is the Sukhan backend origin. If you self-host, replace with your own backend URL."
+      },
+      "config": {
+        "title": "Configuration",
+        "subtitle": "initSukhan(options) accepts the following. All keys are optional except apiKey.",
+        "freeNote": "Free plan is LOCKED. The widget renders a small Powered-by-Sukhan badge and the launcher uses the neutral ink color. Upgrade to Pro / Business / Enterprise to remove the badge and apply your accent color across the launcher + header.",
+        "cols": {
+          "option": "Option",
+          "type": "Type",
+          "default": "Default",
+          "description": "Description"
+        },
+        "rows": [
+          {
+            "description": "The tenant API key (workspace slug, optionally sk_-prefixed). Falls back to process.env.SUKHAN_API_KEY then window.SUKHAN_API_KEY."
+          },
+          {
+            "description": "Sukhan backend base URL. Defaults to the page origin (same-domain embedding) or https://app.sukhan.chat (cross-origin NPM embedding)."
+          },
+          {
+            "description": "Where to mount the widget. Defaults to document.body."
+          },
+          {
+            "description": "Force a UI locale. Defaults to the tenant defaultLocale."
+          },
+          {
+            "description": "Force a text direction. Defaults to the tenant defaultDirection."
+          },
+          {
+            "description": "Pre-identify the visitor with a name, email, or custom visitor ID."
+          },
+          {
+            "description": "Suppress the 10s polling fallback. Test-only."
+          }
+        ]
+      },
+      "api": {
+        "title": "API reference",
+        "subtitle": "The widget talks to four public REST endpoints + one Socket.IO transport. All are CORS-enabled and rate-limited.",
+        "endpointsTitle": "REST endpoints",
+        "endpointsSubtitle": "All under /api/widget/[slug]/. The [slug] part is your workspace slug (= API key).",
+        "cols": {
+          "method": "Method",
+          "path": "Path",
+          "auth": "Auth",
+          "description": "Description"
+        },
+        "endpoints": [
+          {
+            "description": "Fetch the widget configuration (accent, shape, position, greeting, locale, direction)."
+          },
+          {
+            "description": "Identify the visitor. Body fields: visitorId, email?, name?. Returns: contactId, conversationId, realtimeToken."
+          },
+          {
+            "description": "Load the visitor conversation history. Query: ?conversationId=..."
+          },
+          {
+            "description": "Send a visitor message. Body field: text. Returns: message, conversationId."
+          },
+          {
+            "description": "Submit a CSAT rating. Body fields: conversationId, rating (1-5), comment?."
+          }
+        ],
+        "socketTitle": "Realtime transport",
+        "socketSubtitle": "Socket.IO connection over the Caddy gateway. The realtime token (from POST /contact) is passed in the auth field.",
+        "socketUrl": "URL",
+        "socketAuth": "Auth",
+        "socketEvents": "Events",
+        "authTitle": "Authentication model",
+        "authBody": "The visitor realtime token is a short-lived JWT signed with the backend NEXTAUTH_SECRET. It encodes the visitor type, contact ID, tenant ID, and slug. Sent as Authorization Bearer token on REST requests and as auth token on the Socket.IO handshake.",
+        "rateTitle": "Rate limits",
+        "rateBody": "30 req/min per IP address. 60 req/min per tenant (slug). 429 responses include a Retry-After header. Dev mode skips rate limiting for localhost."
+      },
+      "limits": {
+        "title": "Plan limits",
+        "subtitle": "The widget is free to embed on every plan. The difference is in styling freedom and which backend features are enabled.",
+        "freeLocked": "Free plan widgets are LOCKED to a Powered-by-Sukhan badge + neutral ink launcher. Upgrade for full white-label.",
+        "cols": {
+          "feature": "Feature",
+          "free": "Free",
+          "pro": "Pro",
+          "business": "Business",
+          "enterprise": "Enterprise"
+        },
+        "rows": [
+          {
+            "feature": "Embeddable widget",
+            "free": "✓",
+            "pro": "✓",
+            "business": "✓",
+            "enterprise": "✓"
+          },
+          {
+            "feature": "Real-time chat (Socket.IO)",
+            "free": "✓",
+            "pro": "✓",
+            "business": "✓",
+            "enterprise": "✓"
+          },
+          {
+            "feature": "CSAT surveys",
+            "free": "✓",
+            "pro": "✓",
+            "business": "✓",
+            "enterprise": "✓"
+          },
+          {
+            "feature": "Widget accent color",
+            "free": "locked",
+            "pro": "✓",
+            "business": "✓",
+            "enterprise": "✓"
+          },
+          {
+            "feature": "White-label (no badge)",
+            "free": "—",
+            "pro": "✓",
+            "business": "✓",
+            "enterprise": "✓"
+          },
+          {
+            "feature": "Conversations / month",
+            "free": "100",
+            "pro": "1,000",
+            "business": "5,000",
+            "enterprise": "∞"
+          },
+          {
+            "feature": "Agents",
+            "free": "2",
+            "pro": "5",
+            "business": "20",
+            "enterprise": "∞"
+          },
+          {
+            "feature": "File attachments",
+            "free": "—",
+            "pro": "✓",
+            "business": "✓",
+            "enterprise": "✓"
+          },
+          {
+            "feature": "AI actions / month",
+            "free": "0",
+            "pro": "500",
+            "business": "2,000",
+            "enterprise": "∞"
+          },
+          {
+            "feature": "FAQ auto-responder",
+            "free": "—",
+            "pro": "✓",
+            "business": "✓",
+            "enterprise": "✓"
+          },
+          {
+            "feature": "Product Q&A",
+            "free": "—",
+            "pro": "✓",
+            "business": "✓",
+            "enterprise": "✓"
+          },
+          {
+            "feature": "Routing rules",
+            "free": "—",
+            "pro": "✓",
+            "business": "✓",
+            "enterprise": "✓ + SLA"
+          }
+        ]
+      },
+      "troubleshooting": {
+        "title": "Troubleshooting",
+        "subtitle": "Common issues and how to fix them.",
+        "items": [
+          {
+            "q": "The widget doesn't appear on my page",
+            "a": "Check the browser console for [sukhan] errors. The most common is a missing API key. Verify SUKHAN_API_KEY (or NEXT_PUBLIC_SUKHAN_API_KEY for Next.js) is set AND exposed to the client. Confirm the backend is reachable: curl /api/widget/[your-slug]/config should return JSON, not a 404."
+          },
+          {
+            "q": "Real-time messages arrive after a 10-second delay",
+            "a": "The 10s delay means the polling fallback is delivering the message instead of Socket.IO. Causes: (1) NEXTAUTH_SECRET mismatch between the Next.js app and the realtime service — both processes must use the same secret. (2) The reverse proxy is stripping the XTransformPort query param or the WebSocket upgrade headers. (3) An ad blocker is blocking /socket.io.min.js — the polling fallback handles this gracefully."
+          },
+          {
+            "q": "I am on the free plan and the widget shows a Powered-by-Sukhan badge",
+            "a": "That is expected behavior. Free-plan widgets are LOCKED: the launcher uses the neutral ink color and the panel shows a small Powered-by-Sukhan footer. Upgrade to Pro / Business / Enterprise to remove the badge and apply your own accent color."
+          },
+          {
+            "q": "initSukhan throws a no-API-key-found error",
+            "a": "The widget looks for the API key in three places, in priority order: (1) options.apiKey passed to initSukhan, (2) window.SUKHAN_API_KEY (runtime injection), (3) process.env.SUKHAN_API_KEY (build-time replacement). If none are set, init throws. Set at least one."
+          },
+          {
+            "q": "Cross-origin embedding fails with CORS errors",
+            "a": "All public widget endpoints set Access-Control-Allow-Origin: *, so CORS shouldn't be an issue. If you see CORS errors, you may be hitting a dashboard endpoint (which is same-origin only) — the widget endpoints are all under /api/widget/[slug]/. Or your reverse proxy may be stripping the Access-Control-Allow-Origin header."
+          },
+          {
+            "q": "How do I force a specific locale?",
+            "a": "Pass locale: en (or fa) to initSukhan(). Without an override, the widget uses the tenant defaultLocale from the dashboard."
+          }
+        ]
+      },
+      "cta": {
+        "title": "Ready to embed?",
+        "body": "Create a workspace, grab your API key, and have a live widget on your site within five minutes. Free forever for small teams.",
+        "button": "Start free"
       }
     },
     "footer": {

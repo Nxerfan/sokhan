@@ -40,6 +40,7 @@ const TENANT_SCOPED_MODELS = [
   'Product',
   'AiConfig',
   'ConnectorConfig',
+  'WidgetDomain',
 ] as const
 
 type TenantScopedModel = (typeof TENANT_SCOPED_MODELS)[number]

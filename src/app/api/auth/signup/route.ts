@@ -54,7 +54,7 @@ export async function POST(req: NextRequest) {
     })
 
     const user = await tx.user.create({
-      data: { email, name, passwordHash, locale: 'fa' },
+      data: { email, name, passwordHash, locale: 'fa', hasUsedFreeTrial: true },
     })
 
     await tx.membership.create({

@@ -18,6 +18,7 @@ import { ContactsPanel } from './views/contacts-panel'
 import { AnalyticsPanel } from './views/analytics-panel'
 import { FaqPanel } from './views/faq-panel'
 import { ProductsPanel } from './views/products-panel'
+import { WebsitesPanel } from './views/websites-panel'
 import { Users, BarChart3, Workflow, Plug } from 'lucide-react'
 
 type TenantInfo = { id: string; name: string; slug: string }
@@ -59,6 +60,7 @@ export function DashboardShell() {
           {view === 'billing' && <BillingPanel />}
           {view === 'faq' && <FaqPanel />}
           {view === 'products' && <ProductsPanel />}
+          {view === 'websites' && <WebsitesPanel />}
         </main>
       </div>
       <CommandPalette />

@@ -19,6 +19,9 @@ import { getPlan, type PlanLimit } from './plans'
 
 export type LimitKind = keyof PlanLimit
 
+// Add 'weeklyMessages' and 'websites' to the limit kinds
+// These are checked differently from the monthly limits
+
 export interface PlanLimitResult {
   allowed: boolean
   /** Current usage count. */
@@ -81,13 +84,21 @@ async function countUsage(tenantId: string, limit: LimitKind): Promise<number> {
       return db.department.count({ where: { tenantId } })
     }
     case 'aiActions': {
-      // AI actions (FAQ matches + product Q&A) this calendar month.
-      // Tracked via Message records where senderType = 'ai'.
       const now = new Date()
       const startOfMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
       return db.message.count({
         where: { tenantId, senderType: 'ai', createdAt: { gte: startOfMonth } },
       })
+    }
+    case 'weeklyMessages': {
+      // Messages sent by visitors in the last 7 days (rolling window)
+      const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+      return db.message.count({
+        where: { tenantId, senderType: 'contact', createdAt: { gte: sevenDaysAgo } },
+      })
+    }
+    case 'websites': {
+      return db.widgetDomain.count({ where: { tenantId } })
     }
     default:
       return 0

@@ -1,20 +1,16 @@
 /**
- * Plan catalog.
+ * Plan catalog (Module 6 restructure).
  *
- * Prices in Toman (IRR). Limits are stored as numbers; -1 means unlimited.
+ * Plans: Free (30-day trial, 100 msgs/week, 1 website, locked customization),
+ * Pro (500K msgs/month, 3 websites, full customization), Max (1M msgs/month,
+ * 8 websites, full customization), Self-Hosted (contact us).
  *
- * - `free`       — 0 Toman, 2 agents, 100 conversations/month, 1 department
- * - `pro`        — 290,000 Toman/month, 5 agents, 1,000 conversations/month, 5 departments
- * - `business`   — 890,000 Toman/month, 20 agents, 5,000 conversations/month, unlimited departments
- * - `enterprise` — contact sales, unlimited everything
- *
- * `getPlan(slug)` looks up by slug. The `ensurePlansSeeded()` helper syncs the
- * catalog to the DB so the Plan table is always up-to-date.
+ * `getPlan(slug)` looks up by slug. `ensurePlansSeeded()` syncs to DB.
  */
 
 import { db } from '@/lib/db'
 
-export type PlanSlug = 'free' | 'pro' | 'business' | 'enterprise'
+export type PlanSlug = 'free' | 'pro' | 'max' | 'self-hosted'
 
 export interface PlanLimit {
   /** Max agents (memberships). -1 = unlimited. */
@@ -23,8 +19,12 @@ export interface PlanLimit {
   conversations: number
   /** Max departments. -1 = unlimited. */
   departments: number
-  /** Max AI actions (FAQ matches + product Q&A) per month. -1 = unlimited. 0 = AI disabled. */
+  /** Max AI actions per month. -1 = unlimited. 0 = AI disabled. */
   aiActions: number
+  /** Max widget domains (websites). -1 = unlimited. */
+  websites: number
+  /** Weekly message limit for free plan. -1 = no weekly limit. */
+  weeklyMessages: number
 }
 
 export interface Plan {
@@ -37,6 +37,10 @@ export interface Plan {
   limits: PlanLimit
   /** When true, do not show a payment flow — contact sales instead. */
   contactSales: boolean
+  /** Whether widget customization is unlocked. */
+  customization: boolean
+  /** Free trial duration in days. 0 = no trial limit. */
+  trialDays: number
 }
 
 /** The canonical plan catalog. Source of truth for limits + pricing. */
@@ -46,32 +50,40 @@ export const PLANS: Plan[] = [
     name: 'Free',
     priceToman: 0,
     interval: 'month',
-    limits: { agents: 2, conversations: 100, departments: 1, aiActions: 0 },
+    limits: { agents: 2, conversations: -1, departments: 1, aiActions: 0, websites: 1, weeklyMessages: 100 },
     contactSales: false,
+    customization: false,
+    trialDays: 30,
   },
   {
     slug: 'pro',
     name: 'Pro',
-    priceToman: 290_000,
+    priceToman: 0, // Coming Soon — price TBD
     interval: 'month',
-    limits: { agents: 5, conversations: 1_000, departments: 5, aiActions: 500 },
+    limits: { agents: 5, conversations: 500_000, departments: 5, aiActions: 500, websites: 3, weeklyMessages: -1 },
     contactSales: false,
+    customization: true,
+    trialDays: 0,
   },
   {
-    slug: 'business',
-    name: 'Business',
-    priceToman: 890_000,
+    slug: 'max',
+    name: 'Max',
+    priceToman: 0, // Coming Soon — price TBD
     interval: 'month',
-    limits: { agents: 20, conversations: 5_000, departments: -1, aiActions: 2_000 },
+    limits: { agents: 20, conversations: 1_000_000, departments: -1, aiActions: 2_000, websites: 8, weeklyMessages: -1 },
     contactSales: false,
+    customization: true,
+    trialDays: 0,
   },
   {
-    slug: 'enterprise',
-    name: 'Enterprise',
+    slug: 'self-hosted',
+    name: 'Self-Hosted',
     priceToman: 0,
     interval: 'month',
-    limits: { agents: -1, conversations: -1, departments: -1, aiActions: -1 },
+    limits: { agents: -1, conversations: -1, departments: -1, aiActions: -1, websites: -1, weeklyMessages: -1 },
     contactSales: true,
+    customization: true,
+    trialDays: 0,
   },
 ]
 
@@ -91,9 +103,6 @@ export function isPaidPlan(slug: string): boolean {
 
 /**
  * Sync the catalog to the DB. Idempotent — upserts each plan by slug.
- * Call this on first billing API hit (lazy seed).
- *
- * Note: Plan is NOT a tenant-scoped model — it is global catalog data.
  */
 export async function ensurePlansSeeded(): Promise<void> {
   for (const plan of PLANS) {
@@ -104,7 +113,6 @@ export async function ensurePlansSeeded(): Promise<void> {
         name: plan.name,
         priceToman: plan.priceToman,
         interval: plan.interval,
-        // Prisma's JsonValue requires an index signature; cast satisfies it.
         limits: plan.limits as unknown as object,
         active: true,
       },

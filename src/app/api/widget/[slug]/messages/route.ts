@@ -4,6 +4,8 @@ import { verifyToken, type VisitorTokenPayload } from '@/lib/realtime-token'
 import { publishToRealtime, room, EVENTS } from '@/lib/realtime-publish'
 import { evaluateRoutingRules } from '@/lib/routing-engine'
 import { checkRateLimit, getClientIP } from '@/lib/rate-limit'
+import { checkMessageLimit } from '@/lib/payments/free-plan'
+import { getRequestDomain, isDomainAllowed } from '@/lib/payments/domain-validation'
 
 const MAX_MESSAGE_LENGTH = 5000
 const MAX_MESSAGES_PER_CONVERSATION = 200
@@ -89,6 +91,19 @@ export async function POST(
   }
 
   const { contactId, tenantId } = payload as VisitorTokenPayload
+
+  // Free plan checks: domain validation + message limit + trial expiry
+  const domain = getRequestDomain(req)
+  const domainAllowed = await isDomainAllowed(tenantId, domain)
+  if (!domainAllowed) {
+    return widgetHeaders(NextResponse.json({ error: 'domain_not_allowed' }, { status: 403 }))
+  }
+
+  const messageCheck = await checkMessageLimit(tenantId)
+  if (!messageCheck.allowed) {
+    return widgetHeaders(NextResponse.json({ error: messageCheck.reason ?? 'message_limit' }, { status: 403 }))
+  }
+
   const body = await req.json()
   const text = String(body.text ?? '').trim().slice(0, MAX_MESSAGE_LENGTH)
   if (!text) {

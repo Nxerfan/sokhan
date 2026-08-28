@@ -16,6 +16,7 @@ import {
   MessageSquareText,
   Bot,
   Package,
+  Globe,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useDashboardStore, type DashboardView } from './nav-store'
@@ -31,6 +32,7 @@ const NAV_ITEMS: { view: DashboardView; icon: React.ComponentType<{ className?: 
 const SETTINGS_ITEMS: { view: DashboardView; icon: React.ComponentType<{ className?: string }>; labelKey: string }[] = [
   { view: 'faq', icon: Bot, labelKey: 'nav.faq' },
   { view: 'products', icon: Package, labelKey: 'nav.products' },
+  { view: 'websites', icon: Globe, labelKey: 'nav.websites' },
   { view: 'members', icon: UserCog, labelKey: 'nav.members' },
   { view: 'departments', icon: Building2, labelKey: 'nav.departments' },
   { view: 'widget', icon: Palette, labelKey: 'nav.widget' },

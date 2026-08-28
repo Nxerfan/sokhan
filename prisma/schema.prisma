@@ -20,6 +20,7 @@ model Tenant {
   defaultLocale   String   @default("fa")
   defaultDirection String  @default("rtl")
   plan            String   @default("free")
+  workspaceCreatedAt DateTime @default(now()) // tracks 30-day free trial
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
@@ -35,6 +36,7 @@ model Tenant {
   products        Product[]
   aiConfig        AiConfig?
   connectorConfigs ConnectorConfig[]
+  widgetDomains   WidgetDomain[]
 }
 
 /// Global identity. A user may belong to multiple tenants via Membership.
@@ -44,6 +46,7 @@ model User {
   name         String?
   passwordHash String?
   avatarUrl    String?
+  hasUsedFreeTrial Boolean @default(false) // prevents re-creating free workspaces
   locale       String   @default("fa")
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
@@ -380,4 +383,34 @@ model ConnectorConfig {
 
   @@unique([tenantId, type])
   @@index([tenantId])
+}
+
+// ============================================================
+// Module 6 — Plan restructure + widget domains + self-host requests
+// ============================================================
+
+/// Allowed website domains for widget embedding. Each "API key" = one domain.
+/// Free plan: 1 domain, Pro: 3, Max: 8.
+model WidgetDomain {
+  id        String   @id @default(cuid())
+  tenantId  String
+  domain    String   // e.g., "example.com" (normalized: lowercase, no protocol/port)
+  createdAt DateTime @default(now())
+
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, domain])
+  @@index([tenantId])
+}
+
+/// Self-hosted deployment request form submissions. Global (not tenant-scoped).
+model SelfHostRequest {
+  id        String   @id @default(cuid())
+  name      String
+  company   String
+  email     String
+  phone     String
+  message   String?
+  status    String   @default("pending") // pending | contacted | resolved
+  createdAt DateTime @default(now())
 }

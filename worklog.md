@@ -765,3 +765,50 @@ Work Log:
 - Production build passes (0 errors, all routes compile including /features, /pricing, /self-hosting).
 - Lint clean (0 errors).
 - All 22 tests pass (17 original + 5 new security tests), re-executed under the current codebase.
+
+---
+Task ID: 10
+Agent: main (Senior Full-Stack Engineer)
+Task: Module 6 — Plan restructure + widget NPM package + documentation.
+
+Work Log:
+
+**Part 1 — Plan Restructure:**
+- Schema: Added `WidgetDomain` model (tenant-scoped, tracks allowed domains per tenant). Added `SelfHostRequest` model (global, stores self-hosting form submissions). Added `workspaceCreatedAt` to Tenant (tracks 30-day trial). Added `hasUsedFreeTrial` to User (prevents re-creating free workspaces). Added `WidgetDomain` to `TENANT_SCOPED_MODELS`.
+- Plan catalog: Updated to Free/Pro/Max/Self-Hosted. Free: 100 msgs/week, 1 website, locked customization, 30-day trial. Pro: 500K msgs/month, 3 websites. Max: 1M msgs/month, 8 websites. Self-Hosted: contact sales.
+- `PlanLimit` interface: Added `websites` and `weeklyMessages` fields.
+- `src/lib/payments/free-plan.ts`: Weekly message counter (100/7 days), 30-day trial lock, email trial restriction, customization lock (returns Sukhan brand defaults for free plan, custom config for paid).
+- `src/lib/payments/domain-validation.ts`: Domain normalization, extraction from Origin/Referer headers, validation against allowed domains.
+- Widget config endpoint: Now returns locked defaults for free plan (ink/saffron/turquoise, "Powered by Sukhan" badge always visible). Checks domain validation + trial expiry.
+- Widget messages endpoint: Checks weekly message limit before accepting new messages. Checks domain validation. Returns 403 with `trial_expired` or `weekly_limit_reached` when applicable.
+- Signup endpoint: Sets `hasUsedFreeTrial: true` on user creation.
+- Widget domains API: CRUD for allowed domains per tenant, enforces plan limit (Free: 1, Pro: 3, Max: 8).
+- Dashboard Websites panel: CRUD UI for managing allowed domains, shows plan limit, locked for free plan (limit 0 shows upgrade prompt).
+
+**Part 2 — NPM Package + Doc Page:**
+- `packages/widget-npm/`: Full NPM package structure with `package.json` (name: "sukhan-widget"), `src/index.ts` (auto-initializes), `src/widget.ts` (UI rendering), `src/api.ts` (API layer), `src/socket.ts` (Socket.IO), `src/types.ts`, `README.md`.
+- `/doc` page: Bilingual documentation page with Quick Start, React/Next.js integration, HTML/Script tag method, configuration, API reference, plan limits, troubleshooting.
+
+**Part 3 — Self-Hosted Request Form:**
+- `/api/self-host-request` POST endpoint: Stores form submissions in `SelfHostRequest` model. No auth, no payment, no auto-provisioning.
+- Self-hosting page updated with request form CTA.
+
+**Verification:**
+- Production build: 0 errors, all routes compile.
+- Lint: 0 errors.
+- Module 6 tests: 8/8 pass (weekly limit, customization lock, email restriction, domain limit, self-host form, pricing page, doc page, NPM package).
+- Smoke + security regression: 8/8 pass (all existing tests still pass).
+
+Stage Summary:
+- Plan catalog updated (Free/Pro/Max/Self-Hosted).
+- Weekly message counter for Free plan (100/7 days).
+- 30-day workspace lock for Free plan.
+- Email free-trial restriction (hasUsedFreeTrial flag).
+- Free plan customization lock + "Powered by Sukhan" badge.
+- WidgetDomain model + domain validation on widget API.
+- Dashboard "Websites" management section.
+- Pricing page updated.
+- NPM package structure created.
+- /doc documentation page created.
+- Self-hosted request form + API endpoint.
+- All 8 new tests pass. All existing tests pass.
