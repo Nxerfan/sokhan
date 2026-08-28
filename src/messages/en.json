@@ -191,5 +191,304 @@
       "hint": "Custom volume, SLA and on-prem deployment.",
       "contactSales": "Contact sales"
     }
+  },
+  "marketing": {
+    "nav": {
+      "features": "Features",
+      "pricing": "Pricing",
+      "selfHost": "Self-hosting",
+      "login": "Log in",
+      "signup": "Sign up",
+      "getStarted": "Get started",
+      "dashboard": "Go to dashboard",
+      "openMenu": "Open menu",
+      "closeMenu": "Close menu"
+    },
+    "home": {
+      "kicker": "Iran-first · English-ready · Open-core",
+      "title": "Live chat that speaks both languages.",
+      "subtitle": "Sukhan is a bilingual live-chat and AI customer-messaging platform — Persian-first by design, English-ready out of the box, open-core under AGPL-3.0.",
+      "cta": "Start free — no card",
+      "loginLink": "I already have a workspace",
+      "scrollHint": "Scroll to see what's different",
+      "widget": {
+        "greeting": "Hi! 👋 How can we help today?",
+        "visitor1": "Hi, do you ship to Karaj?",
+        "agent1": "Yes! Same-day delivery inside Karaj, 1–3 days nationwide.",
+        "visitor2": "And the price of the headphones?",
+        "aiAnswer": "Our AI found: Sony WH-1000XM5 — 12,500,000 Toman, in stock.",
+        "agentTyping": "Agent is typing…",
+        "inputPlaceholder": "Type a message…",
+        "poweredBy": "Powered by Sukhan"
+      },
+      "differentiators": {
+        "sectionKicker": "What makes us different",
+        "sectionTitle": "Three things other chat tools don't do",
+        "sectionSubtitle": "Sukhan was built for a market most chat tools ignore. Here's what that means in practice.",
+        "transparent": {
+          "title": "Transparent AI pricing",
+          "body": "No metered AI charges. No per-resolution fees. Every plan has a fixed monthly AI action quota — when you hit the cap, the AI gracefully steps aside and your human agents take over. You'll never get a surprise bill.",
+          "tag": "No surprises"
+        },
+        "selfHost": {
+          "title": "Actually self-hostable",
+          "body": "One docker compose up command. AGPL-3.0 means you can run Sukhan on your own server, for your own customers, with no license fee. The full source is yours to inspect, modify, and audit.",
+          "tag": "AGPL-3.0"
+        },
+        "bilingual": {
+          "title": "Bilingual from day one",
+          "body": "Persian RTL isn't bolted on — it's a first-class locale. The agent dashboard, the widget, the AI prompts, and the emails all switch between Persian and English without reloading. Your visitors see what they expect to see.",
+          "tag": "فارسی + English"
+        }
+      },
+      "ctaStrip": {
+        "title": "From signup to a live widget in under five minutes.",
+        "body": "Create a workspace, paste one script tag, start chatting. Free forever for small teams.",
+        "cta": "Create your workspace"
+      }
+    },
+    "features": {
+      "kicker": "Features",
+      "title": "Built for the conversations that actually happen.",
+      "subtitle": "Every feature here exists because a real customer-support team asked for it. No filler.",
+      "backToHome": "Back to home",
+      "items": {
+        "realtime": {
+          "title": "Real-time chat",
+          "body": "Sub-second message delivery over a Socket.IO transport. Typing indicators, read receipts, presence, file attachments. The inbox handles hundreds of concurrent conversations without breaking a sweat.",
+          "bullet1": "Typing indicators and read receipts",
+          "bullet2": "File attachments up to 10 MB",
+          "bullet3": "Department-based routing"
+        },
+        "faq": {
+          "title": "AI FAQ auto-responder",
+          "body": "Drop in the questions your visitors actually ask. Our LLM classifier matches new questions against your FAQ list above a confidence threshold — when it's sure, it answers; when it isn't, it stays quiet and routes to a human.",
+          "bullet1": "LLM-based confidence scoring",
+          "bullet2": "Per-FAQ enable/disable toggle",
+          "bullet3": "Falls back to humans gracefully"
+        },
+        "productQa": {
+          "title": "Product Q&A",
+          "body": "Sync your product catalog from WooCommerce (Shopify + Basalam coming soon) or import a CSV. The AI answers product questions using only your data — no hallucination, no invented prices.",
+          "bullet1": "WooCommerce connector included",
+          "bullet2": "CSV bulk import",
+          "bullet3": "Grounded answers, no hallucination"
+        },
+        "routing": {
+          "title": "Routing rules",
+          "body": "Send conversations to the right agent automatically. Route by keyword, by department, by visitor language, or by time of day. Rules are evaluated in order, the first match wins, and you can reorder them by drag-and-drop.",
+          "bullet1": "Keyword + department + language rules",
+          "bullet2": "Drag-and-drop reordering",
+          "bullet3": "Per-rule enable/disable"
+        },
+        "analytics": {
+          "title": "Analytics",
+          "body": "See your volume, response times, and CSAT trends at a glance. Filter by department or agent. Export to CSV. No dashboards-of-dashboards — just the numbers that matter.",
+          "bullet1": "Volume + response-time + CSAT",
+          "bullet2": "Per-department and per-agent breakdowns",
+          "bullet3": "CSV export"
+        },
+        "csat": {
+          "title": "CSAT surveys",
+          "body": "After every conversation, the widget asks the visitor one question: how did we do? The score lands in analytics within seconds. Set the survey text per-language.",
+          "bullet1": "One-click rating",
+          "bullet2": "Per-language survey text",
+          "bullet3": "Feeds the analytics dashboard"
+        },
+        "widget": {
+          "title": "Widget customization",
+          "body": "Your widget, your brand. Pick the accent color, the launcher shape (tab / rounded / pill), the position (bottom-start or bottom-end), the agent avatar, the logo, and the greeting — separately for Persian and English.",
+          "bullet1": "Accent color + launcher shape + position",
+          "bullet2": "Per-language greeting",
+          "bullet3": "One script tag to embed"
+        },
+        "billing": {
+          "title": "Iran-first billing",
+          "body": "Pay in Toman via ZarinPal, IDPay, or ZarinLink. No Stripe, no foreign currency, no SWIFT. Plans are flat-rate — if you hit a cap, the feature gracefully degrades instead of charging you more.",
+          "bullet1": "ZarinPal, IDPay, ZarinLink",
+          "bullet2": "Flat-rate, no surprise charges",
+          "bullet3": "Test mode for sandbox testing"
+        }
+      },
+      "cta": {
+        "title": "Ready to see it in action?",
+        "body": "Create a workspace and have a widget embedded on your site within five minutes.",
+        "button": "Start free"
+      }
+    },
+    "pricing": {
+      "kicker": "Pricing",
+      "title": "Flat-rate pricing. Paid in Toman.",
+      "subtitle": "No metered AI. No per-resolution fees. No foreign currency. Pick the plan that fits your team and pay through an Iran-friendly gateway.",
+      "backToHome": "Back to home",
+      "viewNarrative": "Narrative",
+      "viewCompare": "Compare",
+      "narrativeTitle": "Pick the plan that fits your team",
+      "compareTitle": "Side-by-side comparison",
+      "plans": {
+        "free": {
+          "name": "Free",
+          "tagline": "For trying it out, solo agents, and small projects.",
+          "price": "0",
+          "period": "forever",
+          "cta": "Start free",
+          "features": {
+            "agents": "Up to 2 agents",
+            "conversations": "100 conversations / month",
+            "departments": "1 department",
+            "ai": "AI disabled",
+            "realtime": "Real-time chat",
+            "widget": "Full widget customization",
+            "csat": "CSAT surveys"
+          }
+        },
+        "pro": {
+          "name": "Pro",
+          "tagline": "For small teams getting serious about live chat.",
+          "price": "290,000",
+          "period": "Toman / month",
+          "cta": "Choose Pro",
+          "features": {
+            "agents": "Up to 5 agents",
+            "conversations": "1,000 conversations / month",
+            "departments": "5 departments",
+            "ai": "500 AI actions / month",
+            "realtime": "Real-time chat + file attachments",
+            "widget": "Full widget customization",
+            "csat": "CSAT surveys + analytics",
+            "connectors": "WooCommerce connector"
+          }
+        },
+        "business": {
+          "name": "Business",
+          "tagline": "For growing teams that need automation and analytics.",
+          "price": "890,000",
+          "period": "Toman / month",
+          "cta": "Choose Business",
+          "features": {
+            "agents": "Up to 20 agents",
+            "conversations": "5,000 conversations / month",
+            "departments": "Unlimited departments",
+            "ai": "2,000 AI actions / month",
+            "realtime": "Real-time chat + file attachments",
+            "widget": "Full widget customization",
+            "csat": "CSAT surveys + analytics",
+            "connectors": "WooCommerce + CSV import",
+            "routing": "Advanced routing rules"
+          }
+        },
+        "enterprise": {
+          "name": "Enterprise",
+          "tagline": "For organizations that need volume, SLAs, and self-hosting.",
+          "price": "Custom",
+          "period": "contact sales",
+          "cta": "Contact sales",
+          "features": {
+            "agents": "Unlimited agents",
+            "conversations": "Unlimited conversations",
+            "departments": "Unlimited departments",
+            "ai": "Unlimited AI actions",
+            "realtime": "Real-time chat + file attachments",
+            "widget": "Full widget customization + white-label",
+            "csat": "CSAT surveys + analytics",
+            "connectors": "All connectors + custom integrations",
+            "routing": "Advanced routing rules + SLA",
+            "selfHost": "Self-hosting license included"
+          }
+        }
+      },
+      "compare": {
+        "feature": "Feature",
+        "free": "Free",
+        "pro": "Pro",
+        "business": "Business",
+        "enterprise": "Enterprise",
+        "groups": {
+          "core": "Core",
+          "ai": "AI",
+          "automation": "Automation",
+          "support": "Support"
+        },
+        "rows": {
+          "agents": "Agents",
+          "conversations": "Conversations / month",
+          "departments": "Departments",
+          "realtime": "Real-time chat",
+          "widget": "Widget customization",
+          "csat": "CSAT surveys",
+          "analytics": "Analytics",
+          "connectors": "WooCommerce + CSV",
+          "aiActions": "AI actions / month",
+          "productQa": "Product Q&A",
+          "faqMatcher": "FAQ auto-responder",
+          "routingRules": "Routing rules",
+          "fileAttachments": "File attachments",
+          "selfHost": "Self-hosting license",
+          "whiteLabel": "White-label widget",
+          "sla": "SLA + support"
+        }
+      },
+      "gateways": {
+        "title": "Pay your way",
+        "subtitle": "Three Iran-first gateways. Test mode simulates payments during sandbox testing — set the env vars to go live.",
+        "zarinpal": "ZarinPal",
+        "idpay": "IDPay",
+        "zarinlink": "ZarinLink"
+      },
+      "finePrint": "No metered AI pricing. No per-resolution fees. If you hit a quota, the AI gracefully steps aside — you'll never see a surprise invoice."
+    },
+    "selfHosting": {
+      "kicker": "Self-hosting",
+      "title": "Run Sukhan on your own server.",
+      "subtitle": "Two editions, one command each. AGPL-3.0 means the source is yours to inspect, modify, and audit.",
+      "backToHome": "Back to home",
+      "agplTitle": "AGPL-3.0 in plain language",
+      "agplSubtitle": "Sukhan is licensed under the GNU Affero General Public License v3.0. Here's what that actually means.",
+      "agplRightsTitle": "Your rights",
+      "agplRights": ["Use — Run this software for any purpose, including commercially.", "Study — Read and modify the source code.", "Share — Redistribute the software, in original or modified form.", "Modify — Create derivative works."],
+      "agplObligationsTitle": "Your obligations",
+      "agplObligations": ["Share modifications — If you distribute modified versions, you must share the corresponding source code under the same AGPL-3.0 license.", "Network use clause — If you modify this software and offer it as a web service to others (over a network), you must make your modified source code available to your users."],
+      "agplScenariosTitle": "What this means in practice",
+      "agplScenarios": [
+        { "scenario": "Running Sukhan unmodified for your own organization", "obligation": "None — no obligation to share anything." },
+        { "scenario": "Running Sukhan unmodified as a hosted service for customers", "obligation": "None — you're using the original code, which is already public." },
+        { "scenario": "Modifying Sukhan and using it internally only", "obligation": "None — internal use is not 'offering to others'." },
+        { "scenario": "Modifying Sukhan and offering it as a web service", "obligation": "You must make your modified source code available to those users." }
+      ],
+      "agplNote": "This plain-language summary is for understanding only. The legally binding text is the full AGPL-3.0 license.",
+      "agplReadFull": "Read the full AGPL-3.0 license",
+      "dockerTitle": "Get running with Docker Compose",
+      "dockerSubtitle": "Two editions, your choice. Lite is single-instance SQLite for small VPS; Full is Postgres + Redis for production.",
+      "dockerLiteTitle": "Lite edition",
+      "dockerLiteSubtitle": "SQLite + in-memory realtime. Best for small VPS or single-user deployments.",
+      "dockerFullTitle": "Full edition",
+      "dockerFullSubtitle": "Postgres + Redis + multi-instance realtime. Best for production.",
+      "dockerCopy": "Copy",
+      "dockerCopied": "Copied",
+      "whySelfHostTitle": "Why self-host?",
+      "whySelfHost": [
+        { "title": "Data sovereignty", "body": "Your customer conversations stay on your server. Nothing leaves your infrastructure unless you want it to." },
+        { "title": "No per-seat cost ceiling", "body": "Add as many agents as you want. There's no license fee, no per-seat billing, no usage metering." },
+        { "title": "Full source audit", "body": "Read every line. Modify anything. The AGPL-3.0 guarantees you always have the right to inspect and modify the code." },
+        { "title": "Custom integrations", "body": "Hook Sukhan into your internal systems. Build custom connectors. Modify the AI prompts to fit your domain." }
+      ],
+      "readGuide": "Read the full self-hosting guide",
+      "cta": {
+        "title": "Want help self-hosting?",
+        "body": "The Enterprise plan includes a self-hosting license with priority support. Or fork the repo and run it yourself — both are valid.",
+        "button": "Contact sales"
+      }
+    },
+    "footer": {
+      "tagline": "Bilingual live chat, built for two markets.",
+      "product": "Product",
+      "resources": "Resources",
+      "legal": "Legal",
+      "license": "AGPL-3.0 License",
+      "selfHostGuide": "Self-hosting guide",
+      "sourceCode": "Source code",
+      "rights": "All rights reserved.",
+      "agplNotice": "Open-core under AGPL-3.0. Source available on request."
+    }
   }
 }

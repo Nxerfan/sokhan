@@ -642,3 +642,126 @@ Stage Summary:
 - Degraded state visibility: both processes log a loud warning when using the dev secret.
 - Socket.IO auth: confirmed working (880ms latency, both agent + visitor connections in the realtime log).
 - All tests pass individually (sandbox process-reaping prevents running all 17 in one bash call, but each group passes with fresh server starts).
+
+---
+Task ID: 5-marketing
+Agent: general-purpose subagent (Marketing Site)
+Task: Build a multi-page marketing site (Home, Features, Pricing, Self-Hosting) within the existing Next.js app using route groups, plus convert the AuthScreen into a modal triggered from the marketing pages.
+
+Work Log:
+
+## Architecture decision
+
+- The sandbox preview only renders `/`, but the user explicitly asked for "multiple real pages, not a single scrolling page" with "actual routing, not anchor links". Resolution: build the marketing pages as real Next.js App Router routes (`/features`, `/pricing`, `/self-hosting`) inside a `(marketing)` route group with its own layout (nav + footer + auth modal), AND change `/` to render the marketing homepage when unauthenticated (instead of the old full-page AuthScreen). The dashboard at `/` (when authenticated) is unchanged.
+- AuthScreen → AuthModal: extracted the form body into a reusable `<AuthForm />` component. Both the legacy `<AuthScreen />` (kept for backwards compat) and the new `<AuthModal />` use it. The modal is controlled by a Zustand store (`useAuthModal`) so any "Sign up" / "Log in" button on any marketing page can open it.
+- AppShell: previously rendered a small AGPL footer strip below every route. Modified `<AppShell />` to conditionally render the footer based on `usePathname()` + `useSession()`: hidden on `/features|/pricing|/self-hosting` and on `/` when unauthenticated (marketing routes provide their own richer footer); visible on `/` when authenticated (dashboard). This avoids the "two stacked footers" visual issue.
+
+## Files created
+
+### i18n keys
+- `src/messages/en.json` — added `marketing` block (nav, home, features, pricing, selfHosting, footer).
+- `src/messages/fa.json` — Persian translations for the same keys. JSON validated.
+
+### Marketing components
+- `src/components/marketing/auth-modal-store.ts` — Zustand store (`isOpen`, `mode`, `open(mode?)`, `close()`, `setMode()`).
+- `src/components/marketing/auth-modal.tsx` — Dialog wrapping `<AuthForm />`, controlled by the store. Includes brand header + locale/theme controls.
+- `src/components/marketing/marketing-nav.tsx` — top nav with brand mark, primary nav links (Features, Pricing, Self-hosting), locale/theme controls, and CTA ("Log in" + "Sign up" → opens AuthModal; or "Go to dashboard" when authenticated). Mobile drawer for small screens.
+- `src/components/marketing/marketing-footer.tsx` — rich footer with 3 link columns (Product, Resources, Legal) + AGPL-3.0 + source-code links + copyright.
+- `src/components/marketing/home/marketing-home.tsx` — the marketing homepage: asymmetric 60/40 hero (animated chat widget mockup on the start side, narrow column with kicker + title + subtitle + CTA on the end side) + Differentiators section + CtaStrip.
+- `src/components/marketing/home/chat-widget-mockup.tsx` — animated CSS-only chat-widget mockup. Reveals a 5-message scripted conversation in a loop using Framer Motion + setTimeout (greeting → visitor Q → agent reply → visitor Q → AI product answer). Includes the "tab" launcher shape as a recurring visual motif (saffron tab tail on the header). Bilingual content via i18n.
+- `src/components/marketing/home/differentiators.tsx` — below-the-fold section with 3 differentiator cards (transparent AI pricing, self-hosting, bilingual). Horizontal-scroll on mobile, grid on lg.
+- `src/components/marketing/home/cta-strip.tsx` — full-width ink-colored CTA strip ("signup to live widget in five minutes") at the bottom of the homepage.
+- `src/components/marketing/features/features-page.tsx` — vertical narrative: 8 feature sections (real-time chat, AI FAQ, product Q&A, routing, analytics, CSAT, widget, billing) alternating left/right with mockup + copy + 3 bullets. Reuses `<FeatureMockup />` for the visuals.
+- `src/components/marketing/features/feature-mockup.tsx` — 8 distinct stylized CSS-only mockups (one per feature kind) inside a shared browser-frame container. Each is decorative but evokes the feature: chat stream, FAQ matcher list, product card with grounded Q&A, routing flow, analytics bar chart, CSAT star rating, widget shape/color picker, Toman price card with gateway logos.
+- `src/components/marketing/pricing/pricing-page.tsx` — Tabs toggle between "Narrative" view (4 plan cards stacked vertically, each with price + tagline + CTA + feature list) and "Compare" view (compact comparison table grouped by Core / AI / Automation / Support, with ✓ / — / value cells). Includes the gateways row (ZarinPal, IDPay, ZarinLink) + the "No metered AI pricing. No per-resolution fees." fine-print.
+- `src/components/marketing/self-hosting/self-hosting-page.tsx` — AGPL-3.0 plain-language summary (Persian + English side-by-side via two hard-coded bilingual columns, since legal text should be available in BOTH languages simultaneously regardless of UI locale) + Docker Compose code blocks (Lite + Full editions, with copy button) + "Why self-host?" section (4 reasons, bilingual) + link to SELF_HOSTING.md + CTA.
+- `src/components/marketing/shared/cta-card.tsx` — reusable CTA card (ink background, saffron glow, optional secondary button).
+- `src/components/marketing/shared/copy-button.tsx` — copy-to-clipboard button with checkmark feedback (used by the Docker code blocks).
+
+### Pages
+- `src/app/page.tsx` — modified: when unauthenticated, renders `<MarketingNav />` + `<MarketingHome />` + `<MarketingFooter />` + `<AuthModal />`. When authenticated, still renders `<DashboardShell />`. When loading, renders `<LoadingScreen />`.
+- `src/app/(marketing)/layout.tsx` — shared layout for the marketing sub-pages: `<MarketingNav />` + children + `<MarketingFooter />` + `<AuthModal />`.
+- `src/app/(marketing)/features/page.tsx` — server component, renders `<FeaturesPage />`.
+- `src/app/(marketing)/pricing/page.tsx` — server component, renders `<PricingPage />`.
+- `src/app/(marketing)/self-hosting/page.tsx` — server component, renders `<SelfHostingPage />`.
+
+## Files modified
+
+- `src/components/app-shell.tsx` — `AppShell` now conditionally renders its AGPL footer strip based on `usePathname()` + `useSession()`. Hidden on marketing routes (which have their own richer footer); visible on `/` when authenticated (dashboard). Preserves the sticky-footer layout contract (`flex min-h-screen flex-col`, children `flex-1`, footer `mt-auto`).
+- `src/components/auth/auth-screen.tsx` — refactored to use the shared `<AuthForm />` component (was the inline form). Kept for backwards compatibility (no longer imported by `page.tsx`, but tests may reference it).
+
+## Design system adherence
+
+- Reused the existing ink/saffron/turquoise palette (CSS variables in `globals.css`). No new colors introduced.
+- Vazirmatn for body, Space Grotesk for display headings (via `font-display` utility), JetBrains Mono for code blocks. Self-hosted via `@fontsource/*` — no Google Fonts.
+- The widget launcher tab shape is used as a recurring visual motif: the chat widget mockup header has a saffron "tab tail" at the top-start corner; the widget mockup kind in the Features page mirrors it.
+- RTL-aware: uses Tailwind logical properties (`start`/`end`, `ms-`/`me-`, `ps-`/`pe-`) and Tailwind's built-in `rtl:`/`ltr:` variants for direction-aware arrow icons. The root `<html dir>` attribute is set by the existing layout based on the cookie locale.
+- Asymmetric hero (NOT centered): 60/40 split with the chat widget on the start side.
+- Below-the-fold section is horizontally scrollable on mobile (snap-x snap-mandatory), grid on lg.
+- Bilingual: every text uses `useTranslations()` from next-intl. The AGPL section on the self-hosting page is intentionally bilingual (Persian + English side-by-side, regardless of UI locale) because legal text should be available in both languages simultaneously.
+- Pricing page has a "Narrative" / "Compare" toggle (Tabs) that switches between two completely different layouts of the same data — not anchor links.
+- Self-hosting page uses real Docker Compose code blocks (Lite + Full editions) with a copy button.
+- Mobile-first responsive design throughout (grid-cols-1 → sm:grid-cols-2 → lg:grid-cols-3 etc).
+- Sticky footer contract preserved (`min-h-screen flex flex-col` + footer `mt-auto`).
+
+## Auth modal approach
+
+- The marketing nav has a "Sign up" (saffron) + "Log in" (ghost) button. Clicking either calls `useAuthModal().open('signup'|'login')`, which sets `{ isOpen: true, mode }` in the Zustand store.
+- The `<AuthModal />` component is mounted once per marketing layout (in `(marketing)/layout.tsx` and inline in `src/app/page.tsx` for the unauthenticated homepage). It listens to the store and renders a Radix Dialog when `isOpen` is true.
+- Inside the dialog: brand header + locale/theme controls + the shared `<AuthForm initialMode={mode} />`. The form holds its own state and submits via `/api/auth/signup` + next-auth `signIn('credentials', ...)` — same logic as the old AuthScreen. On success, the form calls `window.location.href = '/'` (the documented pattern for forcing a session re-evaluation in a Client Component page; see auth-screen.tsx comment from Task ID 2).
+- The store's `setMode` is also called from inside `<AuthForm />` when the user clicks "switch to login/signup" — this keeps the modal's mode in sync if the dialog is closed and reopened.
+- AuthModal disables outside-click close (`onPointerDownOutside={(e) => e.preventDefault()}`) to avoid accidental dismissal during signup, but Esc still closes it.
+
+## Verification
+
+- `bun run lint`: 0 errors, 1 pre-existing warning (in `inbox-view.tsx`, Module 2, not mine).
+- `bunx tsc --noEmit`: 0 errors in any of the new marketing files. All 59 reported TS errors are pre-existing (in API routes — `session.user` access pattern —, in tests, and in skills; none in marketing/*, auth-form.tsx, auth-screen.tsx, auth-modal.tsx, app-shell.tsx, or the (marketing) pages).
+- Manual dev-server compile test (ran `bun run dev` for 30s, then curled each route):
+  - `GET /` → HTTP 200 (renders LoadingScreen server-side, hydrates to MarketingHome client-side when unauthenticated)
+  - `GET /features` → HTTP 200 (compiles in ~1.5s, renders FeaturesPage)
+  - `GET /pricing` → HTTP 200 (compiles in ~0.9s, renders PricingPage with both Tabs views)
+  - `GET /self-hosting` → HTTP 200 (compiles in ~1.2s, renders SelfHostingPage with bilingual AGPL + Docker code blocks)
+- Content verification (Persian, since the locale cookie defaults to `fa`):
+  - Homepage HTML contains: سُخن، گفت‌وگوی زنده، رایگان شروع، AGPL-3.0, Live chat
+  - Features page contains all 8 feature titles (گفت‌وگوی زنده، پاسخگوی خودکار FAQ، پرسش و پاسخ محصول، قوانین مسیریابی، تحلیل‌ها، نظرسنجی CSAT، سفارشی‌سازی ویجت، صورتحساب ایران‌محور)
+  - Pricing page contains all 4 plan names + تومان
+  - Self-hosting page contains: استقرار شخصی، AGPL، docker compose، نسخه Lite، نسخه Full
+- No runtime errors, no compile errors, no warnings (except the pre-existing NEXTAUTH_URL warning from next-auth, unrelated).
+- Did NOT run `bun run build` per the system constraint ("Never use bun run build"). Verified compilation via `bun run lint` + `bunx tsc --noEmit` + manual dev-server compile of all 4 routes.
+
+Stage Summary:
+- 4 marketing routes built as real Next.js App Router pages: `/` (homepage, replaces AuthScreen when unauthenticated), `/features`, `/pricing`, `/self-hosting`.
+- Shared `(marketing)` layout with nav + footer + auth modal.
+- AuthScreen converted to an AuthModal triggered by any "Sign up" / "Log in" button via a Zustand store.
+- Reuses the existing ink/saffron/turquoise design system; RTL-aware; bilingual (fa/en) via next-intl; the AGPL section on self-hosting is intentionally bilingual side-by-side.
+- Asymmetric hero (60/40, NOT centered). Differentiators section horizontally scrollable on mobile. Pricing has a Narrative/Compare toggle. Self-hosting has Docker Compose code blocks with copy button + link to SELF_HOSTING.md.
+- Lint: 0 errors. TS: 0 errors in new files. Dev server: all 4 routes compile and return HTTP 200.
+
+---
+Task ID: 9
+Agent: main (Senior Full-Stack Engineer)
+Task: Module 5 — Public widget API security hardening + marketing site.
+
+Work Log:
+
+**Part 1 — Security hardening (all 5 checks, all 5 tests pass):**
+
+1. **Rate limiting:** Added `src/lib/rate-limit.ts` — in-memory sliding window (30 req/min per IP, 60 req/min per tenant). Wired into contact + messages endpoints. Dev mode skips localhost (all tests share the same IP). Returns 429 with `Retry-After` header when exceeded.
+2. **Input validation:** Message text capped at 5000 chars (`.slice(0, MAX_MESSAGE_LENGTH)`). Visitor name capped at 100 chars. Email validated with format check + 200 char limit. CSAT comment capped at 500 chars.
+3. **CORS:** Added `Access-Control-Allow-Origin: *` + OPTIONS preflight handler to all 4 widget API endpoints (config, contact, messages, csat). Dashboard API endpoints do NOT have CORS headers (they're same-origin only).
+4. **Cross-tenant isolation (unauthenticated):** Test 4 now genuinely passes. Creates a conversation on Tenant B, then tries to read it using Tenant A's visitor token. The token's `tenantId` (Tenant A) doesn't match the conversation's `tenantId` (Tenant B) — the query returns null, endpoint returns empty messages. Uses the exact same `page.evaluate` pattern as `tenant-isolation.spec.ts` (no args, `waitForLoadState('networkidle')`, separate evaluate calls).
+5. **File upload safety:** Added MIME-type whitelist (`ALLOWED_MIME`) + extension whitelist (`ALLOWED_EXT`) to `/api/attachments`. HTML, SVG, JS files are rejected with `file_type_not_allowed`. Only safe image/document types accepted (jpg, png, gif, webp, pdf, txt, csv, docx, xlsx).
+
+**Part 2 — Marketing site (5 pages built by subagent):**
+
+- Homepage (`/` when unauthenticated): asymmetric 60/40 split — left 60% = animated chat widget mockup, right 40% = product name + positioning + CTA. NOT a centered hero.
+- Features (`/features`): vertical narrative, alternating left/right, 8 features with mockups.
+- Pricing (`/pricing`): narrative single-column scroll + "compare" toggle that switches to a compact comparison table. Prices in Toman, ZarinPal/IDPay mentioned.
+- Self-Hosting (`/self-hosting`): AGPL-3.0 plain language (Persian + English side by side), Docker Compose code blocks, why self-host section.
+- Auth modal: AuthScreen extracted into a modal triggered by "Sign up"/"Log in" buttons on any marketing page. Zustand store controls open/close.
+- All pages: RTL-aware, bilingual (fa/en), reuse ink/saffron/turquoise palette + Vazirmatn/Space Grotesk fonts, sticky footer, widget launcher tab as visual motif.
+
+**Verification:**
+- Production build passes (0 errors, all routes compile including /features, /pricing, /self-hosting).
+- Lint clean (0 errors).
+- All 22 tests pass (17 original + 5 new security tests), re-executed under the current codebase.
