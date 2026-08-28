@@ -54,3 +54,11 @@ prompt
 server.log
 # Skills directory
 /skills/
+# Build artifacts + test output
+test-results/
+tool-results/
+screenshot-*.png
+
+# Download/upload (not used by app)
+download/
+upload/
