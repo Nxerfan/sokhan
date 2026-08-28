@@ -752,6 +752,18 @@
         "title": "Ready to embed?",
         "body": "Create a workspace, grab your API key, and have a live widget on your site within five minutes. Free forever for small teams.",
         "button": "Start free"
+      },
+      "prompts": {
+        "title": "AI Setup Prompts",
+        "subtitle": "Copy a prompt and paste it into ChatGPT, Claude, or any AI assistant to get step-by-step installation help — or let a CLI agent do everything automatically.",
+        "webTab": "Online Chat / Web AI",
+        "cliTab": "CLI / Coding Agent",
+        "webTitle": "Web AI Prompt — For ChatGPT, Claude, etc.",
+        "webDescription": "Copy this prompt and paste it into an AI chat assistant. It will explain step-by-step how to install Sukhan on your specific platform (WordPress, Shopify, HTML, React, Next.js, etc.).",
+        "cliTitle": "CLI Prompt — For Cursor, Claude Code, OpenCode, etc.",
+        "cliDescription": "Copy this prompt and give it to a CLI coding agent. It will automatically detect your project type, install the package, create the necessary files, and add the API key to .env. The only thing you need to do is enter your real API key.",
+        "copy": "Copy Prompt",
+        "copied": "Copied!"
       }
     },
     "footer": {

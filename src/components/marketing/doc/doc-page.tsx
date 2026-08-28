@@ -13,6 +13,7 @@ import {
   Check,
   Minus,
   Lock,
+  Sparkles,
   type LucideIcon,
 } from 'lucide-react'
 import { Card } from '@/components/ui/card'
@@ -33,6 +34,7 @@ import {
 } from '@/components/ui/accordion'
 import { CopyButton } from '@/components/marketing/shared/copy-button'
 import { CtaCard } from '@/components/marketing/shared/cta-card'
+import { PromptSection } from '@/components/marketing/doc/prompt-section'
 import { cn } from '@/lib/utils'
 
 // ---------- Code snippets (hardcoded — code is locale-independent) ----------
@@ -572,6 +574,19 @@ export function DocPage() {
               </AccordionItem>
             ))}
           </Accordion>
+        </div>
+      </section>
+
+      {/* ============ Section 8: AI Prompts (Web + CLI) ============ */}
+      <section className="border-y border-border bg-card/20 py-16 sm:py-20 lg:py-24">
+        <div className="mx-auto w-full max-w-7xl px-4 sm:px-6 lg:px-8">
+          <SectionHeader
+            icon={Sparkles}
+            title={t('prompts.title')}
+            subtitle={t('prompts.subtitle')}
+            accent="saffron"
+          />
+          <PromptSection />
         </div>
       </section>
 
