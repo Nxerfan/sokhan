@@ -1,21 +1,48 @@
-// Live Chat SaaS — Module 1+2 schema (default SQLITE variant for dev/Docker Lite)
+// Sukhan Live Chat SaaS — canonical Prisma schema (PostgreSQL)
 //
-// The postgresql-flavoured mirror lives at `prisma/schema.postgres.prisma`
-// and is used on Vercel and Docker Full. Keep them in sync via:
+// PostgreSQL is the OFFICIAL database provider for Sukhan across all
+// deployment modes:
+//   - Vercel + Supabase PostgreSQL (cloud, serverless)
+//   - Docker Full edition (self-hosted Postgres)
+//   - Docker Lite edition (self-hosted Postgres — small container)
+//   - Local development (Postgres via Docker or local install)
 //
-//   bun run sync-prisma-schemas
+// SQLite is NO LONGER SUPPORTED. Standardizing on PostgreSQL lets us:
+//   - ship a single canonical schema (no sync script, no schema drift)
+//   - use real Prisma migrations (`prisma migrate deploy` in production)
+//   - use Postgres-native types (JSONB, arrays) where helpful
+//   - test migrations against the same database engine we run in prod
+//
+// Connection architecture (serverless-aware):
+//   - `url` (DATABASE_URL)           — Supavisor pooled connection string
+//                                       (port 6543 on Supabase). Used by
+//                                       the Prisma Client at runtime.
+//   - `directUrl` (DIRECT_URL)       — direct (non-pooled) connection string
+//                                       (port 5432 on Supabase). Used by
+//                                       `prisma migrate deploy` and
+//                                       `prisma migrate status`. Required
+//                                       because Supavisor's transaction-mode
+//                                       pooling is incompatible with the
+//                                       DDL statements Prisma Migrate emits.
+//
+// Both env vars are REQUIRED in production. In local dev (where you point
+// DATABASE_URL at a local Postgres), you can set DIRECT_URL to the same
+// value (no pooling layer to bypass).
 //
 // Tenant isolation is enforced in the application layer via a Prisma client
-// extension (see src/lib/db.ts) PLUS explicit tenantId on every write (Module 2
-// convention — the extension is unreliable for create in Turbopack dev mode).
+// extension (see src/lib/db.ts) PLUS explicit tenantId on every write.
+// PostgreSQL Row-Level Security is treated as defense-in-depth ONLY and is
+// NOT relied upon as the sole boundary (Prisma's privileged server-side
+// connection may bypass policies depending on the configured database role).
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "sqlite"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 /// A workspace/tenant. Root isolation boundary.
@@ -26,7 +53,7 @@ model Tenant {
   defaultLocale   String   @default("fa")
   defaultDirection String  @default("rtl")
   plan            String   @default("free")
-  workspaceCreatedAt DateTime @default(now()) // tracks 30-day free trial
+  workspaceCreatedAt DateTime @default(now())
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
@@ -52,7 +79,7 @@ model User {
   name         String?
   passwordHash String?
   avatarUrl    String?
-  hasUsedFreeTrial Boolean @default(false) // prevents re-creating free workspaces
+  hasUsedFreeTrial Boolean @default(false)
   emailVerified    Boolean    @default(false)
   emailVerifiedAt  DateTime?
   passwordResetAt  DateTime?
@@ -67,14 +94,12 @@ model User {
   participants  Participant[]
 }
 
-/// Authorization pivot: binds a User to a Tenant with a role.
-/// Roles: owner | admin | manager | agent | viewer
 model Membership {
   id        String   @id @default(cuid())
   userId    String
   tenantId  String
   role      String   @default("agent")
-  status    String   @default("active") // active | invited | suspended
+  status    String   @default("active")
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -85,7 +110,6 @@ model Membership {
   @@index([tenantId])
 }
 
-/// Lightweight team grouping used for routing (Module 2).
 model Department {
   id        String   @id @default(cuid())
   tenantId  String
@@ -109,18 +133,15 @@ model DepartmentMember {
   @@id([departmentId, userId])
 }
 
-/// Customer-facing chat widget appearance. Per ADR-7 redline: the product's
-/// own ink/saffron/turquoise palette is NOT imposed on customer widgets; each
-/// tenant configures its own accent, launcher, position, avatar and greeting.
 model WidgetConfig {
   id              String   @id @default(cuid())
   tenantId        String   @unique
   accentColor     String   @default("#E09A2B")
-  launcherShape   String   @default("tab") // tab | rounded | pill
-  position        String   @default("bottom-start") // bottom-start | bottom-end
+  launcherShape   String   @default("tab")
+  position        String   @default("bottom-start")
   avatarUrl       String?
   logoUrl         String?
-  greetingTexts   Json     // { "fa": "...", "en": "..." } — set in app code on create
+  greetingTexts   Json
   defaultLocale   String   @default("fa")
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
@@ -128,22 +149,16 @@ model WidgetConfig {
   tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 }
 
-// ============================================================
-// Module 2 — Realtime messaging entities
-// ============================================================
-
-/// A visitor/customer identified by (tenantId, identifier). Deduped by email
-/// if provided, otherwise by a generated visitorId stored in widget localStorage.
 model Contact {
   id          String   @id @default(cuid())
   tenantId    String
-  identifier  String   // email or visitorId
-  identifierType String @default("visitorId") // email | visitorId
+  identifier  String
+  identifierType String @default("visitorId")
   name        String?
   email       String?
   avatarUrl   String?
   locale      String   @default("fa")
-  metadata    Json     // set in app code on create
+  metadata    Json
   lastSeenAt  DateTime @default(now())
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -155,24 +170,23 @@ model Contact {
   @@index([tenantId])
 }
 
-/// A conversation between a contact and agents. Channel-agnostic.
 model Conversation {
   id             String   @id @default(cuid())
   tenantId       String
   contactId      String
   assignedUserId String?
   departmentId   String?
-  status         String   @default("open") // open | pending | closed
-  priority       String   @default("normal") // low | normal | high
-  channel        String   @default("widget") // widget | whatsapp | telegram | instagram
-  tags           Json     // set in app code on create — []
+  status         String   @default("open")
+  priority       String   @default("normal")
+  channel        String   @default("widget")
+  tags           Json
   lastMessageAt  DateTime @default(now())
   lastMessagePreview String @default("")
   unreadCount    Int      @default(0)
-  csatRating     Int?     // 1-5, null = not yet rated
+  csatRating     Int?
   csatComment    String?
   csatAt         DateTime?
-  firstResponseAt DateTime? // when the first agent reply was sent
+  firstResponseAt DateTime?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -188,16 +202,15 @@ model Conversation {
   @@index([tenantId, departmentId])
 }
 
-/// A message in a conversation. senderType distinguishes agent/contact/ai/system.
 model Message {
   id              String   @id @default(cuid())
   conversationId  String
   tenantId        String
-  senderType      String   @default("contact") // agent | contact | ai | system
+  senderType      String   @default("contact")
   senderUserId    String?
-  contentType     String   @default("text") // text | image | file | system
-  content         Json     // { text?: string, attachments?: [{url, type, name}] }
-  status          String   @default("sent") // sent | delivered | read
+  contentType     String   @default("text")
+  content         Json
+  status          String   @default("sent")
   createdAt       DateTime @default(now())
 
   conversation    Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
@@ -207,7 +220,6 @@ model Message {
   @@index([tenantId, createdAt])
 }
 
-/// Tracks which agents are participating in a conversation + their read state.
 model Participant {
   id              String   @id @default(cuid())
   conversationId  String
@@ -224,15 +236,14 @@ model Participant {
   @@index([tenantId])
 }
 
-/// Rule-based automation: trigger (event + conditions) → action.
 model RoutingRule {
   id          String   @id @default(cuid())
   tenantId    String
   name        String
   enabled     Boolean  @default(true)
   priority    Int      @default(0)
-  trigger     Json     // { event: "conversation_created", conditions: {...} }
-  action      Json     // { type: "assign_department"|"assign_user"|"add_tag"|"send_message", ... }
+  trigger     Json
+  action      Json
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -241,20 +252,13 @@ model RoutingRule {
   @@index([tenantId, enabled])
 }
 
-// ============================================================
-// Module 3 — Billing & payments (Iran-first gateways)
-// ============================================================
-
-/// Catalog of subscription plans. The slug is the canonical identifier used
-/// throughout the app (e.g. `free`, `pro`, `business`, `enterprise`). Limits
-/// are stored as JSON so we can evolve the schema without migrations.
 model Plan {
   id          String   @id @default(cuid())
-  slug        String   @unique // free | pro | business | enterprise
+  slug        String   @unique
   name        String
-  priceToman  Int      @default(0) // 0 for free / contact-sales tiers
-  interval    String   @default("month") // month | year | once
-  limits      Json     // { agents, conversations, departments } — -1 = unlimited
+  priceToman  Int      @default(0)
+  interval    String   @default("month")
+  limits      Json
   active      Boolean  @default(true)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -263,15 +267,12 @@ model Plan {
   invoices      Invoice[]
 }
 
-/// A tenant's subscription to a plan. A tenant has at most one active
-/// subscription at a time (status: active). New subscriptions start as
-/// `pending` until the payment callback verifies the payment.
 model Subscription {
   id          String   @id @default(cuid())
   tenantId    String
   planId      String
-  status      String   @default("pending") // pending | active | canceled | expired
-  gateway     String?  // zarinpal | idpay | zarinlink
+  status      String   @default("pending")
+  gateway     String?
   currentPeriodStart DateTime?
   currentPeriodEnd   DateTime?
   canceledAt  DateTime?
@@ -285,20 +286,16 @@ model Subscription {
   @@index([tenantId, status])
 }
 
-/// An invoice for a subscription payment. Tracks the lifecycle of a single
-/// payment attempt: pending → paid (or failed). The `authority` is the
-/// gateway-specific token returned by `createPayment` and used to verify on
-/// callback.
 model Invoice {
   id              String   @id @default(cuid())
   tenantId        String
   subscriptionId  String
   planId          String
   amountToman     Int
-  gateway         String   // zarinpal | idpay | zarinlink
-  authority       String?  // gateway token (Authority / track_id / token)
-  refId           String?  // gateway reference id returned on verify
-  status          String   @default("pending") // pending | paid | failed
+  gateway         String
+  authority       String?
+  refId           String?
+  status          String   @default("pending")
   callbackUrl     String?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
@@ -312,19 +309,11 @@ model Invoice {
   @@index([subscriptionId])
 }
 
-// ============================================================
-// Module 4 — AI features (FAQ auto-responder + Product Q&A)
-// ============================================================
-
-/// Tenant-level AI configuration. One row per tenant (created on first use).
-/// Both features default to OFF — tenants must explicitly opt in.
 model AiConfig {
   id              String   @id @default(cuid())
   tenantId        String   @unique
   faqEnabled      Boolean  @default(false)
   productQaEnabled Boolean @default(false)
-  /// Monthly AI action counter (reset by the gating module on calendar month).
-  /// Actual counting is done via Message.senderType='ai' — this is a cached value.
   aiActionCount   Int      @default(0)
   aiActionResetAt DateTime @default(now())
   createdAt       DateTime @default(now())
@@ -333,7 +322,6 @@ model AiConfig {
   tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 }
 
-/// FAQ question/answer pairs for the smart auto-responder.
 model FaqPair {
   id          String   @id @default(cuid())
   tenantId    String
@@ -348,20 +336,18 @@ model FaqPair {
   @@index([tenantId, enabled])
 }
 
-/// Internal product catalog — unified source of truth for AI product Q&A.
-/// Products can be added manually or synced from external stores (WooCommerce, etc.).
 model Product {
   id          String   @id @default(cuid())
   tenantId    String
   name        String
   description String   @default("")
-  price       Int      @default(0) // in Toman
+  price       Int      @default(0)
   currency    String   @default("IRT")
-  availability String  @default("in_stock") // in_stock | out_of_stock | limited
+  availability String  @default("in_stock")
   sku         String?
-  externalId  String?  // ID from external store (e.g., WooCommerce product ID)
-  externalSource String? // woocommerce | manual | csv
-  metadata    Json     // set in app code on create // additional fields from external source
+  externalId  String?
+  externalSource String?
+  metadata    Json
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -371,20 +357,11 @@ model Product {
   @@index([tenantId, externalSource])
 }
 
-// ============================================================
-// Module 4 — External store connectors
-// ============================================================
-
-/// Per-tenant connector configuration for an external store integration
-/// (WooCommerce, Shopify, Basalam, etc.). The `config` JSON holds the
-/// source-specific credentials (e.g. WooCommerce consumerKey/consumerSecret,
-/// Shopify access token). One row per (tenantId, type) — re-saving overwrites
-/// the previous config so credentials can be rotated.
 model ConnectorConfig {
   id         String    @id @default(cuid())
   tenantId   String
-  type       String   // woocommerce | shopify | basalam | ...
-  config     Json     // source-specific credentials, e.g. { storeUrl, consumerKey, consumerSecret }
+  type       String
+  config     Json
   lastSyncAt DateTime?
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
@@ -395,16 +372,10 @@ model ConnectorConfig {
   @@index([tenantId])
 }
 
-// ============================================================
-// Module 6 — Plan restructure + widget domains + self-host requests
-// ============================================================
-
-/// Allowed website domains for widget embedding. Each "API key" = one domain.
-/// Free plan: 1 domain, Pro: 3, Max: 8.
 model WidgetDomain {
   id        String   @id @default(cuid())
   tenantId  String
-  domain    String   // e.g., "example.com" (normalized: lowercase, no protocol/port)
+  domain    String
   createdAt DateTime @default(now())
 
   tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -413,7 +384,6 @@ model WidgetDomain {
   @@index([tenantId])
 }
 
-/// Self-hosted deployment request form submissions. Global (not tenant-scoped).
 model SelfHostRequest {
   id        String   @id @default(cuid())
   name      String
@@ -421,21 +391,16 @@ model SelfHostRequest {
   email     String
   phone     String
   message   String?
-  status    String   @default("pending") // pending | contacted | resolved
+  status    String   @default("pending")
   createdAt DateTime @default(now())
 }
 
-// ============================================================
-// Module 7 — OTP-based authentication
-// ============================================================
-
-/// OTP verification request. Global (not tenant-scoped) — tied to user accounts.
 model OtpRequest {
   id          String   @id @default(cuid())
   userId      String?
   email       String
-  purpose     String   // 'signup' | 'login' | 'reset_password'
-  requestId   String   @unique  // Nixify request_id
+  purpose     String
+  requestId   String   @unique
   expiresAt   DateTime
   attempts    Int      @default(0)
   resendCount Int      @default(0)
@@ -450,7 +415,6 @@ model OtpRequest {
   @@index([requestId])
 }
 
-/// Holds partially-completed signups (between OTP verification and account creation).
 model PendingSignup {
   id            String   @id @default(cuid())
   email         String   @unique

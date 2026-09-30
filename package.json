@@ -9,14 +9,14 @@
     "start": "NODE_ENV=production bun .next/standalone/server.js 2>&1 | tee server.log",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "sync-prisma-schemas": "node scripts/sync-prisma-schemas.mjs",
-    "db:push": "prisma db push --accept-data-loss",
     "db:generate": "prisma generate",
-    "db:generate:pg": "prisma generate --schema=prisma/schema.postgres.prisma",
-    "db:validate:pg": "DATABASE_URL=postgresql://user:password@localhost:5432/sukhan prisma validate --schema=prisma/schema.postgres.prisma",
-    "db:migrate": "prisma migrate dev",
-    "db:migrate:pg": "prisma migrate dev --schema=prisma/schema.postgres.prisma",
-    "db:reset": "prisma migrate reset"
+    "db:validate": "prisma validate",
+    "db:migrate:dev": "prisma migrate dev",
+    "db:migrate:deploy": "prisma migrate deploy",
+    "db:migrate:status": "prisma migrate status",
+    "db:migrate:resolve": "prisma migrate resolve",
+    "db:migrate:reset": "prisma migrate reset",
+    "db:migrate:diff": "prisma migrate diff --from-empty --to-schema-datamodel prisma/schema.prisma --script"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

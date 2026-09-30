@@ -46,9 +46,11 @@ docker compose version    # Docker Compose v2+
 
 ---
 
-## Deployment — Lite Edition (SQLite, no Redis)
+## Deployment — Lite Edition (PostgreSQL, no Redis)
 
 Best for: small VPS, single-tenant, testing, low traffic.
+
+**Note**: The Lite edition now uses a small `postgres:16-alpine` container instead of SQLite. Both Lite and Full editions use PostgreSQL — the distinction is now Redis/no-Redis + resource sizing.
 
 ### Step 1: Get the code
 
@@ -69,6 +71,9 @@ Set these required values:
 ```bash
 # REQUIRED — generate with: openssl rand -base64 32
 NEXTAUTH_SECRET=<paste the generated value here>
+
+# REQUIRED — strong password for the local Postgres container
+POSTGRES_PASSWORD=<paste a strong password here>
 
 # For OTP email verification (required for signup)
 NIXIFY_API_KEY=<your-nixify-api-key>
@@ -91,8 +96,8 @@ docker compose -f docker-compose.lite.yml up -d --build
 
 This will:
 1. Build the Docker image (Next.js standalone + realtime service)
-2. Start three containers: app (Next.js), realtime (Socket.IO), caddy (reverse proxy)
-3. Apply the database schema automatically (Prisma `db push` at startup)
+2. Start four containers: postgres (PostgreSQL 16), app (Next.js), realtime (Socket.IO), caddy (reverse proxy)
+3. Apply Prisma migrations automatically (`prisma migrate deploy` at startup — production-safe, no `db push`)
 
 ### Step 4: Verify
 
@@ -199,12 +204,13 @@ docker compose -f docker-compose.lite.yml down
 
 ### Backup
 
-#### Lite edition (SQLite)
+#### Lite edition (PostgreSQL)
 
 ```bash
-# The SQLite database is in a Docker volume named sukhan_sqlite-data
-docker compose -f docker-compose.lite.yml exec app cp /app/data/sukhan.db /app/uploads/sukhan-backup.db
-docker cp sukhan-app-lite:/app/uploads/sukhan-backup.db ./sukhan-backup-$(date +%Y%m%d).db
+# Back up the Postgres database using pg_dump.
+docker compose -f docker-compose.lite.yml exec postgres \
+  pg_dump -U sukhan -d sukhan -F c -f /tmp/sukhan-backup.dump
+docker cp sukhan-postgres-lite:/tmp/sukhan-backup.dump ./sukhan-backup-$(date +%Y%m%d).dump
 ```
 
 #### Full edition (PostgreSQL)
@@ -218,8 +224,10 @@ docker compose exec postgres pg_dump -U sukhan sukhan > backup-$(date +%Y%m%d).s
 #### Lite edition
 
 ```bash
-docker cp ./sukhan-backup-20240101.db sukhan-app-lite:/app/data/sukhan.db
-docker compose -f docker-compose.lite.yml restart app
+# Copy the dump into the Postgres container and restore it.
+docker cp ./sukhan-backup.dump sukhan-postgres-lite:/tmp/sukhan-backup.dump
+docker compose -f docker-compose.lite.yml exec postgres \
+  pg_restore -U sukhan -d sukhan --clean --if-exists /tmp/sukhan-backup.dump
 ```
 
 #### Full edition
@@ -290,7 +298,7 @@ docker compose logs realtime
 ```bash
 # Lite: reset the database (WARNING: loses all data)
 docker compose -f docker-compose.lite.yml down
-docker volume rm sukhan_sqlite-data
+docker volume rm sukhan_postgres-data-lite
 docker compose -f docker-compose.lite.yml up -d --build
 
 # Full: check PostgreSQL logs
@@ -333,124 +341,21 @@ docker compose logs postgres
 
 ---
 
-## Vercel Deployment
+## Vercel Deployment (Supabase PostgreSQL)
 
-Sukhan also runs on Vercel (serverless) — but with a different architecture
-than Docker. The Docker edition runs everything on one host (Next.js +
-realtime + reverse-proxy + SQLite/Postgres). Vercel can't host a long-lived
-Socket.IO server, so the realtime service must run on a separate host.
+Sukhan also runs on Vercel (serverless) — see `VERCEL_DEPLOYMENT.md` for the complete setup guide.
 
-### Architecture (Vercel mode)
+**Official cloud database: Supabase PostgreSQL** (via Supavisor connection pooling). Other Postgres providers are NOT supported by the Vercel deployment path.
 
-| Component      | Docker                              | Vercel                                |
-|----------------|-------------------------------------|---------------------------------------|
-| Next.js app    | Standalone Node process             | Vercel serverless functions           |
-| Database       | SQLite (Lite) or Postgres (Full)    | Postgres (Neon / Supabase / Vercel Postgres) |
-| Realtime       | In-process Socket.IO (port 3003)    | Separately-hosted Socket.IO (Railway / Render / Fly / VPS) |
-| Realtime pub   | HTTP to localhost:3004              | Redis PUBLISH (Upstash)              |
-| Object storage | Local filesystem (`public/uploads`) | Vercel Blob                           |
-| Reverse proxy  | (Caddyfile in repo)                | Vercel platform proxy                 |
+Architecture summary:
+- Next.js → Vercel serverless functions
+- PostgreSQL → Supabase (Supavisor-pooled DATABASE_URL + direct DIRECT_URL)
+- Migrations → prisma migrate deploy at Vercel build time (NOT db push)
+- Realtime → separately-hosted Socket.IO service + Upstash Redis pub/sub
+- Attachments → Vercel Blob
+- Authentication → NextAuth (unchanged)
 
-### One-time setup
-
-#### 1. Database (Neon / Supabase / Vercel Postgres)
-
-Create a Postgres database. Copy the connection string (`DATABASE_URL`)
-and the direct (non-pooling) connection string (`DIRECT_URL` if available).
-The Prisma schema for Vercel is at `prisma/schema.postgres.prisma` — the
-build script selects it automatically.
-
-To apply the schema to your Postgres instance (one-time):
-
-```bash
-# Set DATABASE_URL to your Postgres URL, then:
-DATABASE_URL=postgresql://... bunx prisma db push --schema=prisma/schema.postgres.prisma --accept-data-loss
-```
-
-#### 2. Redis (Upstash)
-
-Create an Upstash Redis database. Copy the public URL (`REDIS_URL`). The
-Next.js serverless functions publish Socket.IO events to this Redis; the
-realtime service subscribes.
-
-#### 3. Object Storage (Vercel Blob)
-
-In Vercel → Storage → Create → Blob. Copy the read-write token
-(`BLOB_READ_WRITE_TOKEN`).
-
-#### 4. Realtime Service (Railway / Render / Fly / VPS)
-
-The realtime service lives at `mini-services/realtime/index.ts`. Host it on
-any long-lived Node.js runtime. Set the same `NEXTAUTH_SECRET` and
-`REDIS_URL` env vars on the realtime service as on Vercel.
-
-Expose the realtime service at a public URL (e.g.
-`https://realtime.your-domain.com`). Set `NEXT_PUBLIC_REALTIME_URL` on
-Vercel to this URL — the dashboard and widget will connect to it directly
-(no reverse-proxy needed in Vercel mode).
-
-#### 5. Vercel Project
-
-1. Push the repo to GitHub.
-2. In Vercel → New Project → import the GitHub repo.
-3. Vercel auto-detects Next.js and uses `vercel.json`'s `buildCommand`
-   (`bash vercel-build.sh`). This:
-   - Selects the postgres Prisma schema.
-   - Generates the Prisma client against postgres.
-   - Runs `next build` WITHOUT `output: 'standalone'` (Vercel uses its
-     own build flow).
-4. Add all env vars from `.env.vercel.example` to Vercel → Project →
-   Settings → Environment Variables.
-5. Deploy.
-
-#### 6. Nixify (OTP / email verification)
-
-The same as Docker — set `NIXIFY_API_KEY` + `NIXIFY_BASE_URL` on Vercel.
-
-### Vercel-specific environment variables
-
-See `.env.vercel.example` for the complete list with descriptions. Key
-variables that differ from Docker:
-
-| Variable | Purpose |
-|----------|---------|
-| `DATABASE_URL` | Postgres connection (must be `postgresql://...`) |
-| `DIRECT_URL` | Direct (non-pooling) Postgres URL for migrations |
-| `REDIS_URL` | Upstash Redis URL for realtime pub/sub |
-| `NEXT_PUBLIC_REALTIME_URL` | Public URL of the separately-hosted realtime service |
-| `BLOB_READ_WRITE_TOKEN` | Vercel Blob token for attachment storage |
-
-### Verification
-
-After deployment, verify:
-
-```bash
-# Health endpoint
-curl https://your-sukhan-app.vercel.app/api
-
-# Widget config (replace SLUG with your workspace slug)
-curl https://your-sukhan-app.vercel.app/api/widget/SLUG/config
-
-# Realtime service health
-curl https://realtime.your-domain.com/health
-```
-
-### Compatibility with Docker
-
-The Vercel deployment mode is INDEPENDENT of the Docker deployment — they
-share the same application code, but the abstractions select different
-adapters based on the deployment mode:
-
-- `src/lib/deployment.ts` detects Vercel via `VERCEL=1`.
-- `src/lib/realtime/index.ts` selects Redis publisher when `REDIS_URL` is set.
-- `src/lib/storage/index.ts` selects Vercel Blob adapter when
-  `BLOB_READ_WRITE_TOKEN` is set.
-- `next.config.ts` skips `output: 'standalone'` in Vercel mode.
-- `prisma/schema.postgres.prisma` is the postgres-flavoured schema.
-
-Existing Docker / self-hosted deployments are UNAFFECTED — they continue to
-use SQLite (Lite) or Postgres (Full) with the local filesystem and the
-in-process realtime service.
+The Vercel deployment mode is INDEPENDENT of Docker — they share the same canonical PostgreSQL Prisma schema and the same Prisma migrations.
 
 ---
 

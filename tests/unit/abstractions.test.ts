@@ -12,10 +12,10 @@
  * Coverage maps to the regression-test requirements in the PR:
  *
  *   - "PostgreSQL/Prisma configuration validates correctly" — see test below
- *     ("postgres schema validates") + `tests/static/vercel-mode-guards.test.ts`.
+ *     ("prisma schema validates").
  *   - "Production code no longer relies on SQLite-specific behavior" —
- *     `tests/static/vercel-mode-guards.test.ts` greps for `provider = "sqlite"`
- *     in app code and finds none.
+ *     static grep asserts no `better-sqlite3` imports and no `file://` URLs
+ *     in app code (SQLite was dropped; the canonical schema is PostgreSQL).
  *   - "Vercel mode does not rely on Caddy" — `vercelModeDoesNotRelyOnCaddy`.
  *   - "Vercel mode does not rely on localhost port 3003" — same.
  *   - "Vercel mode does not rely on localhost port 3004" — same.
@@ -393,31 +393,66 @@ test('withTenant does not leak context to sibling chains after exit', async () =
 // This requires a postgres-formatted DATABASE_URL — we use a placeholder
 // (Prisma validate does NOT actually connect).
 
-test('postgres schema validates (prisma validate passes against schema.postgres.prisma)', async () => {
+test('prisma schema validates (single canonical PostgreSQL schema)', async () => {
   const { execSync } = await import('node:child_process')
-  // Suppress stdio to keep test output clean; rely on exit code.
+  // We use a postgresql:// DATABASE_URL because Prisma validate checks the
+  // URL format matches the declared provider (postgresql). Prisma validate
+  // does NOT actually connect to the database.
   expect(() => {
     execSync(
-      'bunx prisma validate --schema=prisma/schema.postgres.prisma',
+      'bunx prisma validate --schema=prisma/schema.prisma',
       {
         stdio: 'ignore',
         env: {
           ...process.env,
           DATABASE_URL: 'postgresql://user:password@localhost:5432/sukhan-validate',
+          DIRECT_URL: 'postgresql://user:password@localhost:5432/sukhan-validate',
         },
       },
     )
   }).not.toThrow()
 })
 
-test('sqlite schema still validates (regression: dev mode unaffected)', async () => {
-  const { execSync } = await import('node:child_process')
-  expect(() => {
-    execSync(
-      'bunx prisma validate --schema=prisma/schema.prisma',
-      { stdio: 'ignore', env: { ...process.env } },
-    )
-  }).not.toThrow()
+test('prisma schema uses postgresql provider (NOT sqlite)', () => {
+  const fs = require('node:fs')
+  const txt = fs.readFileSync(join(process.cwd(), 'prisma/schema.prisma'), 'utf8')
+  const dsMatch = txt.match(/datasource\s+db\s*{[\s\S]*?}/)
+  expect(dsMatch, 'prisma/schema.prisma must contain a datasource db {} block').not.toBeNull()
+  const dsBlock = dsMatch![0]
+  expect(dsBlock).toMatch(/provider\s*=\s*"postgresql"/)
+  expect(dsBlock).not.toMatch(/provider\s*=\s*"sqlite"/)
+  expect(dsBlock).toMatch(/directUrl\s*=\s*env\("DIRECT_URL"\)/)
+})
+
+test('schema.postgres.prisma is DELETED (single-schema strategy)', () => {
+  const fs = require('node:fs')
+  expect(fs.existsSync(join(process.cwd(), 'prisma/schema.postgres.prisma'))).toBe(false)
+})
+
+test('sync-prisma-schemas script is DELETED', () => {
+  const fs = require('node:fs')
+  expect(fs.existsSync(join(process.cwd(), 'scripts/sync-prisma-schemas.mjs'))).toBe(false)
+})
+
+test('prisma/migrations/migration_lock.toml exists and locks provider to postgresql', () => {
+  const fs = require('node:fs')
+  const f = join(process.cwd(), 'prisma/migrations/migration_lock.toml')
+  expect(fs.existsSync(f), 'prisma/migrations/migration_lock.toml must exist').toBe(true)
+  const txt = fs.readFileSync(f, 'utf8')
+  expect(txt).toMatch(/provider\s*=\s*"postgresql"/)
+})
+
+test('at least one migration directory exists under prisma/migrations/', () => {
+  const fs = require('node:fs')
+  const migrationsDir = join(process.cwd(), 'prisma/migrations')
+  expect(fs.existsSync(migrationsDir), 'prisma/migrations/ must exist').toBe(true)
+  const entries = fs.readdirSync(migrationsDir).filter(
+    (e) => e !== 'migration_lock.toml' && fs.statSync(join(migrationsDir, e)).isDirectory(),
+  )
+  expect(entries.length, 'at least one migration directory must exist').toBeGreaterThan(0)
+  const firstMigrationDir = entries.sort()[0]
+  const sqlFile = join(migrationsDir, firstMigrationDir, 'migration.sql')
+  expect(fs.existsSync(sqlFile), firstMigrationDir + '/migration.sql must exist').toBe(true)
 })
 
 /* ------------------------------------------------------------------ */
@@ -583,13 +618,78 @@ test('vercel.json buildCommand points at vercel-build.sh', () => {
   expect(cfg.buildCommand).toMatch(/vercel-build\.sh/)
 })
 
-test('package.json has db:validate:pg script', () => {
+test('vercel-build.sh uses prisma migrate deploy (no destructive schema sync)', () => {
+  const fs = require('node:fs')
+  const txt = fs.readFileSync(join(process.cwd(), 'vercel-build.sh'), 'utf8')
+  expect(txt).toMatch(/prisma\s+migrate\s+deploy/)
+  // The script must NOT invoke the destructive prisma db push command.
+  // (Comments may mention it for documentation, but the executable lines
+  // must not invoke it.) We check only non-comment, non-empty lines.
+  const codeLines = txt.split('\n')
+    .filter((l) => l.trim().length > 0)
+    .filter((l) => !l.trim().startsWith('#'))
+    .filter((l) => !l.trim().startsWith('echo '))
+  const dbPushLines = codeLines.filter((l) => /db\s+push/.test(l))
+  expect(dbPushLines, 'no "db push" in executable lines: ' + dbPushLines.join(', ')).toEqual([])
+  // Must NOT accept --accept-data-loss on any command.
+  const dataLossLines = codeLines.filter((l) => /--accept-data-loss/.test(l))
+  expect(dataLossLines, 'no --accept-data-loss in executable lines').toEqual([])
+})
+
+test('docker-entrypoint.sh uses prisma migrate deploy (no destructive schema sync)', () => {
+  const fs = require('node:fs')
+  const txt = fs.readFileSync(join(process.cwd(), 'docker-entrypoint.sh'), 'utf8')
+  expect(txt).toMatch(/prisma\s+migrate\s+deploy/)
+  const codeLines = txt.split('\n')
+    .filter((l) => l.trim().length > 0)
+    .filter((l) => !l.trim().startsWith('#'))
+    .filter((l) => !l.trim().startsWith('echo '))
+  const dbPushLines = codeLines.filter((l) => /db\s+push/.test(l))
+  expect(dbPushLines, 'no "db push" in executable lines: ' + dbPushLines.join(', ')).toEqual([])
+  const dataLossLines = codeLines.filter((l) => /--accept-data-loss/.test(l))
+  expect(dataLossLines, 'no --accept-data-loss in executable lines').toEqual([])
+})
+
+test('.env.vercel.example is tracked and uses Supabase placeholders', () => {
+  const fs = require('node:fs')
+  const f = join(process.cwd(), '.env.vercel.example')
+  expect(fs.existsSync(f), '.env.vercel.example must exist').toBe(true)
+  const txt = fs.readFileSync(f, 'utf8')
+  expect(txt).toMatch(/Supabase/)
+  expect(txt.toLowerCase()).not.toMatch(/\bneon\b/)
+  expect(txt).toMatch(/DIRECT_URL/)
+  expect(txt).toMatch(/DATABASE_URL/)
+  // Every non-comment, non-empty value line must contain a placeholder
+  // marker (YOUR_, CHANGE_ME, your-, example., dummy, or be explicitly
+  // documented as empty). This catches accidental commits of real
+  // credentials.
+  const placeholderMarkers = ['YOUR_', 'CHANGE_ME', 'your-', 'your_', 'example.', 'dummy']
+  const lines = txt.split('\n')
+  const valueLines = lines.filter((l) => /^[A-Z_]+=/.test(l) && !l.trim().startsWith('#'))
+  const nonPlaceholder = valueLines.filter((l) => {
+    const v = l.split('=').slice(1).join('=') || ''
+    if (v.length === 0) return false // empty values are OK
+    return !placeholderMarkers.some((m) => v.includes(m))
+  })
+  expect(nonPlaceholder, 'unexpected non-placeholder values: ' + nonPlaceholder.join(', ')).toEqual([])
+})
+
+test('package.json has migration scripts (no db:push, no sync-prisma-schemas)', () => {
+  const fs = require('node:fs')
   const f = join(process.cwd(), 'package.json')
-  const txt = require('node:fs').readFileSync(f, 'utf8') as string
+  const txt = fs.readFileSync(f, 'utf8')
   const pkg = JSON.parse(txt)
-  expect(pkg.scripts).toHaveProperty('db:validate:pg')
-  expect(pkg.scripts).toHaveProperty('db:generate:pg')
-  expect(pkg.scripts).toHaveProperty('sync-prisma-schemas')
+  expect(pkg.scripts).toHaveProperty('db:generate')
+  expect(pkg.scripts).toHaveProperty('db:validate')
+  expect(pkg.scripts).toHaveProperty('db:migrate:dev')
+  expect(pkg.scripts).toHaveProperty('db:migrate:deploy')
+  expect(pkg.scripts).toHaveProperty('db:migrate:status')
+  expect(pkg.scripts).toHaveProperty('db:migrate:diff')
+  expect(pkg.scripts).not.toHaveProperty('db:push')
+  expect(pkg.scripts).not.toHaveProperty('db:validate:pg')
+  expect(pkg.scripts).not.toHaveProperty('db:generate:pg')
+  expect(pkg.scripts).not.toHaveProperty('db:migrate:pg')
+  expect(pkg.scripts).not.toHaveProperty('sync-prisma-schemas')
 })
 
 /* ------------------------------------------------------------------ */

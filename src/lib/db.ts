@@ -4,13 +4,22 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 /**
  * Tenant isolation layer.
  *
- * Two deployment modes:
- *   - sqlite (dev / Docker Lite) — no native row-level security. The Prisma
- *     client extension below is the SOLE boundary.
- *   - postgresql (Vercel / Docker Full) — Postgres RLS is layered underneath
- *     the same client. The extension becomes defense-in-depth.
+ * PostgreSQL is the official database across all deployment modes
+ * (Supabase cloud, Docker Full, Docker Lite, local dev). The Prisma
+ * client extension below is the PRIMARY tenant-isolation boundary:
+ *   - auto-injects `where: { tenantId }` on reads of tenant-scoped models,
+ *   - auto-injects `data: { tenantId }` on creates,
+ *   - strips cross-tenant rows from results.
  *
- * The application contract is identical in both modes: the extension
+ * PostgreSQL Row-Level Security is treated as DEFENSE-IN-DEPTH ONLY.
+ * Prisma's privileged server-side database connection (which may use a
+ * dedicated Prisma role) MAY bypass RLS policies depending on the
+ * configured role. Therefore:
+ *   - NEVER weaken the application-layer tenant filtering here.
+ *   - NEVER assume that "RLS is enabled" means tenant isolation is
+ *     guaranteed. The extension below is the authoritative boundary.
+ *
+ * The application contract is identical across modes: the extension
  * auto-injects `where: { tenantId }` on reads and `data: { tenantId }` on
  * creates for tenant-scoped models, and strips cross-tenant rows from
  * results.
