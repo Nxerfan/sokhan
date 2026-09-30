@@ -224,7 +224,7 @@ io.on('connection', (socket: AuthenticatedSocket) => {
 // Each realtime instance receives the Redis publish and emits to its own
 // local sockets. The HTTP endpoint, by contrast, uses `io.to(room).emit(...)`
 // (with adapter fan-out) so a single HTTP POST reaches all instances' sockets.
-const PUBLISH_CHANNEL = 'sukhan:realtime:publish'
+const PUBLISH_CHANNEL = process.env.REDIS_CHANNEL || 'sukhan:realtime:publish'
 let redisEnabled = false
 
 async function setupRedis() {

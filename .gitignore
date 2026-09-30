@@ -62,3 +62,16 @@ screenshot-*.png
 # Download/upload (not used by app)
 download/
 upload/
+
+# Local database (NEVER commit — may contain user data)
+db/*.db
+db/*.db-journal
+db/*.sqlite
+db/*.sqlite-journal
+
+# Local file uploads (production should use object storage; never commit test artifacts)
+public/uploads/
+!public/uploads/.gitkeep
+
+# Skills directory already covered above; explicit
+/skills/

@@ -5,11 +5,17 @@
   "scripts": {
     "dev": "next dev -p 3000 2>&1 | tee dev.log",
     "build": "next build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/",
+    "build:vercel": "next build",
     "start": "NODE_ENV=production bun .next/standalone/server.js 2>&1 | tee server.log",
     "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "sync-prisma-schemas": "node scripts/sync-prisma-schemas.mjs",
     "db:push": "prisma db push --accept-data-loss",
     "db:generate": "prisma generate",
+    "db:generate:pg": "prisma generate --schema=prisma/schema.postgres.prisma",
+    "db:validate:pg": "DATABASE_URL=postgresql://user:password@localhost:5432/sukhan prisma validate --schema=prisma/schema.postgres.prisma",
     "db:migrate": "prisma migrate dev",
+    "db:migrate:pg": "prisma migrate dev --schema=prisma/schema.postgres.prisma",
     "db:reset": "prisma migrate reset"
   },
   "dependencies": {
@@ -52,6 +58,7 @@
     "@reactuses/core": "^6.0.5",
     "@tanstack/react-query": "^5.82.0",
     "@tanstack/react-table": "^8.21.3",
+    "@vercel/blob": "^2.8.0",
     "bcryptjs": "^3.0.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
@@ -74,6 +81,7 @@
     "react-resizable-panels": "^3.0.3",
     "react-syntax-highlighter": "^15.6.1",
     "recharts": "^2.15.4",
+    "redis": "^6.2.1",
     "sharp": "^0.34.3",
     "socket.io": "^4.8.3",
     "socket.io-client": "^4.8.3",

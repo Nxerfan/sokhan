@@ -17,7 +17,7 @@ import { db } from '@/lib/db'
  * Fully self-contained (no framework), RTL-aware via the config's defaultDirection.
  */
 
-function buildScript(_origin: string, slug: string, disablePolling: boolean): string {
+function buildScript(_origin: string, slug: string, disablePolling: boolean, socketUrl: string): string {
   return `(function(){
   "use strict";
   var SLUG = ${JSON.stringify(slug)};
@@ -32,7 +32,10 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean): st
   var CONTACT_URL = "/api/widget/" + SLUG + "/contact";
   var MESSAGES_URL = "/api/widget/" + SLUG + "/messages";
   var SOCKET_IO_JS = "/socket.io.min.js";
-  var SOCKET_URL = "/?XTransformPort=3003";
+  // SOCKET_URL is resolved server-side from NEXT_PUBLIC_REALTIME_URL.
+  //   - docker/dev (no env set) → "/?XTransformPort=3003" (Caddy forwards).
+  //   - vercel (env set to public realtime host) → that absolute URL.
+  var SOCKET_URL = ${JSON.stringify(socketUrl)};
 
   var state = {
     open: false,
@@ -590,7 +593,13 @@ export async function GET(
   const url = new URL(_req.url)
   const disablePolling = url.searchParams.get('nopoll') === '1'
   const origin = url.origin
-  const script = buildScript(origin, slug, disablePolling)
+  // Resolve the public Socket.IO URL the widget will connect to.
+  //   - docker/dev (no env set) → "/?XTransformPort=3003" (Caddy forwards).
+  //   - vercel (env set to public realtime host) → that absolute URL.
+  // The value is baked into the script as a JSON-encoded string literal so
+  // it cannot be tampered with client-side.
+  const socketUrl = process.env.NEXT_PUBLIC_REALTIME_URL || '/?XTransformPort=3003'
+  const script = buildScript(origin, slug, disablePolling, socketUrl)
 
   return new Response(script, {
     headers: {

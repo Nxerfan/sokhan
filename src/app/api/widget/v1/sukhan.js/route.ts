@@ -34,7 +34,7 @@ import { normalizeApiKey } from '@/lib/widget/widget-utils'
  *     the contract is forward-compatible).
  */
 
-function buildScript(): string {
+function buildScript(socketUrlOverride: string | null): string {
   return `(function(){
   "use strict";
 
@@ -59,7 +59,10 @@ function buildScript(): string {
   var MESSAGES_URL = API_URL + "/api/widget/" + SLUG + "/messages";
   var CSAT_URL = API_URL + "/api/widget/" + SLUG + "/csat";
   var SOCKET_IO_JS = API_URL + "/socket.io.min.js";
-  var SOCKET_URL = API_URL + "/?XTransformPort=3003";
+  // SOCKET_URL is resolved server-side from NEXT_PUBLIC_REALTIME_URL.
+  //   - docker/dev (no env set) → API_URL + "/?XTransformPort=3003" (Caddy).
+  //   - vercel (env set to public realtime host) → that absolute URL.
+  var SOCKET_URL = ${socketUrlOverride ? JSON.stringify(socketUrlOverride) : 'API_URL + "/?XTransformPort=3003"'};
 
   var state = {
     open: false,
@@ -551,7 +554,11 @@ function buildScript(): string {
  *     fallback when `data-api-key` is missing. Useful for testing.
  */
 export async function GET(_req: Request): Promise<Response> {
-  const script = buildScript()
+  // Resolve the public Socket.IO URL the widget will connect to.
+  //   - docker/dev (no env set) → null → script uses API_URL + Caddy pattern.
+  //   - vercel (env set to public realtime host) → that absolute URL.
+  const socketUrlOverride = process.env.NEXT_PUBLIC_REALTIME_URL || null
+  const script = buildScript(socketUrlOverride)
   return new Response(script, {
     headers: {
       'Content-Type': 'application/javascript; charset=utf-8',

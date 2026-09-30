@@ -95,10 +95,14 @@ const API_ENDPOINTS: Array<{
 
 /**
  * Realtime transport row. Locale-independent code values.
+ *
+ * NOTE: The URL `/?XTransformPort=3003` is the docker/dev default (routed
+ * through Caddy). On Vercel, set `NEXT_PUBLIC_REALTIME_URL` to your external
+ * realtime service URL and the dashboard + widget will use it instead.
  */
 const SOCKET_TABLE = [
   {
-    url: '/?XTransformPort=3003',
+    url: 'NEXT_PUBLIC_REALTIME_URL || "/?XTransformPort=3003"',
     auth: 'auth: { token }',
     events: 'message:new, conversation:updated, typing:start, typing:stop',
   },

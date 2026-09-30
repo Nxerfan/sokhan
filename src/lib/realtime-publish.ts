@@ -1,56 +1,20 @@
 /**
- * Publishes realtime events to the Socket.IO service via internal HTTP.
+ * Legacy realtime-publish entrypoint.
  *
- * In the sandbox (no Redis), Next.js API routes call this after persisting to
- * the DB. The realtime service receives the POST and emits to connected sockets
- * in the specified room.
+ * The implementation has moved to `src/lib/realtime/index.ts`, which adds
+ * a Redis-backed publisher for Vercel mode while preserving the existing
+ * HTTP-internal behaviour for docker/dev.
  *
- * In production with Redis, this would be replaced by a Redis PUBLISH call —
- * the realtime service would subscribe to Redis instead of exposing an HTTP
- * endpoint. The function signature stays the same.
+ * This file re-exports the new API so existing callers (the Module 2
+ * API routes that import from `@/lib/realtime-publish`) continue to work
+ * unchanged.
  */
 
-import { getAuthSecret } from './env-check'
-
-const REALTIME_INTERNAL_URL = process.env.REALTIME_INTERNAL_URL || 'http://localhost:3004'
-const INTERNAL_SECRET = getAuthSecret()
-
-export interface RealtimeEvent {
-  room: string
-  event: string
-  payload: unknown
-}
-
-export async function publishToRealtime(event: RealtimeEvent): Promise<void> {
-  try {
-    await fetch(`${REALTIME_INTERNAL_URL}/internal/publish`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Internal-Secret': INTERNAL_SECRET,
-      },
-      body: JSON.stringify(event),
-    })
-  } catch (e) {
-    // Realtime service may be down or starting — don't block the API response.
-    // Messages are persisted to DB; clients will catch up on reconnect.
-    console.error('[realtime] publish failed:', e instanceof Error ? e.message : e)
-  }
-}
-
-/** Room name helpers — keep naming consistent between API routes and the realtime service. */
-export const room = {
-  conversation: (conversationId: string) => `conversation:${conversationId}`,
-  tenant: (tenantId: string) => `tenant:${tenantId}`,
-  agent: (userId: string) => `agent:${userId}`,
-}
-
-/** Event names — shared between API routes, realtime service, and clients. */
-export const EVENTS = {
-  MESSAGE_NEW: 'message:new',
-  TYPING_START: 'typing:start',
-  TYPING_STOP: 'typing:stop',
-  MESSAGE_READ: 'message:read',
-  CONVERSATION_UPDATED: 'conversation:updated',
-  CONVERSATION_NEW: 'conversation:new',
-} as const
+export {
+  publishToRealtime,
+  room,
+  EVENTS,
+  getRealtimePublisher,
+  __resetRealtimePublisherCache,
+} from '@/lib/realtime'
+export type { RealtimeEvent, RealtimePublisher } from '@/lib/realtime'
