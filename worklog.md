@@ -1007,3 +1007,27 @@ Stage Summary:
 - Both prisma schemas (sqlite + postgres) validate.
 - Lint clean. No new TS errors.
 - The live Nixify API key in git history MUST be rotated by the repo owner (documented in the PR Security Warning section).
+
+---
+Task ID: 13-supabase
+Agent: main (Senior Full-Stack Engineer — Supabase standardization)
+Task: Update PR #1 to standardize cloud database on Supabase PostgreSQL (remove Neon, drop SQLite, add Prisma migrations, document Supabase setup).
+
+Work Log:
+- Searched repo for Neon references: found 3 in DEPLOYMENT.md. Removed all.
+- Standardized on ONE canonical PostgreSQL schema (dropped SQLite + dual-schema setup).
+- DELETED: prisma/schema.postgres.prisma, scripts/sync-prisma-schemas.mjs.
+- Created prisma/migrations/ with migration_lock.toml + baseline migration (510 lines, generated via prisma migrate diff).
+- vercel-build.sh + docker-entrypoint.sh now run `prisma migrate deploy` (NOT `db push`).
+- package.json scripts updated: added db:migrate:deploy, db:migrate:status, etc. Removed db:push, db:*:pg, sync-prisma-schemas.
+- docker-compose.lite.yml: now uses postgres:16-alpine instead of SQLite.
+- VERCEL_DEPLOYMENT.md (NEW): comprehensive Supabase-focused deployment guide.
+- .env.vercel.example (NEW): Supabase-specific placeholders.
+- .env.docker.example: updated to Postgres-only.
+- tests/unit/abstractions.test.ts: 45/45 PASS (added Supabase-specific tests).
+- Tenant isolation preserved (AsyncLocalStorage + explicit tenantId filters). RLS treated as defense-in-depth ONLY.
+- Authentication unchanged (NextAuth, no Supabase Auth migration).
+- Committed 2ef3550 + cleanup 2242d33, pushed to fix/vercel-deployment.
+- PR #1 updated: mergeable=true, mergeable_state=clean, commits=3.
+- Supabase remote verification: NOT VERIFIED (no credentials in sandbox — documented).
+- Playwright e2e tests: NOT RE-RUN (need a real Postgres DB — sandbox limitation, documented).
