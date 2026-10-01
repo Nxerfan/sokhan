@@ -220,6 +220,13 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     console.log('[realtime:vercel] Socket.IO server ready (path: /api/realtime)')
   }
 
+  // If this is a Socket.IO handshake/polling request (has EIO or transport query  // params), pass it to Engine.IO instead of responding with JSON.
+  if (req.url?.includes("EIO=") || req.url?.includes("transport=")) {
+    if (server.io?.engine) {
+      ;(server.io.engine as any).handleRequest(req, res)
+      return
+    }
+  }
   // HTTP GET returns a simple status (the WebSocket upgrade is handled by Socket.IO)
   if (req.method === 'GET') {
     res.status(200).json({
