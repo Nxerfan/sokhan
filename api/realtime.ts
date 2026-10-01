@@ -41,7 +41,8 @@ interface AuthSocket extends Socket { payload?: TokenPayload }
 
 const server = http.createServer();
 const io = new Server(server, {
-  path: '/api/realtime',
+  // Use default Socket.IO path (/socket.io) — Vercel strips the /api/realtime route prefix
+  // DO NOT set a custom path — the client uses path: '/api/realtime/socket.io'
   cors: { origin: '*', methods: ['GET', 'POST'] },
   pingTimeout: 60000,
   pingInterval: 25000,
@@ -79,7 +80,11 @@ if (redisUrl) {
 }
 
 // Auth middleware
-const secret = process.env.NEXTAUTH_SECRET || 'sukhan-dev-secret-DO-NOT-USE-IN-PRODUCTION-a7f3b2c1';
+const secret = process.env.NEXTAUTH_SECRET;
+if (!secret) {
+  console.error('[rt] FATAL: NEXTAUTH_SECRET is not set. Refusing to start.');
+  process.exit(1);
+}
 io.use((socket: AuthSocket, next) => {
   const token = (socket.handshake.auth as { token?: string })?.token;
   if (!token) return next(new Error('no_token'));
@@ -102,10 +107,12 @@ io.on('connection', (socket: AuthSocket) => {
   // CRITICAL: verify conversation belongs to the socket's tenant before joining
   socket.on('conversation:join', async (conversationId: string) => {
     try {
-      const conv = await prisma.conversation.findFirst({
-        where: { id: conversationId, tenantId: payload.tenantId },
-        select: { id: true },
-      });
+      const where: any = { id: conversationId, tenantId: payload.tenantId };
+      // Visitors may only join their OWN conversations (contactId match)
+      if (payload.type === 'visitor') {
+        where.contactId = payload.contactId;
+      }
+      const conv = await prisma.conversation.findFirst({ where, select: { id: true } });
       if (!conv) {
         console.log(`[rt] REJECTED conversation:join — tenant mismatch (conv=${conversationId}, tenant=${payload.tenantId})`);
         return; // silently reject — don't join the room

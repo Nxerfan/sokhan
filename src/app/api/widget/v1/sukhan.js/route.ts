@@ -63,7 +63,7 @@ function buildScript(socketUrlOverride: string | null): string {
   //   - docker/dev (no env set) → API_URL + "/?XTransformPort=3003" (Caddy).
   //   - vercel (env set to public realtime host) → that absolute URL.
   var SOCKET_URL = ${socketUrlOverride ? JSON.stringify(socketUrlOverride) : 'API_URL + "/?XTransformPort=3003"'};
-  var SOCKET_PATH = SOCKET_URL.indexOf("/api/realtime") >= 0 ? "/api/realtime" : "/";
+  var SOCKET_PATH = SOCKET_URL.indexOf("/api/realtime") >= 0 ? "/api/realtime/socket.io" : "/";
 
   var state = {
     open: false,

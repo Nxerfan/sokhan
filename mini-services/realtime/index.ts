@@ -294,6 +294,23 @@ const internalServer = createServer((req: IncomingMessage, res: ServerResponse) 
     return
   }
 
+  if (req.method === 'GET' && req.url?.startsWith('/internal/verify-conversation')) {
+    // Proxy to the Next.js app for DB-backed verification
+    const authHeader = req.headers['x-internal-secret']
+    if (authHeader !== SECRET) {
+      res.writeHead(403); res.end('forbidden'); return
+    }
+    // Forward to Next.js app
+    try {
+      const nextUrl = `http://localhost:3000/api/realtime/verify-conversation${req.url.replace('/internal/verify-conversation', '')}`
+      const nextRes = await fetch(nextUrl, { headers: { 'X-Internal-Secret': SECRET } })
+      res.writeHead(nextRes.status); res.end(await nextRes.text())
+    } catch (e) {
+      res.writeHead(500); res.end('error')
+    }
+    return
+  }
+
   if (req.method === 'POST' && req.url === '/internal/publish') {
     const authHeader = req.headers['x-internal-secret']
     if (authHeader !== SECRET) {

@@ -36,7 +36,7 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
   //   - docker/dev (no env set) → "/?XTransformPort=3003" (Caddy forwards).
   //   - vercel (env set to public realtime host) → that absolute URL.
   var SOCKET_URL = ${JSON.stringify(socketUrl)};
-  var SOCKET_PATH = SOCKET_URL.indexOf("/api/realtime") >= 0 ? "/api/realtime" : "/";
+  var SOCKET_PATH = SOCKET_URL.indexOf("/api/realtime") >= 0 ? "/api/realtime/socket.io" : "/";
 
   var state = {
     open: false,

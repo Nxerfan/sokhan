@@ -91,7 +91,7 @@ export function InboxView() {
         const { token } = await tokenRes.json()
         const _socketUrl = process.env.NEXT_PUBLIC_REALTIME_URL || '/?XTransformPort=3003'
         const s = io(_socketUrl, {
-          path: _socketUrl.includes('/api/realtime') ? '/api/realtime' : '/',
+          path: _socketUrl.includes('/api/realtime') ? '/api/realtime/socket.io' : '/',
           auth: { token },
           transports: _socketUrl.includes("/api/realtime") ? ["websocket"] : ["websocket", "polling"],
           reconnection: true,
