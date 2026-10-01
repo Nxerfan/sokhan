@@ -103,3 +103,84 @@ test('widget transports: websocket-only for Vercel, websocket+polling for Docker
     expect(txt).toMatch(/SOCKET_URL\.indexOf.*\/api\/realtime/)
   }
 })
+
+test('verify-conversation endpoint fails closed on invalid type', () => {
+  const txt = readFileSync(join(root, 'src/app/api/realtime/verify-conversation/route.ts'), 'utf8')
+  // Must validate type — only 'agent' and 'visitor' are accepted.
+  expect(txt).toMatch(/type\s*!==\s*['"]agent['"]\s*&&\s*type\s*!==\s*['"]visitor['"]/)
+  // Must return 400 on invalid type.
+  expect(txt).toMatch(/invalid_type/)
+})
+
+test('verify-conversation endpoint rejects visitor without contactId', () => {
+  const txt = readFileSync(join(root, 'src/app/api/realtime/verify-conversation/route.ts'), 'utf8')
+  // Visitor MUST have a contactId — reject if missing.
+  expect(txt).toMatch(/type\s*===\s*['"]visitor['"]\s*&&\s*!contactId/)
+  expect(txt).toMatch(/missing_contact_id/)
+  // The contactId filter must be applied for visitors (not silently skipped).
+  expect(txt).toMatch(/where\.contactId\s*=\s*contactId/)
+})
+
+test('Docker compose files set APP_INTERNAL_URL=http://app:3000 for realtime service', () => {
+  for (const f of ['docker-compose.yml', 'docker-compose.lite.yml']) {
+    const txt = readFileSync(join(root, f), 'utf8')
+    expect(txt).toContain('APP_INTERNAL_URL: http://app:3000')
+  }
+})
+
+test('mini-services/realtime does not hardcode localhost:3000 for app communication', () => {
+  const txt = readFileSync(join(root, 'mini-services/realtime/index.ts'), 'utf8')
+  // The /internal/verify-conversation proxy must use APP_INTERNAL_URL,
+  // not a hardcoded http://localhost:3000 in the fetch URL construction.
+  // The ONLY allowed occurrence is the dev-mode fallback in the variable
+  // declaration: `process.env.APP_INTERNAL_URL || 'http://localhost:3000'`.
+  // (Docker compose overrides this via env var, so the fallback never
+  // kicks in inside a container.)
+  const codeLines = txt.split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0)
+    .filter((l) => !l.startsWith('//') && !l.startsWith('*'))
+  // Find lines that mention localhost:3000.
+  const offenders = codeLines.filter((l) => /http:\/\/localhost:3000/.test(l))
+  // Allow ONLY the variable-declaration fallback (env var with || default).
+  for (const line of offenders) {
+    expect(line).toMatch(/APP_INTERNAL_URL\s*\|\|\s*['"]http:\/\/localhost:3000['"]/)
+  }
+})
+
+test('widget [slug]/script: NO io("/api/realtime"...) namespace bug on Vercel', () => {
+  const txt = readFileSync(join(root, 'src/app/api/widget/[slug]/script/route.ts'), 'utf8')
+  // The GET handler must NOT bake "/api/realtime" as the SOCKET_URL on Vercel.
+  // (Vercel uses the __API_URL__ placeholder which the script replaces with
+  // the Sukhan origin at runtime, then connects via path /api/realtime/socket.io.)
+  expect(txt).toContain('__API_URL__')
+  expect(txt).not.toMatch(/VERCEL\s*===\s*['"]1['"]\s*\)\s*\?\s*['"]\/api\/realtime['"]/)
+})
+
+test('widget v1/sukhan.js: NO io("/api/realtime"...) namespace bug on Vercel', () => {
+  const txt = readFileSync(join(root, 'src/app/api/widget/v1/sukhan.js/route.ts'), 'utf8')
+  expect(txt).toContain('__API_URL__')
+  // The fallback for Vercel must NOT be the Caddy pattern.
+  // (The Caddy pattern falls through only when NOT on Vercel.)
+  expect(txt).not.toMatch(/VERCEL\s*===\s*['"]1['"]\s*\)\s*\?\s*['"]\/api\/realtime['"]/)
+})
+
+test('realtime-client.ts: Vercel uses empty URL + /api/realtime/socket.io path (no namespace bug)', () => {
+  const txt = readFileSync(join(root, 'src/lib/realtime-client.ts'), 'utf8')
+  // Vercel mode must return an empty URL (default namespace).
+  expect(txt).toMatch(/return\s*\{\s*url:\s*['"]['"]/)
+  // Vercel path must be /api/realtime/socket.io.
+  expect(txt).toMatch(/path:\s*['"]\/api\/realtime\/socket\.io['"]/)
+  // Must NOT return "/api/realtime" as the URL on Vercel.
+  expect(txt).not.toMatch(/VERCEL\s*===\s*['"]1['"]\s*.*return\s*['"]\/api\/realtime['"]/)
+})
+
+test('inbox-view.tsx: Vercel uses empty URL + /api/realtime/socket.io path (no namespace bug)', () => {
+  const txt = readFileSync(join(root, 'src/components/dashboard/views/inbox-view.tsx'), 'utf8')
+  // Vercel mode must use empty socketUrl (default namespace).
+  expect(txt).toMatch(/isVercel\s*\?\s*['"]['"]/)
+  expect(txt).toMatch(/isVercel\s*\|\|\s*isApiRealtime\s*\?\s*['"]\/api\/realtime\/socket\.io['"]/)
+  // Must NOT pass "/api/realtime" as URL on Vercel.
+  expect(txt).not.toMatch(/isVercel\s*\?\s*['"]\/api\/realtime['"]/)
+})
+

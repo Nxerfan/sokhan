@@ -27,8 +27,10 @@ jobs:
         env:
           DATABASE_URL: postgresql://user:password@localhost:5432/dummy
           DIRECT_URL: postgresql://user:password@localhost:5432/dummy
+      - name: Vercel build script syntax check
+        run: bash -n vercel-build.sh
       - name: Unit tests
-        run: bun test tests/unit/abstractions.test.ts
+        run: bun test tests/unit/
       - name: Production build
         run: bunx next build
         env:

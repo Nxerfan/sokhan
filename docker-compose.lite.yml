@@ -74,6 +74,12 @@ services:
     command: ["realtime"]
     environment:
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?NEXTAUTH_SECRET is required}
+      # Internal URL of the Next.js app — used by the realtime service to
+      # verify conversation ownership via the app's /api/realtime/verify-conversation
+      # endpoint. In Docker Compose, the Next.js service is named 'app'.
+      # Without this, the realtime service would fall back to localhost:3000,
+      # which is unreachable from inside the realtime container.
+      APP_INTERNAL_URL: http://app:3000
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:3004/health"]
       interval: 30s

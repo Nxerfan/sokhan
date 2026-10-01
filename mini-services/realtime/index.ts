@@ -323,9 +323,11 @@ const internalServer = createServer(async (req: IncomingMessage, res: ServerResp
     if (authHeader !== SECRET) {
       res.writeHead(403); res.end('forbidden'); return
     }
-    // Forward to Next.js app
+    // Forward to Next.js app via APP_INTERNAL_URL (Docker: http://app:3000).
+    // The fallback to localhost:3000 only applies in dev where the Next.js
+    // app and the realtime service share the same host.
     try {
-      const nextUrl = `http://localhost:3000/api/realtime/verify-conversation${req.url.replace('/internal/verify-conversation', '')}`
+      const nextUrl = `${APP_INTERNAL_URL}/api/realtime/verify-conversation${req.url.replace('/internal/verify-conversation', '')}`
       const nextRes = await fetch(nextUrl, { headers: { 'X-Internal-Secret': SECRET } })
       res.writeHead(nextRes.status); res.end(await nextRes.text())
     } catch (e) {

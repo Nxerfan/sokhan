@@ -71,6 +71,12 @@ services:
     environment:
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?NEXTAUTH_SECRET is required}
       REDIS_URL: redis://redis:6379
+      # Internal URL of the Next.js app — used by the realtime service to
+      # verify conversation ownership via the app's /api/realtime/verify-conversation
+      # endpoint. In Docker Compose, the Next.js service is named 'app'.
+      # Without this, the realtime service would fall back to localhost:3000,
+      # which is unreachable from inside the realtime container.
+      APP_INTERNAL_URL: http://app:3000
     depends_on:
       redis:
         condition: service_healthy

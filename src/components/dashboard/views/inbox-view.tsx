@@ -89,11 +89,19 @@ export function InboxView() {
         const tokenRes = await fetch('/api/realtime-token')
         if (!tokenRes.ok) return
         const { token } = await tokenRes.json()
-        const _socketUrl = (process.env.NEXT_PUBLIC_VERCEL === '1' || process.env.VERCEL === '1') ? '/api/realtime' : (process.env.NEXT_PUBLIC_REALTIME_URL || '/?XTransformPort=3003')
-        const s = io(_socketUrl, {
-          path: _socketUrl.includes('/api/realtime') ? '/api/realtime/socket.io' : '/',
+        // CRITICAL: passing '/api/realtime' as the URL to io() makes Socket.IO
+        // treat it as a NAMESPACE, not a path — connection silently breaks on
+        // Vercel. On Vercel we pass an empty URL (default namespace) and route
+        // via path: '/api/realtime/socket.io' which Vercel forwards to the
+        // WebSocket Function (it strips the /api/realtime prefix).
+        const isVercel = process.env.NEXT_PUBLIC_VERCEL === '1' || process.env.VERCEL === '1'
+        const explicit = process.env.NEXT_PUBLIC_REALTIME_URL
+        const socketUrl = isVercel ? '' : (explicit || '/?XTransformPort=3003')
+        const isApiRealtime = socketUrl.includes('/api/realtime')
+        const s = io(socketUrl, {
+          path: isVercel || isApiRealtime ? '/api/realtime/socket.io' : '/',
           auth: { token },
-          transports: _socketUrl.includes("/api/realtime") ? ["websocket"] : ["websocket", "polling"],
+          transports: isVercel || isApiRealtime ? ['websocket'] : ['websocket', 'polling'],
           reconnection: true,
         })
         if (!active) { s.disconnect(); return }

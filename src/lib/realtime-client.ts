@@ -5,28 +5,63 @@ import { io, type Socket } from 'socket.io-client'
 let socketInstance: Socket | null = null
 
 /**
- * Resolve the Socket.IO connection URL.
+ * Resolve the Socket.IO connection URL + path.
  *
- * - In docker/dev (Caddy front of everything) we connect to
- *   `/?XTransformPort=3003` — Caddy forwards to the realtime service.
- * - In Vercel (no Caddy), the realtime service runs on a separate host.
- *   Set `NEXT_PUBLIC_REALTIME_URL` to its public URL.
+ * IMPORTANT: passing `/api/realtime` as the URL to `io()` makes Socket.IO
+ * treat it as a NAMESPACE, not a path. This breaks connection on Vercel.
+ *
+ * Correct per-deployment behaviour:
+ *
+ *   - Vercel mode (VERCEL=1):
+ *       URL:  '' (empty — io() connects to the page origin = Sukhan
+ *                 deployment URL, using the default namespace)
+ *       Path: '/api/realtime/socket.io'
+ *       (Vercel's edge strips the /api/realtime prefix and routes the
+ *       remaining /socket.io/... request to the WebSocket Function.)
+ *
+ *   - Explicit URL (NEXT_PUBLIC_REALTIME_URL set):
+ *       Used as-is. Path is '/api/realtime/socket.io' if the URL contains
+ *       '/api/realtime' (serverless WebSocket pattern), otherwise '/'.
+ *
+ *   - Docker / dev (default, behind Caddy):
+ *       URL:  '/?XTransformPort=3003'  (Caddy reverse-proxies to port 3003)
+ *       Path: '/'                     (the realtime service uses default
+ *                                       Socket.IO path /socket.io)
  *
  * The URL is resolved ONCE at module load time so that it is stable
  * across reconnects. Tests can set the env var before loading the page.
  */
-function resolveSocketUrl(): string {
-  // Vercel mode: VERCEL=1 is set by the Vercel runtime.
-  // In Vercel mode, we use /api/realtime/socket.io as the path (no URL needed).
-  if (process.env.NEXT_PUBLIC_VERCEL === '1' || process.env.VERCEL === '1') return '/api/realtime'
-  const explicit = process.env.NEXT_PUBLIC_REALTIME_URL
-  if (explicit) return explicit
-  // Default: rely on Caddy's XTransformPort forwarding.
-  // Works in docker + dev; on Vercel this must be overridden via env.
-  return '/?XTransformPort=3003'
+interface SocketConfig {
+  url: string
+  path: string
+  transports: ('websocket' | 'polling')[]
 }
 
-const SOCKET_URL = resolveSocketUrl()
+function resolveSocketConfig(): SocketConfig {
+  // Vercel mode — VERCEL=1 is set by the Vercel runtime.
+  // Use the DEFAULT namespace (no URL) with path /api/realtime/socket.io.
+  if (process.env.NEXT_PUBLIC_VERCEL === '1' || process.env.VERCEL === '1') {
+    return { url: '', path: '/api/realtime/socket.io', transports: ['websocket'] }
+  }
+  const explicit = process.env.NEXT_PUBLIC_REALTIME_URL
+  if (explicit) {
+    const isApiRealtime = explicit.includes('/api/realtime')
+    return {
+      url: explicit,
+      path: isApiRealtime ? '/api/realtime/socket.io' : '/',
+      transports: isApiRealtime ? ['websocket'] : ['websocket', 'polling'],
+    }
+  }
+  // Default: rely on Caddy's XTransformPort forwarding.
+  // Works in docker + dev; on Vercel this must be overridden via env.
+  return {
+    url: '/?XTransformPort=3003',
+    path: '/',
+    transports: ['websocket', 'polling'],
+  }
+}
+
+const { url: SOCKET_URL, path: SOCKET_PATH, transports: SOCKET_TRANSPORTS } = resolveSocketConfig()
 
 export async function connectRealtime(): Promise<Socket> {
   if (socketInstance?.connected) return socketInstance
@@ -36,11 +71,12 @@ export async function connectRealtime(): Promise<Socket> {
   if (!res.ok) throw new Error('Failed to get realtime token')
   const { token } = await res.json()
 
-  // Connect — path: '/' matches the realtime service's Socket.IO server config.
+  // Connect. SOCKET_URL is empty on Vercel — `io('')` connects to the
+  // page origin (Sukhan deployment) using the default namespace.
   socketInstance = io(SOCKET_URL, {
-    path: SOCKET_URL.includes('/api/realtime') ? '/api/realtime/socket.io' : '/',
+    path: SOCKET_PATH,
     auth: { token },
-    transports: SOCKET_URL.includes("/api/realtime") ? ["websocket"] : ["websocket", "polling"],
+    transports: SOCKET_TRANSPORTS,
     reconnection: true,
     reconnectionAttempts: 10,
     reconnectionDelay: 1000,

@@ -9,10 +9,9 @@
 #      production-safe migration command — it applies the migration files
 #      from prisma/migrations/ and never destructively reconciles the schema
 #      at runtime. If a migration fails, the build fails.
-#   3. Runs `export NEXT_PUBLIC_VERCEL="1"
-next build` WITHOUT `output: 'standalone'` (the
-#      `next.config.ts` detects Vercel via `VERCEL=1` and skips the
-#      standalone output — Vercel uses its own build flow).
+#   3. Exports NEXT_PUBLIC_VERCEL=1 and runs `next build` WITHOUT
+#      `output: 'standalone'` (next.config.ts detects Vercel via VERCEL=1
+#      and skips the standalone output — Vercel uses its own build flow).
 #
 # Neon connection architecture (serverless-aware):
 #   - DATABASE_URL  — Neon pooled connection (pooler hostname, with
@@ -32,8 +31,7 @@ bunx prisma generate
 echo "▶ Vercel build — applying Prisma migrations (migrate deploy)"
 bunx prisma migrate deploy
 
-echo "▶ Vercel build — running export NEXT_PUBLIC_VERCEL="1"
-next build (no standalone output)"
+echo "▶ Vercel build — running next build (no standalone output)"
 export NEXT_PUBLIC_VERCEL="1"
 next build
 
