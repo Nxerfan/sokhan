@@ -555,7 +555,6 @@ function buildScript(socketUrlOverride: string | null): string {
  *     fallback when `data-api-key` is missing. Useful for testing.
  */
 export async function GET(_req: Request): Promise<Response> {
-  const socketUrlOverride = process.env.NEXT_PUBLIC_REALTIME_URL || null
   // Resolve the public Socket.IO URL the widget will connect to.
   //   - docker/dev (no env set) → null → script uses API_URL + Caddy pattern.
   //   - vercel (env set to public realtime host) → that absolute URL.
