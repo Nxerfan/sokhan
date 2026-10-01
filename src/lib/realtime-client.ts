@@ -37,7 +37,7 @@ export async function connectRealtime(): Promise<Socket> {
   socketInstance = io(SOCKET_URL, {
     path: SOCKET_URL.includes('/api/realtime') ? '/api/realtime' : '/',
     auth: { token },
-    transports: ['websocket', 'polling'],
+    transports: SOCKET_URL.includes("/api/realtime") ? ["websocket"] : ["websocket", "polling"],
     reconnection: true,
     reconnectionAttempts: 10,
     reconnectionDelay: 1000,

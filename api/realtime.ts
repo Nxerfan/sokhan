@@ -92,8 +92,12 @@ io.use((socket: AuthSocket, next) => {
 io.on('connection', (socket: AuthSocket) => {
   const payload = socket.payload!;
   console.log(`[rt] connect type=${payload.type} id=${socket.id}`);
-  socket.join(`tenant:${payload.tenantId}`);
-  if (payload.type === 'agent') socket.join(`agent:${payload.userId}`);
+  // Only agents join the tenant-wide room (for conversation:new/updated events).
+  // Visitors only receive events for their own conversation.
+  if (payload.type === 'agent') {
+    socket.join(`tenant:${payload.tenantId}`);
+    socket.join(`agent:${payload.userId}`);
+  }
 
   // CRITICAL: verify conversation belongs to the socket's tenant before joining
   socket.on('conversation:join', async (conversationId: string) => {
@@ -118,17 +122,20 @@ io.on('connection', (socket: AuthSocket) => {
   });
 
   socket.on('typing:start', (d: { conversationId: string }) => {
+    if (!socket.rooms.has(`conversation:${d.conversationId}`)) return;
     socket.to(`conversation:${d.conversationId}`).emit('typing:start', {
       conversationId: d.conversationId, senderType: payload.type,
       senderId: payload.type === 'agent' ? payload.userId : payload.contactId,
     });
   });
   socket.on('typing:stop', (d: { conversationId: string }) => {
+    if (!socket.rooms.has(`conversation:${d.conversationId}`)) return;
     socket.to(`conversation:${d.conversationId}`).emit('typing:stop', {
       conversationId: d.conversationId, senderType: payload.type,
     });
   });
   socket.on('message:read', (d: { conversationId: string }) => {
+    if (!socket.rooms.has(`conversation:${d.conversationId}`)) return;
     socket.to(`conversation:${d.conversationId}`).emit('message:read', {
       conversationId: d.conversationId, readerType: payload.type,
       readerId: payload.type === 'agent' ? payload.userId : payload.contactId,

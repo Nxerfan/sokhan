@@ -36,3 +36,4 @@ jobs:
           DATABASE_URL: postgresql://user:password@localhost:5432/dummy
           DIRECT_URL: postgresql://user:password@localhost:5432/dummy
           NIXIFY_MOCK: 'true'
+          NEXTAUTH_SECRET: 'ci-test-secret-not-for-production'

@@ -93,7 +93,7 @@ export function InboxView() {
         const s = io(_socketUrl, {
           path: _socketUrl.includes('/api/realtime') ? '/api/realtime' : '/',
           auth: { token },
-          transports: ['websocket', 'polling'],
+          transports: _socketUrl.includes("/api/realtime") ? ["websocket"] : ["websocket", "polling"],
           reconnection: true,
         })
         if (!active) { s.disconnect(); return }

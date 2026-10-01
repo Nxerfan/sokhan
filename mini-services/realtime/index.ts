@@ -162,9 +162,10 @@ io.on('connection', (socket: AuthenticatedSocket) => {
   const payload = socket.payload!
   console.log(`[connect] type=${payload.type} id=${socket.id}`)
 
-  socket.join(`tenant:${payload.tenantId}`)
-
+  // Only agents join the tenant-wide room.
+  // Visitors only receive events for their own conversation.
   if (payload.type === 'agent') {
+    socket.join(`tenant:${payload.tenantId}`)
     socket.join(`agent:${payload.userId}`)
   }
 
@@ -178,6 +179,7 @@ io.on('connection', (socket: AuthenticatedSocket) => {
   })
 
   socket.on('typing:start', (data: { conversationId: string }) => {
+    if (!socket.rooms.has(`conversation:${data.conversationId}`)) return
     socket.to(`conversation:${data.conversationId}`).emit('typing:start', {
       conversationId: data.conversationId,
       senderType: payload.type,
@@ -186,6 +188,7 @@ io.on('connection', (socket: AuthenticatedSocket) => {
   })
 
   socket.on('typing:stop', (data: { conversationId: string }) => {
+    if (!socket.rooms.has(`conversation:${data.conversationId}`)) return
     socket.to(`conversation:${data.conversationId}`).emit('typing:stop', {
       conversationId: data.conversationId,
       senderType: payload.type,
@@ -193,6 +196,7 @@ io.on('connection', (socket: AuthenticatedSocket) => {
   })
 
   socket.on('message:read', (data: { conversationId: string }) => {
+    if (!socket.rooms.has(`conversation:${data.conversationId}`)) return
     socket.to(`conversation:${data.conversationId}`).emit('message:read', {
       conversationId: data.conversationId,
       readerType: payload.type,
