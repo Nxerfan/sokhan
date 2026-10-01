@@ -32,6 +32,7 @@ echo "▶ Vercel build — applying Prisma migrations (migrate deploy)"
 bunx prisma migrate deploy
 
 echo "▶ Vercel build — running next build (no standalone output)"
+export NEXT_PUBLIC_REALTIME_URL="/api/realtime"
 next build
 
 echo "✓ Vercel build complete"

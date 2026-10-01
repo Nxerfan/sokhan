@@ -91,8 +91,8 @@ function CallbackHandler() {
   const searchParams = useSearchParams()
 
   useEffect(() => {
-    const status = searchParams.get('billing')
-    const message = searchParams.get('message')
+    const status = searchParams?.get('billing')
+    const message = searchParams?.get('message')
     if (!status) return
     if (status === 'success') {
       toast.success(t('paymentSuccess'))

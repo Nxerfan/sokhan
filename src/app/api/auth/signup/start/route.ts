@@ -16,11 +16,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'email_already_registered' }, { status: 409 })
   }
 
-  // Check hasUsedFreeTrial
-  if (existingUser?.hasUsedFreeTrial) {
-    return NextResponse.json({ error: 'free_trial_already_used' }, { status: 403 })
-  }
-
   // Check existing pending signup (not expired)
   const existingPending = await db.pendingSignup.findUnique({ where: { email } })
   if (existingPending && existingPending.expiresAt > new Date()) {

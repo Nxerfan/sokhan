@@ -19,7 +19,7 @@ import { test, expect, type Page, type BrowserContext } from '@playwright/test'
 const DASHBOARD = 'http://localhost:3000'
 const WIDGET = 'http://localhost:81'
 
-async function signupAndSignin(ctx: BrowserContext, email: string, workspace: string): Promise<string> {
+async function signupAndSignin(ctx: BrowserContext, email: string, workspace: string): Promise<{ page: Page; slug: string }> {
   // Use the browser context's own cookie jar via a page
   const page = await ctx.newPage()
   await page.goto(DASHBOARD)

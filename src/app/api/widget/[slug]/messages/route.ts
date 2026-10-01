@@ -74,11 +74,11 @@ export async function POST(
 
   // Rate limit — per IP + per tenant
   const ip = getClientIP(req)
-  const rateLimit = checkRateLimit(ip, slug)
+  const rateLimit = await checkRateLimit(ip, slug)
   if (!rateLimit.allowed) {
     return widgetHeaders(NextResponse.json(
       { error: 'rate_limited' },
-      { status: 429, headers: { 'Retry-After': String(Math.ceil((rateLimit.resetAt - Date.now()) / 1000)) } },
+      { status: 429, headers: { 'Retry-After': String(rateLimit.retryAfter || 60) } },
     ))
   }
 

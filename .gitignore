@@ -78,3 +78,5 @@ tmp-supabase/
 
 # Skills directory already covered above; explicit
 /skills/
+tmp-neon/
+scripts/apply-final.sh

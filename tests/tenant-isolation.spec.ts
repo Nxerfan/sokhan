@@ -95,7 +95,7 @@ test.describe('Cross-tenant isolation', () => {
 
     // === ISOLATION CHECKS — all API calls from Tenant B's authenticated session ===
     const results = await pageB.evaluate(async (convId) => {
-      const checks = {}
+      const checks: Record<string, any> = {}
 
       // 1. Conversations list — should NOT contain Tenant A's conversation
       const convsRes = await fetch('/api/conversations?status=all')

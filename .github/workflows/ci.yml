@@ -1,0 +1,38 @@
+name: CI
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [fix/vercel-deployment]
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Install dependencies
+        run: bun install
+      - name: Lint
+        run: bun run lint
+      - name: TypeScript check
+        run: bun run typecheck
+      - name: Prisma generate
+        run: bunx prisma generate
+        env:
+          DATABASE_URL: postgresql://user:password@localhost:5432/dummy
+          DIRECT_URL: postgresql://user:password@localhost:5432/dummy
+      - name: Prisma validate
+        run: bunx prisma validate
+        env:
+          DATABASE_URL: postgresql://user:password@localhost:5432/dummy
+          DIRECT_URL: postgresql://user:password@localhost:5432/dummy
+      - name: Unit tests
+        run: bun test tests/unit/abstractions.test.ts
+      - name: Production build
+        run: bunx next build
+        env:
+          VERCEL: '1'
+          DATABASE_URL: postgresql://user:password@localhost:5432/dummy
+          DIRECT_URL: postgresql://user:password@localhost:5432/dummy
+          NIXIFY_MOCK: 'true'
