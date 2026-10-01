@@ -310,7 +310,7 @@ async function setupRedis() {
 // ============================================================
 // Internal HTTP server (port 3004 — server-to-server only)
 // ============================================================
-const internalServer = createServer((req: IncomingMessage, res: ServerResponse) => {
+const internalServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
   if (req.method === 'GET' && req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ ok: true, connections: io.engine.clientsCount, redis: redisEnabled }))

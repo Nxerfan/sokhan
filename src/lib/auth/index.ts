@@ -1,10 +1,18 @@
 import { getServerSession } from 'next-auth'
 import { authOptions } from './options'
 import { db, withTenant, getCurrentTenantId, hasRole, ROLE_RANK } from '@/lib/db'
+
 export interface TypedSession {
-  user: { id: string; email: string; name?: string | null; workspaceId: string; role: string }
+  user: {
+    id: string
+    email: string
+    name?: string | null
+    workspaceId: string
+    role: string
+  }
   expires: string
 }
+
 export async function withSessionTenant<T>(
   fn: (ctx: { session: TypedSession }) => Promise<T>,
 ): Promise<{ session: TypedSession; result: T } | null> {
@@ -19,4 +27,5 @@ export async function withSessionTenant<T>(
     return { session, result }
   })
 }
+
 export { authOptions, getServerSession, getCurrentTenantId, hasRole, ROLE_RANK }
