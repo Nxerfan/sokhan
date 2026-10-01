@@ -5,7 +5,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
  * Tenant isolation layer.
  *
  * PostgreSQL is the official database across all deployment modes
- * (Supabase cloud, Docker Full, Docker Lite, local dev). The Prisma
+ * (Neon cloud, Docker Full, Docker Lite, local dev). The Prisma
  * client extension below is the PRIMARY tenant-isolation boundary:
  *   - auto-injects `where: { tenantId }` on reads of tenant-scoped models,
  *   - auto-injects `data: { tenantId }` on creates,

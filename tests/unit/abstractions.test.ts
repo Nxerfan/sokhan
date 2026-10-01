@@ -650,20 +650,20 @@ test('docker-entrypoint.sh uses prisma migrate deploy (no destructive schema syn
   expect(dataLossLines, 'no --accept-data-loss in executable lines').toEqual([])
 })
 
-test('.env.vercel.example is tracked and uses Supabase placeholders', () => {
+test('.env.vercel.example is tracked and uses Neon placeholders', () => {
   const fs = require('node:fs')
   const f = join(process.cwd(), '.env.vercel.example')
   expect(fs.existsSync(f), '.env.vercel.example must exist').toBe(true)
   const txt = fs.readFileSync(f, 'utf8')
-  expect(txt).toMatch(/Supabase/)
-  expect(txt.toLowerCase()).not.toMatch(/\bneon\b/)
+  expect(txt).toMatch(/Neon/)
+  expect(txt.toLowerCase()).not.toMatch(/\bsupabase\b/)
   expect(txt).toMatch(/DIRECT_URL/)
   expect(txt).toMatch(/DATABASE_URL/)
   // Every non-comment, non-empty value line must contain a placeholder
   // marker (YOUR_, CHANGE_ME, your-, example., dummy, or be explicitly
   // documented as empty). This catches accidental commits of real
   // credentials.
-  const placeholderMarkers = ['YOUR_', 'CHANGE_ME', 'your-', 'your_', 'example.', 'dummy']
+  const placeholderMarkers = ['YOUR_', 'CHANGE_ME', 'your-', 'your_', 'example.', 'dummy', '<', '>']
   const lines = txt.split('\n')
   const valueLines = lines.filter((l) => /^[A-Z_]+=/.test(l) && !l.trim().startsWith('#'))
   const nonPlaceholder = valueLines.filter((l) => {

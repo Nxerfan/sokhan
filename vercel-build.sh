@@ -4,7 +4,7 @@
 # Vercel invokes this script via vercel.json's `buildCommand`. The script:
 #
 #   1. Runs `prisma generate` against the canonical PostgreSQL schema so the
-#      serverless runtime can talk to Supabase Postgres.
+#      serverless runtime can talk to Neon Postgres.
 #   2. Runs `prisma migrate deploy` to apply pending migrations. This is the
 #      production-safe migration command — it applies the migration files
 #      from prisma/migrations/ and never destructively reconciles the schema
@@ -13,18 +13,19 @@
 #      `next.config.ts` detects Vercel via `VERCEL=1` and skips the
 #      standalone output — Vercel uses its own build flow).
 #
-# Supabase connection architecture (serverless-aware):
-#   - DATABASE_URL  — Supavisor pooled connection (port 6543). Used by the
-#                     Prisma Client at runtime.
-#   - DIRECT_URL    — direct (non-pooled) connection (port 5432). Used by
+# Neon connection architecture (serverless-aware):
+#   - DATABASE_URL  — Neon pooled connection (pooler hostname, with
+#                     &pgbouncer=true). Used by the Prisma Client at
+#                     runtime.
+#   - DIRECT_URL    — Neon direct connection (no pooler). Used by
 #                     `prisma migrate deploy` (DDL requires a direct
-#                     connection; Supavisor's transaction-mode pooling is
+#                     connection; Neon's transaction-mode pooling is
 #                     incompatible with migration DDL).
 #
 # Both env vars are REQUIRED for the Vercel build to succeed.
 set -euo pipefail
 
-echo "▶ Vercel build — generating Prisma client (PostgreSQL / Supabase)"
+echo "▶ Vercel build — generating Prisma client (PostgreSQL / Neon)"
 bunx prisma generate
 
 echo "▶ Vercel build — applying Prisma migrations (migrate deploy)"

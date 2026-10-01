@@ -2,7 +2,7 @@
 //
 // PostgreSQL is the OFFICIAL database provider for Sukhan across all
 // deployment modes:
-//   - Vercel + Supabase PostgreSQL (cloud, serverless)
+//   - Vercel + Neon PostgreSQL (cloud, serverless)
 //   - Docker Full edition (self-hosted Postgres)
 //   - Docker Lite edition (self-hosted Postgres — small container)
 //   - Local development (Postgres via Docker or local install)
@@ -14,16 +14,15 @@
 //   - test migrations against the same database engine we run in prod
 //
 // Connection architecture (serverless-aware):
-//   - `url` (DATABASE_URL)           — Supavisor pooled connection string
-//                                       (port 6543 on Supabase). Used by
-//                                       the Prisma Client at runtime.
-//   - `directUrl` (DIRECT_URL)       — direct (non-pooled) connection string
-//                                       (port 5432 on Supabase). Used by
-//                                       `prisma migrate deploy` and
-//                                       `prisma migrate status`. Required
-//                                       because Supavisor's transaction-mode
-//                                       pooling is incompatible with the
-//                                       DDL statements Prisma Migrate emits.
+//   - `url` (DATABASE_URL)           — Neon pooled connection string
+//                                       (pooler hostname, with &pgbouncer=true).
+//                                       Used by the Prisma Client at runtime.
+//   - `directUrl` (DIRECT_URL)       — Neon direct (non-pooled) connection
+//                                       string. Used by `prisma migrate deploy`
+//                                       and `prisma migrate status`. Required
+//                                       because Neon's transaction-mode pooling
+//                                       is incompatible with the DDL statements
+//                                       Prisma Migrate emits.
 //
 // Both env vars are REQUIRED in production. In local dev (where you point
 // DATABASE_URL at a local Postgres), you can set DIRECT_URL to the same

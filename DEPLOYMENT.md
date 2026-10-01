@@ -341,15 +341,15 @@ docker compose logs postgres
 
 ---
 
-## Vercel Deployment (Supabase PostgreSQL)
+## Vercel Deployment (Neon PostgreSQL)
 
 Sukhan also runs on Vercel (serverless) — see `VERCEL_DEPLOYMENT.md` for the complete setup guide.
 
-**Official cloud database: Supabase PostgreSQL** (via Supavisor connection pooling). Other Postgres providers are NOT supported by the Vercel deployment path.
+**Official cloud database: Neon PostgreSQL** (pooled + direct connections). Other Postgres providers are NOT supported by the Vercel deployment path.
 
 Architecture summary:
 - Next.js → Vercel serverless functions
-- PostgreSQL → Supabase (Supavisor-pooled DATABASE_URL + direct DIRECT_URL)
+- PostgreSQL → Neon (pooled DATABASE_URL + direct DIRECT_URL)
 - Migrations → prisma migrate deploy at Vercel build time (NOT db push)
 - Realtime → separately-hosted Socket.IO service + Upstash Redis pub/sub
 - Attachments → Vercel Blob

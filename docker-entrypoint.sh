@@ -39,7 +39,7 @@ case "$MODE" in
       if [ -z "$DIRECT_URL" ]; then
         echo "[entrypoint] WARNING: DIRECT_URL is not set — prisma migrate"
         echo "[entrypoint] deploy may fail if DATABASE_URL points at a pooled"
-        echo "[entrypoint] connection (Supavisor / PgBouncer)."
+        echo "[entrypoint] connection (PgBouncer / Neon pooler)."
       fi
       echo "[entrypoint] Applying Prisma migrations (migrate deploy)..."
       prisma migrate deploy --skip-generate || {
