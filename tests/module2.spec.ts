@@ -17,8 +17,8 @@ import { test, expect, type Page } from '@playwright/test'
 
 // IMPORTANT: use port 81 (Caddy gateway) for the widget (Socket.IO needs Caddy).
 // The dashboard signup uses Playwright's APIRequestContext for reliable cookie handling.
-const BASE = 'http://localhost:81'
-const DASHBOARD = 'http://localhost:3000'
+const BASE = 'http://127.0.0.1:81'
+const DASHBOARD = 'http://127.0.0.1:3000'
 
 function creds(label: string) {
   const stamp = `${process.pid}-${Date.now()}-${label}`

@@ -4,7 +4,7 @@ import { test, expect, type Page } from '@playwright/test'
  * Module 5 Part 1 — Public widget API security tests.
  */
 
-const DASHBOARD = 'http://localhost:3000'
+const DASHBOARD = 'http://127.0.0.1:3000'
 
 async function signupAndGetSlug(page: Page, email: string, workspace: string): Promise<string> {
   await page.goto(DASHBOARD)

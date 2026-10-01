@@ -272,6 +272,7 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
     loadSocketIO(function(){
       if (state.socket) return;
       state.socket = window.io(SOCKET_URL, {
+        path: SOCKET_PATH,
         path: '/',
         auth: { token: state.token },
         transports: ['websocket', 'polling'],

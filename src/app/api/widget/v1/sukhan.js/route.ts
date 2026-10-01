@@ -297,6 +297,7 @@ function buildScript(socketUrlOverride: string | null): string {
     loadSocketIO(function(){
       if (state.socket) return;
       state.socket = window.io(SOCKET_URL, {
+        path: SOCKET_PATH,
         path: '/',
         auth: { token: state.token },
         transports: ['websocket', 'polling'],
@@ -554,6 +555,7 @@ function buildScript(socketUrlOverride: string | null): string {
  *     fallback when `data-api-key` is missing. Useful for testing.
  */
 export async function GET(_req: Request): Promise<Response> {
+  const socketUrlOverride = process.env.NEXT_PUBLIC_REALTIME_URL || null
   // Resolve the public Socket.IO URL the widget will connect to.
   //   - docker/dev (no env set) → null → script uses API_URL + Caddy pattern.
   //   - vercel (env set to public realtime host) → that absolute URL.
