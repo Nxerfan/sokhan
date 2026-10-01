@@ -16,6 +16,9 @@ let socketInstance: Socket | null = null
  * across reconnects. Tests can set the env var before loading the page.
  */
 function resolveSocketUrl(): string {
+  // Vercel mode: VERCEL=1 is set by the Vercel runtime.
+  // In Vercel mode, we use /api/realtime/socket.io as the path (no URL needed).
+  if (process.env.NEXT_PUBLIC_VERCEL === '1' || process.env.VERCEL === '1') return '/api/realtime'
   const explicit = process.env.NEXT_PUBLIC_REALTIME_URL
   if (explicit) return explicit
   // Default: rely on Caddy's XTransformPort forwarding.

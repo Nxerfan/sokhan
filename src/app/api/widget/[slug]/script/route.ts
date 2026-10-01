@@ -599,7 +599,7 @@ export async function GET(
   //   - vercel (env set to public realtime host) → that absolute URL.
   // The value is baked into the script as a JSON-encoded string literal so
   // it cannot be tampered with client-side.
-  const socketUrl = process.env.NEXT_PUBLIC_REALTIME_URL || '/?XTransformPort=3003'
+  const socketUrl = (process.env.VERCEL === '1') ? '/api/realtime' : (process.env.NEXT_PUBLIC_REALTIME_URL || '/?XTransformPort=3003')
   const script = buildScript(origin, slug, disablePolling, socketUrl)
 
   return new Response(script, {

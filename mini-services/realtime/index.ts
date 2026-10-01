@@ -87,9 +87,10 @@ if (!process.env.NEXTAUTH_SECRET) {
   }
 }
 const SECRET = process.env.NEXTAUTH_SECRET
+const APP_INTERNAL_URL = process.env.APP_INTERNAL_URL || 'http://localhost:3000'
 const REDIS_URL = process.env.REDIS_URL
 
-console.log('[secret] using NEXTAUTH_SECRET:', SECRET.slice(0, 8) + '...')
+// NEXTAUTH_SECRET is used for token verification — never log it.
 if (REDIS_URL) {
   console.log('[redis] REDIS_URL set — will enable adapter + pub/sub subscription')
 } else {
@@ -169,9 +170,31 @@ io.on('connection', (socket: AuthenticatedSocket) => {
     socket.join(`agent:${payload.userId}`)
   }
 
-  socket.on('conversation:join', (conversationId: string) => {
-    socket.join(`conversation:${conversationId}`)
-    console.log(`[join] ${payload.type} → conversation:${conversationId}`)
+  socket.on('conversation:join', async (conversationId: string) => {
+    // Verify conversation ownership via the Next.js app's verify-conversation endpoint.
+    // Agents: must match tenant. Visitors: must match tenant AND contactId.
+    // In Docker Compose, the Next.js service is 'app' (not localhost).
+    try {
+      const params = new URLSearchParams({
+        conversationId,
+        tenantId: payload.tenantId,
+        type: payload.type,
+        contactId: payload.type === 'visitor' ? payload.contactId : '',
+        userId: payload.type === 'agent' ? payload.userId : '',
+      })
+      const verifyUrl = `${APP_INTERNAL_URL}/api/realtime/verify-conversation?${params}`
+      const res = await fetch(verifyUrl, {
+        headers: { 'X-Internal-Secret': SECRET },
+      })
+      if (res.ok) {
+        socket.join(`conversation:${conversationId}`)
+        console.log(`[join] ${payload.type} → conversation:${conversationId}`)
+      } else {
+        console.log(`[join] REJECTED ${payload.type} → conversation:${conversationId} (${res.status})`)
+      }
+    } catch (e) {
+      console.error('[join] verify error:', e instanceof Error ? e.message : e)
+    }
   })
 
   socket.on('conversation:leave', (conversationId: string) => {

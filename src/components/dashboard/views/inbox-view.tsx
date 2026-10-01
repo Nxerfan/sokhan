@@ -89,7 +89,7 @@ export function InboxView() {
         const tokenRes = await fetch('/api/realtime-token')
         if (!tokenRes.ok) return
         const { token } = await tokenRes.json()
-        const _socketUrl = process.env.NEXT_PUBLIC_REALTIME_URL || '/?XTransformPort=3003'
+        const _socketUrl = (process.env.NEXT_PUBLIC_VERCEL === '1' || process.env.VERCEL === '1') ? '/api/realtime' : (process.env.NEXT_PUBLIC_REALTIME_URL || '/?XTransformPort=3003')
         const s = io(_socketUrl, {
           path: _socketUrl.includes('/api/realtime') ? '/api/realtime/socket.io' : '/',
           auth: { token },
