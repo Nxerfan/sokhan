@@ -9,7 +9,7 @@ import { test, expect, type Page } from '@playwright/test'
  * gets its own browser context with its own session cookie.
  */
 
-const BASE = 'http://localhost:3000'
+const BASE = 'http://127.0.0.1:3000'
 
 test.describe('Cross-tenant isolation', () => {
   test('Tenant B cannot see Tenant A\'s conversations, messages, or contacts', async ({ browser }) => {

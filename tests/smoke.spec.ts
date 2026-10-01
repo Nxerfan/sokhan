@@ -22,7 +22,7 @@ import { test, expect, type Page } from '@playwright/test'
  */
 
 // Use port 3000 (direct) for the dashboard. Socket.IO tests use port 81 (Caddy).
-const BASE = 'http://localhost:3000'
+const BASE = 'http://127.0.0.1:3000'
 
 /** Unique credentials per test invocation. */
 function creds(testTitle: string) {

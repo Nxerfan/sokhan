@@ -16,8 +16,8 @@ import { test, expect, type Page, type BrowserContext } from '@playwright/test'
  * handling). The widget uses a browser page on port 81 (Caddy) for Socket.IO.
  */
 
-const DASHBOARD = 'http://localhost:3000'
-const WIDGET = 'http://localhost:81'
+const DASHBOARD = 'http://127.0.0.1:3000'
+const WIDGET = 'http://127.0.0.1:81'
 
 async function signupAndSignin(ctx: BrowserContext, email: string, workspace: string): Promise<{ page: Page; slug: string }> {
   // Use the browser context's own cookie jar via a page
