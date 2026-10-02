@@ -219,13 +219,14 @@ test('slug widget Docker-mode SOCKET_URL uses API_URL prefix (cross-origin suppo
   expect(txt).toContain(`bakedSocketUrlExpr = 'API_URL + "/?XTransformPort=3003"'`)
 })
 
-test('vercel-install.sh falls back to DATABASE_URL_UNPOOLED for DIRECT_URL', () => {
+test('vercel-install.sh DIRECT_URL: falls back to DATABASE_URL_UNPOOLED, fails closed otherwise', () => {
   const txt = readFileSync(join(root, 'vercel-install.sh'), 'utf8')
-  // DIRECT_URL must fall back to DATABASE_URL_UNPOOLED (Neon direct, non-pooled)
-  // — NOT DATABASE_URL (pooled), which is incompatible with migration DDL.
+  // Must fall back to DATABASE_URL_UNPOOLED (Neon direct, non-pooled)
   expect(txt).toContain('export DIRECT_URL="$DATABASE_URL_UNPOOLED"')
-  // The fallback must be guarded.
-  expect(txt).toContain('[ -z "${DIRECT_URL:-}" ] && [ -n "${DATABASE_URL_UNPOOLED:-}" ]')
+  // Must NOT fall back to pooled DATABASE_URL
+  expect(txt).not.toContain('export DIRECT_URL="$DATABASE_URL"')
+  // Must fail closed if neither DIRECT_URL nor DATABASE_URL_UNPOOLED is set
+  expect(txt).toContain('exit 1')
 })
 
 
