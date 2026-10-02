@@ -1129,3 +1129,26 @@ Stage Summary:
 - The slug widget now works on external websites: all REST endpoints (config, contact, messages, csat) and the Socket.IO connection use the Sukhan origin (extracted from the script's own src attribute), NOT the customer's page origin.
 - The external-origin widget regression test is self-contained (embeds its own HTTP server) and verifies all widget traffic points to the Sukhan origin.
 - Vercel deployment status: STILL FAILING (deployment GjdSFK9tgjF2wAQf1qnRt6HDjC5R). Build logs NOT accessible (no Vercel API token in the sandbox). No speculative Vercel code changes made.
+
+---
+Task ID: final-verification
+Agent: main
+Task: addTrailingSlash: false fix + Vercel WebSocket verification
+
+Work Log:
+- Added addTrailingSlash: false to all Vercel Socket.IO clients and server
+- Fixed Vercel transports to use isVercel flag (not URL check)
+- Added regression tests for addTrailingSlash: false and websocket-only transports
+- Deployed to Vercel Preview
+- Verified WebSocket connection: CONNECTED with valid token, TRANSPORT websocket
+- Verified invalid auth rejection: CONNECT_ERROR invalid_token
+- my-project Vercel project deleted (again)
+- Redis NOT configured (no Upstash integration on Vercel project)
+- DIRECT_URL only set for Production (Preview still missing)
+
+Stage Summary:
+- WebSocket connection: PASS (transport: websocket, no 308 redirect)
+- Auth: PASS (valid connects, invalid rejected)
+- Redis: NOT CONFIGURED (message delivery E2E blocked)
+- DIRECT_URL Preview: NOT CONFIGURED
+- my-project: deleted (need to verify on new commit)
