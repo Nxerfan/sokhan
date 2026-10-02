@@ -39,9 +39,11 @@ test('inbox-view.tsx uses /api/realtime/socket.io path', () => {
   expect(txt).toContain('/api/realtime/socket.io')
 })
 
-test('api/realtime.ts does NOT set a custom path (uses default /socket.io)', () => {
+test('api/realtime.ts sets path to /api/realtime (Vercel does not strip prefix)', () => {
   const txt = readFileSync(join(root, 'api/realtime.ts'), 'utf8')
-  expect(txt).not.toMatch(/path:\s*['"]\/api\/realtime['"]/)
+  // Vercel does NOT strip the /api/realtime prefix — the function receives
+  // the full URL. The Socket.IO path must match the rewritten URL (dest).
+  expect(txt).toMatch(/path:\s*['"]\/api\/realtime['"]/)
 })
 
 test('api/realtime.ts does NOT fall back to dev secret', () => {

@@ -3,25 +3,13 @@
   "installCommand": "bash vercel-install.sh",
   "framework": "nextjs",
   "fluid": true,
-  "github": {
-    "silent": true
-  },
-  "regions": [
-    "iad1"
-  ],
+  "github": { "silent": true },
+  "regions": ["iad1"],
   "routes": [
-    {
-      "src": "/api/realtime$",
-      "dest": "/api/realtime"
-    },
-    {
-      "src": "/api/realtime/socket.io(.*)",
-      "dest": "/api/realtime/socket.io$1"
-    }
+    { "src": "^/api/realtime$", "dest": "/api/realtime" },
+    { "src": "^/api/realtime/socket\\.io(.*)$", "dest": "/api/realtime" }
   ],
   "functions": {
-    "api/realtime.ts": {
-      "maxDuration": 300
-    }
+    "api/realtime.ts": { "maxDuration": 300 }
   }
 }
