@@ -15,12 +15,12 @@ let socketInstance: Socket | null = null
  *   - Vercel mode (VERCEL=1):
  *       URL:  '' (empty — io() connects to the page origin = Sukhan
  *                 deployment URL, using the default namespace)
- *       Path: '/api/realtime/socket.io'
- *       (Vercel's edge strips the /api/realtime prefix and routes the
- *       remaining /socket.io/... request to the WebSocket Function.)
+ *       Path: '/api/realtime'
+ *       (Vercel routes /api/realtime* to the root-level api/realtime.ts
+ *       function, which runs a Socket.IO server with path: '/api/realtime'.)
  *
  *   - Explicit URL (NEXT_PUBLIC_REALTIME_URL set):
- *       Used as-is. Path is '/api/realtime/socket.io' if the URL contains
+ *       Used as-is. Path is '/api/realtime' if the URL contains
  *       '/api/realtime' (serverless WebSocket pattern), otherwise '/'.
  *
  *   - Docker / dev (default, behind Caddy):
@@ -39,16 +39,20 @@ interface SocketConfig {
 
 function resolveSocketConfig(): SocketConfig {
   // Vercel mode — VERCEL=1 is set by the Vercel runtime.
-  // Use the DEFAULT namespace (no URL) with path /api/realtime/socket.io.
-  if (process.env.NEXT_PUBLIC_VERCEL === '1' || process.env.VERCEL === '1') {
-    return { url: '', path: '/api/realtime/socket.io', transports: ['websocket'] }
+  // Use the DEFAULT namespace (no URL) with path /api/realtime.
+  // Vercel routes /api/realtime* to the root-level api/realtime.ts function.
+  // The server's Socket.IO path is /api/realtime (not /api/realtime/socket.io).
+  // Transports: websocket-only on Vercel (no polling fallback).
+  const isVercel = process.env.NEXT_PUBLIC_VERCEL === '1' || process.env.VERCEL === '1'
+  if (isVercel) {
+    return { url: '', path: '/api/realtime', transports: ['websocket'] }
   }
   const explicit = process.env.NEXT_PUBLIC_REALTIME_URL
   if (explicit) {
     const isApiRealtime = explicit.includes('/api/realtime')
     return {
       url: explicit,
-      path: isApiRealtime ? '/api/realtime/socket.io' : '/',
+      path: isApiRealtime ? '/api/realtime' : '/',
       transports: isApiRealtime ? ['websocket'] : ['websocket', 'polling'],
     }
   }

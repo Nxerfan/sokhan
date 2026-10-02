@@ -91,19 +91,19 @@ function buildScript(socketUrlOverride: string | null, isVercel: boolean): strin
   //     "__API_URL__", replaced at runtime with the Sukhan origin. We must
   //     NOT bake "/api/realtime" — passing it to io() as the URL creates a
   //     NAMESPACE, not a path, and silently breaks on Vercel. Connecting
-  //     to the Sukhan origin with path /api/realtime/socket.io lets
+  //     to the Sukhan origin with path /api/realtime lets
   //     Vercel's edge route the WebSocket request to the Function.
   //   - explicit (NEXT_PUBLIC_REALTIME_URL set) → that absolute URL.
   var SOCKET_URL = ${bakedSocketUrlExpr};
   if (SOCKET_URL === ${JSON.stringify(vercelPlaceholder)}) {
     SOCKET_URL = API_URL;
   }
-  var SOCKET_PATH = SOCKET_URL.indexOf("/api/realtime") >= 0 ? "/api/realtime/socket.io" : "/";
+  var SOCKET_PATH = SOCKET_URL.indexOf("/api/realtime") >= 0 ? "/api/realtime" : "/";
   // On Vercel, SOCKET_URL is API_URL (just an origin — no /api/realtime
   // substring), so SOCKET_PATH defaults to "/". Force it to the Vercel
   // WebSocket Function path.
   if (${forceVercelPath ? 'true' : 'false'} && SOCKET_PATH === '/') {
-    SOCKET_PATH = "/api/realtime/socket.io";
+    SOCKET_PATH = "/api/realtime";
   }
 
   var state = {
@@ -341,7 +341,7 @@ function buildScript(socketUrlOverride: string | null, isVercel: boolean): strin
       state.socket = window.io(SOCKET_URL, {
         path: SOCKET_PATH,
         auth: { token: state.token },
-        transports: SOCKET_URL.indexOf("/api/realtime") >= 0 ? ["websocket"] : ["websocket", "polling"],
+        transports: SOCKET_PATH.indexOf("/api/realtime") >= 0 ? ["websocket"] : ["websocket", "polling"],
         reconnection: true,
       });
       state.socket.on('connect', function(){

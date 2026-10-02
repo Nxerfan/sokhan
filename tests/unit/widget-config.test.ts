@@ -19,24 +19,27 @@ test('widget v1/sukhan.js defines SOCKET_PATH (not undefined)', () => {
   expect(txt).not.toMatch(/path: SOCKET_PATH,\s*path:/)
 })
 
-test('widget SOCKET_PATH uses /api/realtime/socket.io for Vercel', () => {
+test('widget SOCKET_PATH uses /api/realtime for Vercel', () => {
   for (const f of [
     'src/app/api/widget/[slug]/script/route.ts',
     'src/app/api/widget/v1/sukhan.js/route.ts',
   ]) {
     const txt = readFileSync(join(root, f), 'utf8')
-    expect(txt).toContain('/api/realtime/socket.io')
+    expect(txt).toContain('/api/realtime')
+    expect(txt).not.toContain("/api/realtime/socket.io")
   }
 })
 
-test('realtime-client.ts uses /api/realtime/socket.io path', () => {
+test('realtime-client.ts uses /api/realtime path', () => {
   const txt = readFileSync(join(root, 'src/lib/realtime-client.ts'), 'utf8')
-  expect(txt).toContain('/api/realtime/socket.io')
+  expect(txt).toContain("path: '/api/realtime'")
+  expect(txt).not.toContain("path: '/api/realtime/socket.io'")
 })
 
-test('inbox-view.tsx uses /api/realtime/socket.io path', () => {
+test('inbox-view.tsx uses /api/realtime path', () => {
   const txt = readFileSync(join(root, 'src/components/dashboard/views/inbox-view.tsx'), 'utf8')
-  expect(txt).toContain('/api/realtime/socket.io')
+  expect(txt).toContain("path: isVercel || isApiRealtime ? '/api/realtime' : '/'")
+  expect(txt).not.toContain("/api/realtime/socket.io")
 })
 
 test('api/realtime.ts sets path to /api/realtime (Vercel does not strip prefix)', () => {
@@ -167,21 +170,21 @@ test('widget v1/sukhan.js: NO io("/api/realtime"...) namespace bug on Vercel', (
   expect(txt).not.toMatch(/VERCEL\s*===\s*['"]1['"]\s*\)\s*\?\s*['"]\/api\/realtime['"]/)
 })
 
-test('realtime-client.ts: Vercel uses empty URL + /api/realtime/socket.io path (no namespace bug)', () => {
+test('realtime-client.ts: Vercel uses empty URL + /api/realtime path (no namespace bug)', () => {
   const txt = readFileSync(join(root, 'src/lib/realtime-client.ts'), 'utf8')
   // Vercel mode must return an empty URL (default namespace).
   expect(txt).toMatch(/return\s*\{\s*url:\s*['"]['"]/)
-  // Vercel path must be /api/realtime/socket.io.
-  expect(txt).toMatch(/path:\s*['"]\/api\/realtime\/socket\.io['"]/)
+  // Vercel path must be /api/realtime.
+  expect(txt).toMatch(/path:\s*['"]\/api\/realtime['"]/)
   // Must NOT return "/api/realtime" as the URL on Vercel.
   expect(txt).not.toMatch(/VERCEL\s*===\s*['"]1['"]\s*.*return\s*['"]\/api\/realtime['"]/)
 })
 
-test('inbox-view.tsx: Vercel uses empty URL + /api/realtime/socket.io path (no namespace bug)', () => {
+test('inbox-view.tsx: Vercel uses empty URL + /api/realtime path (no namespace bug)', () => {
   const txt = readFileSync(join(root, 'src/components/dashboard/views/inbox-view.tsx'), 'utf8')
   // Vercel mode must use empty socketUrl (default namespace).
   expect(txt).toMatch(/isVercel\s*\?\s*['"]['"]/)
-  expect(txt).toMatch(/isVercel\s*\|\|\s*isApiRealtime\s*\?\s*['"]\/api\/realtime\/socket\.io['"]/)
+  expect(txt).toMatch(/isVercel\s*\|\|\s*isApiRealtime\s*\?\s*['"]\/api\/realtime['"]/)
   // Must NOT pass "/api/realtime" as URL on Vercel.
   expect(txt).not.toMatch(/isVercel\s*\?\s*['"]\/api\/realtime['"]/)
 })
