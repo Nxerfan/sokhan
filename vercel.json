@@ -6,8 +6,8 @@
   "github": { "silent": true },
   "regions": ["iad1"],
   "routes": [
-    { "src": "^/api/realtime$", "dest": "/api/realtime" },
-    { "src": "^/api/realtime/socket\\.io(.*)$", "dest": "/api/realtime" }
+    { "src": "^/api/realtime$", "dest": "/api/realtime", "important": true },
+    { "src": "^/api/realtime/(.*)$", "dest": "/api/realtime", "important": true }
   ],
   "functions": {
     "api/realtime.ts": { "maxDuration": 300 }
