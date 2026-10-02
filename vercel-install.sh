@@ -15,13 +15,16 @@
 #
 # The script:
 #   1. Installs dependencies (`bun install`).
-#   2. Sets DIRECT_URL fallback (falls back to DATABASE_URL if not set —
-#      needed by prisma migrate deploy which validates env("DIRECT_URL")).
+#   2. Sets DIRECT_URL from DATABASE_URL_UNPOOLED if not explicitly set.
+#      DIRECT_URL is the direct (non-pooled) Neon connection required by
+#      prisma migrate deploy (DDL is incompatible with Neon's transaction-
+#      mode pooling). DATABASE_URL_UNPOOLED is auto-synced by the Neon
+#      Vercel integration for both Preview and Production.
 #   3. Runs `prisma generate` so the Prisma Client is available at runtime.
 #   4. Runs `prisma migrate deploy` to apply pending migrations. This is
 #      the production-safe migration command — it applies migration files
-#      from prisma/migrations/ and never destructively reconciles the
-#      schema at runtime.
+#      from prisma/migrations/ and never destructively reconciles the schema
+#      at runtime.
 #
 # Vercel's default Next.js build (`next build`) runs AFTER this script.
 # `NEXT_PUBLIC_VERCEL=1` is set as a Vercel env var (not here) so the
@@ -32,11 +35,17 @@ echo "▶ Vercel install — installing dependencies"
 bun install
 
 # DIRECT_URL is required by prisma migrate deploy (the schema references
-# env("DIRECT_URL")). If the Vercel project has DATABASE_URL set but not
-# DIRECT_URL, fall back to DATABASE_URL.
-if [ -z "${DIRECT_URL:-}" ] && [ -n "${DATABASE_URL:-}" ]; then
+# env("DIRECT_URL")). If not explicitly set, fall back to DATABASE_URL_UNPOOLED
+# (the direct/non-pooled Neon connection, auto-synced by the Neon Vercel
+# integration for both Preview and Production). This is the CORRECT fallback
+# — NOT DATABASE_URL, which is the pooled connection incompatible with
+# migration DDL.
+if [ -z "${DIRECT_URL:-}" ] && [ -n "${DATABASE_URL_UNPOOLED:-}" ]; then
+  export DIRECT_URL="$DATABASE_URL_UNPOOLED"
+  echo "▶ DIRECT_URL not set — using DATABASE_URL_UNPOOLED (Neon direct connection)"
+elif [ -z "${DIRECT_URL:-}" ] && [ -n "${DATABASE_URL:-}" ]; then
   export DIRECT_URL="$DATABASE_URL"
-  echo "▶ DIRECT_URL not set — falling back to DATABASE_URL"
+  echo "▶ WARNING: DIRECT_URL falling back to DATABASE_URL (pooled) — set DATABASE_URL_UNPOOLED or DIRECT_URL"
 fi
 
 echo "▶ Vercel install — generating Prisma client (PostgreSQL / Neon)"

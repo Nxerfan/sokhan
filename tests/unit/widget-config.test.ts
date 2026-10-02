@@ -219,15 +219,13 @@ test('slug widget Docker-mode SOCKET_URL uses API_URL prefix (cross-origin suppo
   expect(txt).toContain(`bakedSocketUrlExpr = 'API_URL + "/?XTransformPort=3003"'`)
 })
 
-test('vercel-build.sh falls back to DATABASE_URL when DIRECT_URL is not set', () => {
-  const txt = readFileSync(join(root, 'vercel-build.sh'), 'utf8')
-  // The Vercel build must set DIRECT_URL from DATABASE_URL if not already set,
-  // because prisma migrate deploy validates env("DIRECT_URL") in the schema.
-  // Without this fallback, the build fails with P1012 when DIRECT_URL is missing.
-  expect(txt).toContain('export DIRECT_URL="$DATABASE_URL"')
-  // The fallback must be guarded (only set if DIRECT_URL is empty AND
-  // DATABASE_URL is non-empty).
-  expect(txt).toContain('[ -z "${DIRECT_URL:-}" ] && [ -n "${DATABASE_URL:-}" ]')
+test('vercel-install.sh falls back to DATABASE_URL_UNPOOLED for DIRECT_URL', () => {
+  const txt = readFileSync(join(root, 'vercel-install.sh'), 'utf8')
+  // DIRECT_URL must fall back to DATABASE_URL_UNPOOLED (Neon direct, non-pooled)
+  // — NOT DATABASE_URL (pooled), which is incompatible with migration DDL.
+  expect(txt).toContain('export DIRECT_URL="$DATABASE_URL_UNPOOLED"')
+  // The fallback must be guarded.
+  expect(txt).toContain('[ -z "${DIRECT_URL:-}" ] && [ -n "${DATABASE_URL_UNPOOLED:-}" ]')
 })
 
 
