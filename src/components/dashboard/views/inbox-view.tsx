@@ -100,6 +100,7 @@ export function InboxView() {
         const isApiRealtime = socketUrl.includes('/api/realtime')
         const s = io(socketUrl, {
           path: isVercel || isApiRealtime ? '/api/realtime' : '/',
+          addTrailingSlash: false,
           auth: { token },
           transports: isVercel || isApiRealtime ? ['websocket'] : ['websocket', 'polling'],
           reconnection: true,

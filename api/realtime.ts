@@ -44,6 +44,7 @@ const io = new Server(server, {
   // Vercel does NOT strip the /api/realtime prefix — the function receives
   // the full URL. Set the Socket.IO path to match the client's path.
   path: '/api/realtime',
+  addTrailingSlash: false,
   cors: { origin: '*', methods: ['GET', 'POST'] },
   pingTimeout: 60000,
   pingInterval: 25000,

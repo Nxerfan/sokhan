@@ -79,6 +79,7 @@ export async function connectRealtime(): Promise<Socket> {
   // page origin (Sukhan deployment) using the default namespace.
   socketInstance = io(SOCKET_URL, {
     path: SOCKET_PATH,
+    addTrailingSlash: false,
     auth: { token },
     transports: SOCKET_TRANSPORTS,
     reconnection: true,

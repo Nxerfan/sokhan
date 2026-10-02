@@ -335,8 +335,9 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
       if (state.socket) return;
       state.socket = window.io(SOCKET_URL, {
         path: SOCKET_PATH,
+        addTrailingSlash: false,
         auth: { token: state.token },
-        transports: SOCKET_PATH.indexOf("/api/realtime") >= 0 ? ["websocket"] : ["websocket", "polling"],
+        transports: (${isVercel ? "true" : "false"} || SOCKET_PATH.indexOf("/api/realtime") >= 0) ? ["websocket"] : ["websocket", "polling"],
         reconnection: true,
       });
       state.socket.on('connect', function(){

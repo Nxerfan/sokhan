@@ -230,3 +230,33 @@ test('vercel-build.sh falls back to DATABASE_URL when DIRECT_URL is not set', ()
   expect(txt).toContain('[ -z "${DIRECT_URL:-}" ] && [ -n "${DATABASE_URL:-}" ]')
 })
 
+
+
+test('all Vercel clients use addTrailingSlash: false', () => {
+  for (const f of [
+    'src/lib/realtime-client.ts',
+    'src/components/dashboard/views/inbox-view.tsx',
+    'src/app/api/widget/[slug]/script/route.ts',
+    'src/app/api/widget/v1/sukhan.js/route.ts',
+  ]) {
+    const txt = readFileSync(join(root, f), 'utf8')
+    expect(txt).toContain('addTrailingSlash: false')
+  }
+})
+
+test('api/realtime.ts server uses addTrailingSlash: false', () => {
+  const txt = readFileSync(join(root, 'api/realtime.ts'), 'utf8')
+  expect(txt).toContain('addTrailingSlash: false')
+})
+
+test('Vercel mode uses websocket-only transports (not inferred from URL)', () => {
+  // realtime-client.ts: isVercel flag determines websocket-only transports
+  const clientTxt = readFileSync(join(root, 'src/lib/realtime-client.ts'), 'utf8')
+  expect(clientTxt).toContain('const isVercel')
+  expect(clientTxt).toContain("transports: ['websocket']")
+  
+  // inbox-view.tsx: isVercel flag determines transports
+  const inboxTxt = readFileSync(join(root, 'src/components/dashboard/views/inbox-view.tsx'), 'utf8')
+  expect(inboxTxt).toContain('isVercel')
+  expect(inboxTxt).toContain("transports: isVercel || isApiRealtime ? ['websocket'] : ['websocket', 'polling']")
+})
