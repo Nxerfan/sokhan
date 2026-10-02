@@ -602,25 +602,25 @@ test('next.config.ts does NOT force output: standalone in Vercel mode', async ()
   expect(txt).toMatch(/VERCEL/)
 })
 
-test('vercel-build.sh script exists and is executable', () => {
+test('vercel-install.sh script exists and is executable', () => {
   const { statSync } = require('node:fs')
-  const f = join(process.cwd(), 'vercel-build.sh')
+  const f = join(process.cwd(), 'vercel-install.sh')
   const st = statSync(f)
   // File mode 0755 (or stricter executable bit).
   // tslint:disable-next-line:no-bitwise
   expect(st.mode & 0o100).toBe(0o100) // user-execute bit
 })
 
-test('vercel.json buildCommand points at vercel-build.sh', () => {
+test('vercel.json installCommand points at vercel-install.sh', () => {
   const f = join(process.cwd(), 'vercel.json')
   const txt = require('node:fs').readFileSync(f, 'utf8') as string
   const cfg = JSON.parse(txt)
-  expect(cfg.buildCommand).toMatch(/vercel-build\.sh/)
+  expect(cfg.installCommand).toMatch(/vercel-install\.sh/)
 })
 
-test('vercel-build.sh uses prisma migrate deploy (no destructive schema sync)', () => {
+test('vercel-install.sh uses prisma migrate deploy (no destructive schema sync)', () => {
   const fs = require('node:fs')
-  const txt = fs.readFileSync(join(process.cwd(), 'vercel-build.sh'), 'utf8')
+  const txt = fs.readFileSync(join(process.cwd(), 'vercel-install.sh'), 'utf8')
   expect(txt).toMatch(/prisma\s+migrate\s+deploy/)
   // The script must NOT invoke the destructive prisma db push command.
   // (Comments may mention it for documentation, but the executable lines
