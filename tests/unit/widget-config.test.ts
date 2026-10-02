@@ -184,3 +184,32 @@ test('inbox-view.tsx: Vercel uses empty URL + /api/realtime/socket.io path (no n
   expect(txt).not.toMatch(/isVercel\s*\?\s*['"]\/api\/realtime['"]/)
 })
 
+
+test('slug widget REST URLs are prefixed with API_URL (cross-origin support)', () => {
+  const txt = readFileSync(join(root, 'src/app/api/widget/[slug]/script/route.ts'), 'utf8')
+  // All REST endpoints must be prefixed with API_URL so the widget works
+  // when embedded on a customer's website (different origin from the
+  // Sukhan app). When API_URL is empty (script src couldn't be resolved),
+  // the URLs become relative — which works behind Caddy reverse proxy.
+  expect(txt).toMatch(/var CONFIG_URL = API_URL \+ ["']\/api\/widget\/["']/)
+  expect(txt).toMatch(/var CONTACT_URL = API_URL \+ ["']\/api\/widget\/["']/)
+  expect(txt).toMatch(/var MESSAGES_URL = API_URL \+ ["']\/api\/widget\/["']/)
+  expect(txt).toMatch(/var CSAT_URL = API_URL \+ ["']\/api\/widget\/["']/)
+  // The CSAT fetch must use the CSAT_URL variable (not a hardcoded path).
+  expect(txt).toMatch(/fetch\(CSAT_URL,/)
+  // Must NOT have hardcoded relative REST URLs.
+  expect(txt).not.toMatch(/var CONFIG_URL = ["']\/api\/widget\/["']/)
+  expect(txt).not.toMatch(/var CONTACT_URL = ["']\/api\/widget\/["']/)
+  expect(txt).not.toMatch(/var MESSAGES_URL = ["']\/api\/widget\/["']/)
+})
+
+test('slug widget Docker-mode SOCKET_URL uses API_URL prefix (cross-origin support)', () => {
+  const txt = readFileSync(join(root, 'src/app/api/widget/[slug]/script/route.ts'), 'utf8')
+  // In Docker/dev mode (no Vercel, no explicit URL), the SOCKET_URL must
+  // be baked as the runtime JavaScript expression `API_URL + "/?XTransformPort=3003"`
+  // (NOT a JSON string). This makes the socket URL absolute (prefixed
+  // with API_URL) so the widget works on a customer's website.
+  // Match the literal: bakedSocketUrlExpr = 'API_URL + "/?XTransformPort=3003"'
+  // Use a template literal to avoid quote-escaping headaches.
+  expect(txt).toContain(`bakedSocketUrlExpr = 'API_URL + "/?XTransformPort=3003"'`)
+})

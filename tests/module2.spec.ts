@@ -188,8 +188,11 @@ test.describe('Module 2 — Realtime messaging', () => {
     await conversationItem.click()
     await dashboardPage.waitForTimeout(500)
 
-    // The message should appear in the thread
-    await expect(dashboardPage.getByText('سلام، کمک می‌خوام')).toBeVisible({ timeout: 5000 })
+    // The message should appear in the thread. Use .first() because the
+    // same text ALSO appears in the conversation-list preview (lastMessagePreview)
+    // after the message arrives — without .first() Playwright's strict mode
+    // rejects the ambiguous match.
+    await expect(dashboardPage.getByText('سلام، کمک می‌خوام').first()).toBeVisible({ timeout: 5000 })
 
     // === ASSERTION 3: typing indicator (agent → visitor) ===
     // Type in the dashboard reply box — the widget should show a typing indicator

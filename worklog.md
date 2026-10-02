@@ -1086,3 +1086,46 @@ Stage Summary:
 - verify-conversation: fail-closed (invalid type → 400, visitor without contactId → 400).
 - Realtime E2E: all 7 Playwright tests pass (module2 + socket-race + socketio-verify + realtime-authz).
 - Realtime service logs confirm: `[join] REJECTED agent → ... (403)` for cross-tenant, `[join] REJECTED visitor → ... (403)` for cross-contact.
+
+---
+Task ID: 15-authz-external-widget
+Agent: main (Senior Full-Stack Engineer — authz test correction + external-origin widget)
+Task: Correct the invalid realtime-authz test (it relied on socket.to() echo which excludes the sender), fix the slug widget REST URLs to use API_URL prefix for cross-origin embedding, add an external-origin widget regression test, and inspect Vercel build logs (if accessible).
+
+Work Log:
+- Inspected the current HEAD (commit 3079d57) and confirmed all three issues.
+- Issue 1 (authz test invalid): The test emitted `typing:start` from the MALICIOUS socket and expected it to echo back. But `socket.to(room).emit(...)` explicitly EXCLUDES the sender (per Socket.IO rooms docs), so the echo NEVER arrives regardless of whether the join was accepted. The test was passing for the WRONG reason.
+- Rewrote tests/realtime-authz.spec.ts with a corrected approach:
+  - CONTROL case: a SECOND authorized socket (same tenant) joins the target conversation. The first authorized socket emits `typing:start`. The second socket SHOULD receive the event — proves the room subscription + event broadcast works.
+  - ATTACK case: the malicious socket (cross-tenant or cross-contact) attempts to join the target conversation. The authorized socket emits `typing:start`. The malicious socket should NOT receive the event — proves its join was rejected.
+  - Both attack cases (cross-tenant + cross-contact) use this pattern.
+  - The test now has THREE sockets per case: authorized emitter, malicious listener, and control receiver. This gives a genuine positive control (the control receiver DOES get the event) and a genuine negative test (the malicious listener does NOT).
+- Issue 2 (slug widget REST URLs break on external websites): The slug widget correctly derived API_URL for Socket.IO but still used RELATIVE URLs for config/contact/messages/csat REST endpoints. On a customer's website, these would resolve to the customer's origin (wrong server).
+  - Fixed src/app/api/widget/[slug]/script/route.ts:
+    - CONFIG_URL, CONTACT_URL, MESSAGES_URL now use `API_URL + "/api/widget/..."` prefix.
+    - Added CSAT_URL variable (was previously a hardcoded relative fetch).
+    - SOCKET_URL in Docker mode now uses the runtime JavaScript expression `API_URL + "/?XTransformPort=3003"` (absolute URL) instead of the relative JSON string `"/?XTransformPort=3003"` — consistent with the v1 widget, and works for cross-origin embedding.
+- Added tests/widget-external-origin.spec.ts (NEW): regression test that embeds the slug widget on a simulated customer website (real HTTP server on port 8082, different origin from the Sukhan app on port 81). Verifies ALL widget traffic — REST (config, contact) + realtime (socket.io.min.js + WebSocket handshake) — points to the Sukhan origin, NOT the customer's origin. The test embeds the customer HTTP server in beforeAll/afterAll (self-contained, no external dependencies).
+- Fixed a pre-existing strict-mode violation in tests/module2.spec.ts: the test's `getByText('سلام، کمک می‌خوام')` matched BOTH the conversation-list preview AND the thread message. Added `.first()` to disambiguate. (The test was fragile — my changes to the slug widget's socket URL timing exposed the pre-existing issue.)
+- Added 2 new unit tests to tests/unit/widget-config.test.ts:
+  - "slug widget REST URLs are prefixed with API_URL (cross-origin support)"
+  - "slug widget Docker-mode SOCKET_URL uses API_URL prefix (cross-origin support)"
+- Issue 3 (Vercel deployment failure): The Vercel deployment for commit 3079d57 failed (status: "failure" via GitHub statuses API). The deployment URL is https://vercel.com/nxerfan/sokhan/GjdSFK9tgjF2wAQf1qnRt6HDjC5R. Attempted to access the build logs via the Vercel API (https://api.vercel.com/v13/deployments/dpl_GjdSFK9tgjF2wAQf1qnRt6HD) — returns 403 "The request is missing an authentication token". No Vercel access token is available in the sandbox. Per the user's instructions ("If you do not have access, make no speculative Vercel code changes and report that the logs are unavailable"), I made NO speculative Vercel code changes.
+
+Verification:
+- bun test tests/unit/: 68/68 PASS (added 2 new tests for slug widget API_URL prefixing).
+- bun run lint: 0 errors, 1 pre-existing warning.
+- bun run typecheck: 0 errors in app code (2 pre-existing errors in skills/ sample code, unrelated).
+- bunx next build (VERCEL=1): PASS.
+- bunx playwright test tests/realtime-authz.spec.ts: PASS 2/2 — both corrected authz tests pass. Realtime log confirms: `[join] REJECTED agent → ... (403)` and `[join] REJECTED visitor → ... (403)`. The control receiver DOES receive the typing event (proves room subscription works), and the malicious listener does NOT (proves join was rejected).
+- bunx playwright test tests/widget-external-origin.spec.ts: PASS — all widget REST + realtime traffic points to the Sukhan origin (http://127.0.0.1:81), NOT the customer origin (http://127.0.0.1:8082). Captured requests: config fetch, contact fetch, socket.io.min.js script load, and WebSocket handshake — ALL on the Sukhan origin.
+- bunx playwright test tests/socketio-verify.spec.ts: PASS — 472ms delivery (proves Socket.IO, polling is 10s).
+- bunx playwright test tests/socket-race.spec.ts: PASS — agent reply received in 360ms via Socket.IO.
+- bunx playwright test tests/module2.spec.ts: PASS 3/3 (after strict-mode fix).
+- All 8 E2E tests pass.
+
+Stage Summary:
+- The realtime-authz test is now VALID: it uses a second authorized socket as the event receiver, so the control case genuinely proves room subscription works, and the attack case genuinely proves the malicious socket's join was rejected.
+- The slug widget now works on external websites: all REST endpoints (config, contact, messages, csat) and the Socket.IO connection use the Sukhan origin (extracted from the script's own src attribute), NOT the customer's page origin.
+- The external-origin widget regression test is self-contained (embeds its own HTTP server) and verifies all widget traffic points to the Sukhan origin.
+- Vercel deployment status: STILL FAILING (deployment GjdSFK9tgjF2wAQf1qnRt6HDjC5R). Build logs NOT accessible (no Vercel API token in the sandbox). No speculative Vercel code changes made.

@@ -18,11 +18,31 @@ import { db } from '@/lib/db'
  */
 
 function buildScript(_origin: string, slug: string, disablePolling: boolean, socketUrl: string, isVercel: boolean): string {
-  // When isVercel is true, the script resolves SOCKET_URL at runtime from
-  // the script's own src (the Sukhan origin). The placeholder "__API_URL__"
-  // is baked-in server-side and the script replaces it at runtime.
+  // The baked SOCKET_URL value can be one of THREE things:
+  //   1. The literal placeholder string "__API_URL__" (Vercel, no explicit
+  //      override) — the script replaces this with API_URL at runtime.
+  //   2. A JSON-stringified absolute URL (when NEXT_PUBLIC_REALTIME_URL is
+  //      set — explicit override).
+  //   3. The raw JavaScript expression `API_URL + "/?XTransformPort=3003"`
+  //      (Docker/dev default) — NOT a JSON string, this is live JS code
+  //      that builds an absolute URL against the Sukhan origin at runtime
+  //      (so the widget works when embedded on a customer's website with
+  //      a different origin from the page itself).
   const vercelPlaceholder = '__API_URL__'
-  const bakedSocketUrl = isVercel ? vercelPlaceholder : socketUrl
+  // Determine the literal text that goes between `var SOCKET_URL = ` and `;`.
+  let bakedSocketUrlExpr: string
+  if (isVercel) {
+    bakedSocketUrlExpr = JSON.stringify(vercelPlaceholder)
+  } else if (socketUrl && socketUrl !== '/?XTransformPort=3003') {
+    // Explicit override (NEXT_PUBLIC_REALTIME_URL set) — bake as JSON string.
+    bakedSocketUrlExpr = JSON.stringify(socketUrl)
+  } else {
+    // Docker/dev default — bake the raw JavaScript expression (NOT a JSON
+    // string) so it's evaluated at runtime. This makes the socket URL
+    // absolute (prefixed with API_URL) — consistent with the v1 widget,
+    // and works for cross-origin widget embedding.
+    bakedSocketUrlExpr = 'API_URL + "/?XTransformPort=3003"'
+  }
   return `(function(){
   "use strict";
   var SLUG = ${JSON.stringify(slug)};
@@ -44,17 +64,22 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
     // Strip everything from "/api/widget/" onward — leaves the origin.
     API_URL = thisScript.src.split('/api/widget/')[0];
   }
-  // Use RELATIVE URLs for REST so the browser resolves them against the
-  // page origin — works behind Caddy reverse proxy. (For true cross-origin
-  // widget embedding, REST URLs would need to be prefixed with API_URL —
-  // not changed here to keep the change focused on Socket.IO.)
-  var CONFIG_URL = "/api/widget/" + SLUG + "/config";
-  var CONTACT_URL = "/api/widget/" + SLUG + "/contact";
-  var MESSAGES_URL = "/api/widget/" + SLUG + "/messages";
+  // REST URLs are prefixed with API_URL so the widget works when embedded
+  // on a customer's website (different origin from the Sukhan app). When
+  // API_URL is empty (script src couldn't be resolved), the URLs become
+  // relative — which works behind Caddy reverse proxy where the page
+  // origin IS the Sukhan origin.
+  var CONFIG_URL = API_URL + "/api/widget/" + SLUG + "/config";
+  var CONTACT_URL = API_URL + "/api/widget/" + SLUG + "/contact";
+  var MESSAGES_URL = API_URL + "/api/widget/" + SLUG + "/messages";
+  var CSAT_URL = API_URL + "/api/widget/" + SLUG + "/csat";
   var SOCKET_IO_JS = API_URL ? API_URL + "/socket.io.min.js" : "/socket.io.min.js";
-  // SOCKET_URL is resolved server-side and baked in as a literal string.
-  //   - docker/dev (no env, VERCEL!=1) → "/?XTransformPort=3003" (Caddy
-  //     reverse-proxies to the realtime service on port 3003).
+  // SOCKET_URL is resolved server-side and baked in.
+  //   - docker/dev (no env, VERCEL!=1) -> the runtime expression
+  //     'API_URL + "/?XTransformPort=3003"' (the gateway reverse-proxies to
+  //     the realtime service on port 3003). Using the absolute Sukhan
+  //     origin (not a relative URL) means the widget works on a customer
+  //     website with a different page origin.
   //   - vercel (VERCEL=1, no NEXT_PUBLIC_REALTIME_URL) → the placeholder
   //     "__API_URL__", replaced at runtime with the Sukhan origin. We
   //     must NOT bake "/api/realtime" — passing it to io() as the URL
@@ -62,7 +87,7 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
   //     Connecting to the Sukhan origin with path /api/realtime/socket.io
   //     lets Vercel's edge route the WebSocket request to the Function.
   //   - explicit (NEXT_PUBLIC_REALTIME_URL set) → that absolute URL.
-  var SOCKET_URL = ${JSON.stringify(bakedSocketUrl)};
+  var SOCKET_URL = ${bakedSocketUrlExpr};
   if (SOCKET_URL === ${JSON.stringify(vercelPlaceholder)}) {
     SOCKET_URL = API_URL;
   }
@@ -557,7 +582,7 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
     }
 
     function submitCsat(rating, comment) {
-      fetch('/api/widget/' + SLUG + '/csat', {
+      fetch(CSAT_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + state.token },
         body: JSON.stringify({ conversationId: state.conversationId, rating: rating, comment: comment })
