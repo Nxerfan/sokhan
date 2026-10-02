@@ -25,6 +25,18 @@
 # Both env vars are REQUIRED for the Vercel build to succeed.
 set -euo pipefail
 
+# DIRECT_URL is required by prisma migrate deploy (the schema references
+# env("DIRECT_URL") on line 44). If the Vercel project has DATABASE_URL
+# set but not DIRECT_URL, fall back to DATABASE_URL. This works for:
+#   - Supabase (single connection string — pooled and direct are the same)
+#   - Neon with DATABASE_URL set to the DIRECT (non-pooled) connection
+# For Neon with DATABASE_URL set to the POOLED connection, set DIRECT_URL
+# separately to the direct (non-pooled) connection for migration DDL.
+if [ -z "${DIRECT_URL:-}" ] && [ -n "${DATABASE_URL:-}" ]; then
+  export DIRECT_URL="$DATABASE_URL"
+  echo "▶ DIRECT_URL not set — falling back to DATABASE_URL"
+fi
+
 echo "▶ Vercel build — generating Prisma client (PostgreSQL / Neon)"
 bunx prisma generate
 
