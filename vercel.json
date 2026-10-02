@@ -16,7 +16,7 @@
     },
     {
       "src": "/api/realtime/socket.io(.*)",
-      "dest": "/api/realtime"
+      "dest": "/api/realtime/socket.io$1"
     }
   ],
   "functions": {
