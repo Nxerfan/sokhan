@@ -127,11 +127,16 @@ function buildScript(socketUrlOverride: string | null, isVercel: boolean): strin
     try {
       var v = localStorage.getItem(STORAGE_KEY);
       if (v) return v;
-      v = 'vis_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10);
+      // Cryptographically strong visitor ID — prefer crypto.randomUUID().
+      v = (window.crypto && crypto.randomUUID)
+        ? 'vis_' + crypto.randomUUID()
+        : 'vis_' + Date.now() + '_' + (window.crypto && crypto.getRandomValues
+            ? Array.from(crypto.getRandomValues(new Uint8Array(16)), function(b){ return b.toString(16).padStart(2, '0'); }).join('')
+            : Math.random().toString(36).slice(2, 14));
       localStorage.setItem(STORAGE_KEY, v);
       return v;
     } catch(e) {
-      return 'vis_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10);
+      return 'vis_' + Date.now() + '_' + Math.random().toString(36).slice(2, 14);
     }
   }
 
@@ -213,7 +218,9 @@ function buildScript(socketUrlOverride: string | null, isVercel: boolean): strin
     var logo = el('div', 'sk-logo');
     css(logo, { width:'28px', height:'28px', borderRadius:'50%', background:'rgba(255,255,255,.25)', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:'0' });
     logo.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
-    var titleText = el('div', '', config.name || (state.locale==='fa'?'گفت‌وگو':'Chat'));
+    var titleText = el('div', '');
+    // SECURITY: config.name is tenant-controlled — use textContent, NEVER innerHTML.
+    titleText.textContent = config.name || (state.locale==='fa'?'گفت‌وگو':'Chat');
     css(titleText, { fontSize:'14px', fontWeight:'600', flex:'1' });
     var closeBtn = el('button', '', '×');
     css(closeBtn, { background:'none', border:'none', color:'#fff', fontSize:'20px', cursor:'pointer', padding:'0', lineHeight:'1' });
@@ -335,6 +342,27 @@ function buildScript(socketUrlOverride: string | null, isVercel: boolean): strin
     document.head.appendChild(s);
   }
 
+  function refreshVisitorToken(callback){
+    var visitorId = getVisitorId();
+    fetch(CONTACT_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ visitorId: visitorId }),
+    })
+    .then(function(r){ return r.json(); })
+    .then(function(data){
+      if (data.realtimeToken) {
+        state.token = data.realtimeToken;
+        if (data.conversationId && !state.conversationId) state.conversationId = data.conversationId;
+      }
+      if (callback) callback(data);
+    })
+    .catch(function(e){
+      console.error('[sukhan] token refresh failed', e);
+      if (callback) callback(null);
+    });
+  }
+
   function connectSocket(){
     loadSocketIO(function(){
       if (state.socket) return;
@@ -352,6 +380,15 @@ function buildScript(socketUrlOverride: string | null, isVercel: boolean): strin
         }
       });
       state.socket.on('disconnect', function(){ state.connected = false; });
+      state.socket.on('connect_error', function(err){
+        if (err && (err.message === 'invalid_token' || err.message === 'no_token')) {
+          refreshVisitorToken(function(data){
+            if (data && data.realtimeToken && state.socket) {
+              state.socket.auth = { token: data.realtimeToken };
+            }
+          });
+        }
+      });
       state.socket.on('message:new', function(msg){
         state.messages.push(msg);
         renderMessages();
@@ -446,7 +483,9 @@ function buildScript(socketUrlOverride: string | null, isVercel: boolean): strin
         css(bubble, { alignSelf:align, background:bg, color:color, borderRadius:radius, padding:'8px 12px', fontSize:'13px', maxWidth:'75%', boxShadow:'0 1px 2px rgba(0,0,0,.06)', wordBreak:'break-word' });
         bubble.setAttribute('dir', 'auto');
         if (msg.content.text) {
-          var p = el('p', '', esc(msg.content.text));
+          var p = el('p', '');
+          // SECURITY: msg.content.text is user-controlled — use textContent.
+          p.textContent = msg.content.text;
           css(p, { margin:'0' });
           bubble.appendChild(p);
         }
@@ -459,14 +498,17 @@ function buildScript(socketUrlOverride: string | null, isVercel: boolean): strin
               css(img, { maxWidth:'100%', borderRadius:'8px', marginTop:'4px', display:'block' });
               bubble.appendChild(img);
             } else {
-              var a = el('a', '', esc(att.name));
+              var a = el('a', '');
+              // SECURITY: att.name is user-controlled — use textContent.
+              a.textContent = att.name;
               a.href = att.url; a.setAttribute('download', att.name);
               css(a, { display:'block', marginTop:'4px', fontSize:'11px', color: isVisitor ? '#FAF7F2' : '#1F8F8F' });
               bubble.appendChild(a);
             }
           }
         }
-        var ts = el('span', '', fmt(msg.createdAt));
+        var ts = el('span', '');
+        ts.textContent = fmt(msg.createdAt);
         css(ts, { display:'block', fontSize:'10px', marginTop:'2px', opacity:'.6' });
         bubble.appendChild(ts);
       }

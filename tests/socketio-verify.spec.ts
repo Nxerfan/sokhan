@@ -36,11 +36,22 @@ async function signupAndGetSlug(ctx: import('@playwright/test').BrowserContext, 
 
   // Use page.evaluate to make fetch calls FROM the page context (shares cookies)
   const slug = await page.evaluate(async ({ email, workspace }) => {
-    // Signup
-    await fetch('/api/auth/signup', {
+    // 3-step OTP signup (start → verify → complete)
+    const startRes = await fetch('/api/auth/signup/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password: 'password123', name: 'Agent Test', workspaceName: workspace })
+      body: JSON.stringify({ email })
+    })
+    const { requestId } = await startRes.json()
+    await fetch('/api/auth/signup/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, code: '123456', requestId })
+    })
+    await fetch('/api/auth/signup/complete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, requestId, password: 'password123', workspaceName: workspace })
     })
     // Get CSRF
     const csrfRes = await fetch('/api/auth/csrf')

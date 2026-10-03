@@ -1,5 +1,6 @@
 import { test, expect, type BrowserContext } from '@playwright/test'
 import { createServer, type Server } from 'node:http'
+import { otpSignupPlaywright } from './helpers/otp-signup'
 
 /**
  * External-origin slug widget regression test.
@@ -77,9 +78,9 @@ async function signupAndGetSlug(ctx: BrowserContext, email: string, workspace: s
   await page.waitForLoadState('networkidle')
   await page.waitForTimeout(1000)
 
-  await page.request.post(`${SIGNUP_API}/api/auth/signup`, {
-    data: { email, password: 'password123', name: 'Agent', workspaceName: workspace },
-  })
+  // 3-step OTP signup (start → verify → complete) — the legacy
+  // /api/auth/signup endpoint is now deprecated (returns 410 Gone).
+  await otpSignupPlaywright(page.request, SIGNUP_API, email, workspace)
   const csrfRes = await page.request.get(`${SIGNUP_API}/api/auth/csrf`)
   const { csrfToken } = await csrfRes.json()
   await page.request.post(`${SIGNUP_API}/api/auth/callback/credentials`, {

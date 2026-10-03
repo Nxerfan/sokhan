@@ -11,7 +11,11 @@ async function signupAndGetSlug(page: Page, email: string, workspace: string): P
   await page.waitForLoadState('networkidle')
   await page.waitForTimeout(2000)
   const slug = await page.evaluate(async ({ email, workspace }) => {
-    await fetch('/api/auth/signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password: 'password123', name: 'Agent', workspaceName: workspace }) })
+    // 3-step OTP signup (start → verify → complete)
+    const startRes = await fetch('/api/auth/signup/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email }) })
+    const { requestId } = await startRes.json()
+    await fetch('/api/auth/signup/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, code: '123456', requestId }) })
+    await fetch('/api/auth/signup/complete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, requestId, password: 'password123', workspaceName: workspace }) })
     const { csrfToken } = await (await fetch('/api/auth/csrf')).json()
     await fetch('/api/auth/callback/credentials', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `email=${email}&password=password123&csrfToken=${csrfToken}&json=true` })
     const { tenant } = await (await fetch('/api/tenants/me')).json()
@@ -85,20 +89,22 @@ test.describe('Module 6 — Plan restructure + domains', () => {
     const slug1 = await signupAndGetSlug(page, email, `Trial1 ${stamp}`)
     expect(slug1).toBeTruthy()
 
-    // Try second signup with same email — should be blocked
-    // (The signup endpoint should check hasUsedFreeTrial)
+    // Try second signup with same email — should be blocked.
+    // MIGRATION: the legacy /api/auth/signup endpoint returned 409 with
+    // error: 'email_taken'. That endpoint is now DEPRECATED (returns 410
+    // Gone). The equivalent check now lives at step 1 of the OTP flow:
+    // /api/auth/signup/start rejects an already-registered email with 409
+    // email_already_registered. The test's intent (an existing email cannot
+    // be used for a new signup) is preserved.
     const secondRes = await page.evaluate(async ({ email }) => {
-      const res = await fetch('/api/auth/signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password: 'password123', name: 'Second', workspaceName: 'Second WS' }) })
+      const res = await fetch('/api/auth/signup/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email }) })
       return { status: res.status, body: await res.json() }
     }, { email })
 
-    // The signup should be rejected (409 conflict or 400)
-    // Note: currently the signup creates a new user only if email doesn't exist.
-    // Since the email already exists, it returns 409 email_taken.
-    // The hasUsedFreeTrial flag prevents re-creating a FREE workspace specifically.
-    // For this test, we verify the email_taken error (existing user can't sign up again)
+    // The signup should be rejected (409 conflict) — the start endpoint
+    // checks for existing users at step 1.
     expect(secondRes.status).toBe(409)
-    expect(secondRes.body.error).toBe('email_taken')
+    expect(secondRes.body.error).toBe('email_already_registered')
 
     await ctx.close()
   })

@@ -83,24 +83,38 @@ export async function connectRealtime(): Promise<Socket> {
     auth: { token },
     transports: SOCKET_TRANSPORTS,
     reconnection: true,
-    reconnectionAttempts: 10,
+    reconnectionAttempts: Infinity, // keep trying — we refresh expired tokens
     reconnectionDelay: 1000,
     timeout: 10000,
   })
 
   // CRITICAL: after a reconnect, the server has lost all room subscriptions.
   // We re-emit `conversation:join` for the conversation currently open so we
-  // keep receiving its messages. (The server side is idempotent — re-joining
-  // a room you're already in is a no-op; re-joining after a disconnect is
-  // required because the disconnect cleared the room state.)
+  // keep receiving its messages.
   const createdSocket = socketInstance
   createdSocket.on('connect', () => {
-    // If the singleton has been swapped out for a new socket, ignore this
-    // event — it belongs to a stale connection that should not write state.
     if (socketInstance !== createdSocket) return
     const openConv = (createdSocket as Socket & { __lastJoinedConv?: string }).__lastJoinedConv
     if (openConv) {
       createdSocket.emit('conversation:join', openConv)
+    }
+  })
+
+  // When a reconnect fails due to an expired token, fetch a fresh
+  // /api/realtime-token and update the socket auth. Socket.IO will
+  // automatically retry with the new token.
+  createdSocket.on('connect_error', async (err: Error) => {
+    if (socketInstance !== createdSocket) return
+    if (err.message === 'invalid_token' || err.message === 'no_token' || err.message === 'membership_inactive') {
+      try {
+        const refreshRes = await fetch('/api/realtime-token')
+        if (refreshRes.ok) {
+          const { token: freshToken } = await refreshRes.json()
+          createdSocket.auth = { token: freshToken }
+        }
+      } catch (e) {
+        console.error('[realtime] token refresh failed:', e)
+      }
     }
   })
 

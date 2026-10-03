@@ -101,19 +101,33 @@ function storageKey(slug: string): string {
   return 'sukhan_visitor_' + slug
 }
 
-/** Get-or-create a persistent visitor ID (localStorage). */
+/** Get-or-create a persistent visitor ID (localStorage). Uses crypto.randomUUID(). */
 function getVisitorId(slug: string, override?: string): string {
   if (override) return override
   try {
     const key = storageKey(slug)
     const v = localStorage.getItem(key)
     if (v) return v
-    const fresh = 'vis_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10)
+    // Cryptographically strong visitor ID — prefer crypto.randomUUID().
+    const fresh = generateVisitorId()
     localStorage.setItem(key, fresh)
     return fresh
   } catch {
-    return 'vis_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10)
+    return generateVisitorId()
   }
+}
+
+/** Generate a cryptographically strong visitor ID. */
+function generateVisitorId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return 'vis_' + crypto.randomUUID()
+  }
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    const bytes = crypto.getRandomValues(new Uint8Array(16))
+    const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+    return 'vis_' + Date.now() + '_' + hex
+  }
+  return 'vis_' + Date.now() + '_' + Math.random().toString(36).slice(2, 14)
 }
 
 // ---------- Widget class ----------
@@ -319,7 +333,9 @@ export class SukhanWidget implements SukhanInstance {
     })
     logo.innerHTML =
       '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>'
-    const titleText = el('div', '', config.name || (this.state.locale === 'fa' ? 'گفت‌وگو' : 'Chat'))
+    const titleText = el('div', '')
+    // SECURITY: config.name is tenant-controlled — use textContent, NEVER innerHTML.
+    titleText.textContent = config.name || (this.state.locale === 'fa' ? 'گفت‌وگو' : 'Chat')
     css(titleText, { fontSize: '14px', fontWeight: '600', flex: '1' })
     const closeBtn = el('button', '', '×')
     css(closeBtn, {
@@ -542,6 +558,25 @@ export class SukhanWidget implements SukhanInstance {
         this.socket?.send('conversation:join', this.state.conversationId)
       }
     }
+    // On token expiry, re-identify using the SAME visitorId (no new Contact)
+    // and return the fresh realtime token.
+    this.socket.onTokenExpired = async () => {
+      try {
+        const visitorId = getVisitorId(this.api.slug, this.visitorOverride?.visitorId)
+        const data = await this.api.identifyVisitor({
+          visitorId,
+          email: this.visitorOverride?.email,
+          name: this.visitorOverride?.name,
+        })
+        this.state.token = data.realtimeToken
+        if (data.conversationId && !this.state.conversationId) {
+          this.state.conversationId = data.conversationId
+        }
+        return data.realtimeToken
+      } catch {
+        return null
+      }
+    }
     this.socket.on('message:new', (msg) => {
       this.state.messages.push(msg as Message)
       this.renderMessages()
@@ -674,7 +709,9 @@ export class SukhanWidget implements SukhanInstance {
         })
         bubble.setAttribute('dir', 'auto')
         if (msg.content.text) {
-          const p = el('p', '', esc(msg.content.text))
+          const p = el('p', '')
+          // SECURITY: msg.content.text is user-controlled — use textContent.
+          p.textContent = msg.content.text
           css(p, { margin: '0' })
           bubble.appendChild(p)
         }
@@ -687,7 +724,9 @@ export class SukhanWidget implements SukhanInstance {
               css(img, { maxWidth: '100%', borderRadius: '8px', marginTop: '4px', display: 'block' })
               bubble.appendChild(img)
             } else {
-              const a = el('a', '', esc(att.name)) as HTMLAnchorElement
+              const a = el('a', '') as HTMLAnchorElement
+              // SECURITY: att.name is user-controlled — use textContent.
+              a.textContent = att.name
               a.href = att.url
               a.setAttribute('download', att.name)
               css(a, {
@@ -700,7 +739,8 @@ export class SukhanWidget implements SukhanInstance {
             }
           }
         }
-        const ts = el('span', '', fmt(msg.createdAt))
+        const ts = el('span', '')
+        ts.textContent = fmt(msg.createdAt)
         css(ts, { display: 'block', fontSize: '10px', marginTop: '2px', opacity: '.6' })
         bubble.appendChild(ts)
       }

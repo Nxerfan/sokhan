@@ -1152,3 +1152,81 @@ Stage Summary:
 - Redis: NOT CONFIGURED (message delivery E2E blocked)
 - DIRECT_URL Preview: NOT CONFIGURED
 - my-project: deleted (need to verify on new commit)
+
+---
+Task ID: 12a
+Agent: test-migration-subagent
+Task: Migrate all test files from legacy /api/auth/signup to 3-step OTP flow
+
+Work Log:
+
+**Files migrated (13 total):**
+
+1. `tests/socket-race.spec.ts` — Pattern A (`page.request.post`). Replaced `page.request.post(${DASHBOARD}/api/auth/signup, ...)` with `otpSignupPlaywright(page.request, DASHBOARD, email, workspace)`. Adapted the assertion: `expect(signupRes.ok()).toBe(true)` → `expect(signupRes.ok).toBe(true)` (the helper returns `{ ok: boolean }`, not a Response object).
+
+2. `tests/module3.spec.ts` — Pattern A. Helper `signupAndSignin` migrated to `otpSignupPlaywright`. No assertion to adapt.
+
+3. `tests/smoke.spec.ts` — Pattern A. Helper `signupAndLandOnDashboard` migrated to `otpSignupPlaywright`. No assertion to adapt.
+
+4. `tests/module2.spec.ts` — Pattern A. Helper `signupAndGetSlug` migrated to `otpSignupPlaywright`. No assertion to adapt.
+
+5. `tests/tenant-isolation.spec.ts` — Pattern B (`page.evaluate` + `fetch`). Two `page.evaluate` blocks (Tenant A + Tenant B). Inlined the 3-step OTP fetch sequence (start → verify → complete) before the CSRF + signin calls. No assertion on the signup response.
+
+6. `tests/module5-security.spec.ts` — Pattern B. Helper `signupAndGetSlug` + 2 inline `page.evaluate` blocks inside Test 4 (Tenant A slugA, Tenant B slugB). All three migrated to the inlined 3-step OTP fetch sequence.
+
+7. `tests/realtime-authz.spec.ts` — Pattern A. Helper `signupAndSignin` migrated to `otpSignupPlaywright`. No assertion on signup result.
+
+8. `tests/module4.spec.ts` — Pattern A. Helper `signupAndSignin` + Test 4's own signup call (the "free tier, no upgrade" test). Both replaced with `otpSignupPlaywright`.
+
+9. `tests/socketio-verify.spec.ts` — Pattern B. Helper `signupAndGetSlug` — inlined the 3-step OTP fetch sequence inside the `page.evaluate`.
+
+10. `tests/vercel-deployment.spec.ts` — Pattern B. Helper `signupAndSignIn` — inlined the 3-step OTP fetch sequence inside the `page.evaluate`. The "legacy signup + signin flow still works end-to-end" test continues to call this helper — its assertion (session is established) is preserved.
+
+11. `tests/widget-external-origin.spec.ts` — Pattern A. Helper `signupAndGetSlug` — replaced with `otpSignupPlaywright`. No assertion to adapt.
+
+12. `tests/module6.spec.ts` — Pattern B (+ special case). Helper migrated to inline 3-step OTP. **Test 3 (free plan email restriction)** originally hit the legacy endpoint and asserted `409 email_taken`. With the legacy endpoint now `410 Gone`, the equivalent check lives at `/api/auth/signup/start` (which calls `db.user.findUnique({ where: { email } })` and returns `409 email_already_registered`). Migrated the second-signup attempt to call `/api/auth/signup/start` and updated the assertion to `expect(secondRes.body.error).toBe('email_already_registered')`. The test's intent (an existing email cannot start a new signup) is preserved. Added a comment explaining the migration.
+
+13. `tests/module7.spec.ts` — Pattern B (partial). Helper `signupAndGetSlug` migrated to inline 3-step OTP. Tests 1, 2, 3, 8 already used the OTP flow directly — left untouched. Tests 4, 5, 6 each had a `page.evaluate` block calling legacy `/api/auth/signup` to "create a user first" before testing login flows — all three migrated to inline 3-step OTP. Test 6 originally used password `'oldpassword'` for the initial user; the reset-password flow doesn't verify the old password, so the initial password value is irrelevant — switched to `'password123'` for consistency with the rest of the suite and documented this in a comment. No assertion was weakened.
+
+**Issues encountered:**
+- `module6.spec.ts` Test 3 needed an assertion update: the legacy endpoint's `email_taken` error code is now `email_already_registered` (returned by `/api/auth/signup/start`). This is not a weakening — the test still verifies an existing email cannot start a new signup. Migration comment added.
+- `module7.spec.ts` Test 6 password value changed from `'oldpassword'` to `'password123'`. The reset-password flow is OTP-based and doesn't verify the old password, so this is irrelevant. Comment added.
+- `vercel-deployment.spec.ts` Test 18 ("legacy signup + signin flow still works") — the test name still says "legacy signup" but the helper now uses OTP signup. The test's intent (existing auth flows still work end-to-end) is preserved; no assertion was weakened.
+- Pattern C (`otpSignupFetch` helper) was NOT used by any test file — every Node.js-context fetch in the tests is actually inside `page.evaluate` (browser-context fetch), so all such sites fell under Pattern B with the inlined 3-step sequence.
+
+Stage Summary:
+- All 13 test files migrated. Zero remaining live calls to the legacy `/api/auth/signup` endpoint in any test file (verified via `rg "api/auth/signup['\"\s,)]" tests/` — all matches are in comments only).
+- `bun run lint`: PASS (0 errors, 1 pre-existing warning in `inbox-view.tsx` — unrelated to this task).
+- `bunx tsc --noEmit`: PASS for all test files (only pre-existing errors in `skills/image-edit` and `skills/stock-analysis-skill` sample code, unrelated).
+- `bun test tests/unit/`: 77/77 PASS (no unit tests touched by this migration).
+- Test intent preserved across all migrations. Where the API contract changed (email_taken → email_already_registered), assertions were updated to match the new contract — these are NOT weakenings; the same security property (existing emails cannot start a new signup) is verified.
+- Work record written to `/home/z/my-project/agent-ctx/12a-test-migration-subagent.md` per the agent-ctx convention.
+- Did NOT modify any non-test files. Did NOT modify `tests/helpers/otp-signup.ts` (used as provided).
+
+---
+Task ID: critical-identity-security
+Agent: main (Senior Security Engineer)
+Task: Fix 10 confirmed critical authentication, authorization, visitor-identity, realtime-token, and secret-logging vulnerabilities.
+
+Work Log:
+- Created fix/critical-identity-security branch from origin/main (24e6a87).
+- Fix #1 (Signup bypass): Rewrote /api/auth/signup/route.ts to return 410 Gone (no user/tenant creation). Migrated auth-form.tsx to 3-step OTP flow. Migrated all 13 test files via tests/helpers/otp-signup.ts.
+- Fix #2 (Visitor takeover): Rewrote /api/widget/[slug]/contact/route.ts to require visitorId as sole identity (never email). All 3 widget implementations use crypto.randomUUID().
+- Fix #3 (Token/slug binding): /messages and /csat routes reject tokens where token.slug !== route slug.
+- Fix #4 (Members escalation): POST/PATCH /api/members enforce full role hierarchy. Members UI shows only assignable roles. Fixed 'current user always shows owner badge' bug.
+- Fix #5 (Stale JWT role): withSessionTenant() checks membership.status === 'active' and replaces JWT role with fresh DB role.
+- Fix #6 (Token expiry): Shared pure module src/lib/realtime-token-shared.ts adds signed iat/exp (10-min TTL). All 3 verifiers use it.
+- Fix #7 (Agent membership revalidation): Vercel uses Prisma, Docker uses new /api/realtime/verify-membership endpoint. Both reject inactive memberships.
+- Fix #8 (Token refresh/reconnect): Dashboard realtime-client.ts + all 3 widgets refresh token on connect_error.
+- Fix #9 (Secret logging): docker-entrypoint.sh no longer prints $REDIS_URL value. Internal endpoints use crypto.timingSafeEqual.
+- Fix #10 (Widget XSS): All 3 widgets use textContent for config.name, message text, attachment names. innerHTML only for static SVG.
+- Added 54 new unit tests (34 realtime-token + 20 security-regressions). Total: 131/131 pass.
+- Production build succeeds. TypeScript clean. Lint clean (1 pre-existing warning).
+
+Stage Summary:
+- All 10 vulnerabilities fixed.
+- 131/131 unit tests pass.
+- Build succeeds. Typecheck clean. Lint clean.
+- Branch: fix/critical-identity-security (commit b5f92c3, rebased on origin/main 24e6a87).
+- Push to GitHub FAILED: no GitHub token available in sandbox (credential helper expects /home/z/.gh/tok or $GH_TOKEN — both empty).
+- User must push manually: git push origin fix/critical-identity-security

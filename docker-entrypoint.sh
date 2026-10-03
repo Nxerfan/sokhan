@@ -75,7 +75,7 @@ case "$MODE" in
     echo "[entrypoint]   Socket.IO on port 3003 (path: '/')"
     echo "[entrypoint]   Internal HTTP on port 3004 (/internal/publish, /health)"
     if [ -n "$REDIS_URL" ]; then
-      echo "[entrypoint]   Redis adapter: ENABLED ($REDIS_URL)"
+      echo "[entrypoint]   Redis adapter: ENABLED"
     else
       echo "[entrypoint]   Redis adapter: disabled (in-memory, single-instance only)"
     fi

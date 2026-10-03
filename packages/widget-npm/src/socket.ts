@@ -69,6 +69,8 @@ export class SukhanSocket {
   private token: string
   /** Called when the socket connects — used to join conversation rooms. */
   onConnect?: () => void
+  /** Called when the token needs to be refreshed (expired on reconnect). */
+  onTokenExpired?: () => Promise<string | null>
 
   constructor(token: string) {
     this.token = token
@@ -123,6 +125,21 @@ export class SukhanSocket {
       this.socket.on('disconnect', () => {
         this.connected = false
         this.emit('disconnect', null)
+      })
+      // When a reconnect fails due to an expired token, call the refresh
+      // callback to get a fresh token (re-identifying with the SAME
+      // visitorId — no new Contact). Then update the socket auth.
+      this.socket.on('connect_error', async (err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (msg === 'invalid_token' || msg === 'no_token') {
+          if (this.onTokenExpired) {
+            const fresh = await this.onTokenExpired()
+            if (fresh && this.socket) {
+              this.token = fresh
+              ;(this.socket as SocketIOClient & { auth?: unknown }).auth = { token: fresh }
+            }
+          }
+        }
       })
       this.socket.on('message:new', (payload: unknown) => this.emit('message:new', payload))
       this.socket.on('conversation:updated', (payload: unknown) => this.emit('conversation:updated', payload))

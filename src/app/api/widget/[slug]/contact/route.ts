@@ -20,6 +20,20 @@ export async function OPTIONS() {
   return new NextResponse(null, { status: 204, headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type, Authorization' } })
 }
 
+/**
+ * Visitor identification endpoint.
+ *
+ * Security model:
+ *   - `visitorId` is the widget visitor identity (generated client-side
+ *     via crypto.randomUUID() and persisted in localStorage).
+ *   - `email` and `name` are profile metadata ONLY — they never act as
+ *     the contact identity. A different visitor who knows an existing
+ *     contact's email must NOT inherit that contact or its conversations.
+ *
+ * Lookup key: `(tenantId, visitorId)` — never by email.
+ * A different visitorId with the same email gets a different contact.
+ * The same visitorId may update its own email/name.
+ */
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ slug: string }> },
@@ -49,39 +63,48 @@ export async function POST(
   const email = String(body.email ?? '').trim().toLowerCase().slice(0, 200)
   const name = String(body.name ?? '').trim().slice(0, 100)
 
-  if (!visitorId && !email) {
-    return widgetHeaders(NextResponse.json({ error: 'visitorId_or_email_required' }, { status: 400 }))
+  // visitorId is REQUIRED — it is the visitor's identity.
+  if (!visitorId) {
+    return widgetHeaders(NextResponse.json({ error: 'visitorId_required' }, { status: 400 }))
   }
 
-  // Validate email format if provided
+  // Validate email format if provided (email is metadata only, never identity)
   if (email && !isValidEmail(email)) {
     return widgetHeaders(NextResponse.json({ error: 'invalid_email' }, { status: 400 }))
   }
 
-  const identifier = email || visitorId
-  const identifierType = email ? 'email' : 'visitorId'
-
+  // Lookup by (tenantId, visitorId) — NOT by email.
+  // A different visitorId with the same email gets a different contact.
   let contact = await db.contact.findUnique({
-    where: { tenantId_identifier: { tenantId: tenant.id, identifier } },
+    where: { tenantId_identifier: { tenantId: tenant.id, identifier: visitorId } },
   })
 
   if (!contact) {
+    // New visitor — create a new contact with visitorId as the identifier.
+    // email is stored as metadata, not as the lookup key.
     contact = await db.contact.create({
       data: {
         tenantId: tenant.id,
-        identifier,
-        identifierType,
-        name: name || (email ? email.split('@')[0] : 'Visitor'),
+        identifier: visitorId,
+        identifierType: 'visitorId',
+        name: name || 'Visitor',
         email: email || null,
         locale: tenant.defaultLocale,
         metadata: {},
       },
     })
-  } else if (email && contact.identifierType === 'visitorId') {
-    contact = await db.contact.update({
-      where: { id: contact.id },
-      data: { email, identifierType: 'email', identifier: email, name: name || contact.name },
-    })
+  } else {
+    // Same visitor updating their own profile metadata — NOT a takeover.
+    // Only update the email/name if provided; never change the identifier.
+    const updateData: { email?: string | null; name?: string } = {}
+    if (email) updateData.email = email
+    if (name) updateData.name = name
+    if (Object.keys(updateData).length > 0) {
+      contact = await db.contact.update({
+        where: { id: contact.id },
+        data: updateData,
+      })
+    }
   }
 
   const existingConversation = await db.conversation.findFirst({

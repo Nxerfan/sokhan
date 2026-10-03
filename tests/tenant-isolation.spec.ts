@@ -20,12 +20,27 @@ test.describe('Cross-tenant isolation', () => {
     await pageA.waitForLoadState('networkidle')
 
     // Signup + signin entirely via API (reliable, no hydration issues)
+    // Uses the 3-step OTP flow (start → verify → complete) — the legacy
+    // /api/auth/signup endpoint is now deprecated (returns 410 Gone).
     const tenantAData = await pageA.evaluate(async () => {
-      // Signup
-      await fetch('/api/auth/signup', {
+      // Step 1: start OTP signup
+      const startRes = await fetch('/api/auth/signup/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: 'ta@iso-playwright.test', password: 'password123', name: 'TA', workspaceName: 'TA ISO WS' })
+        body: JSON.stringify({ email: 'ta@iso-playwright.test' })
+      })
+      const { requestId } = await startRes.json()
+      // Step 2: verify OTP (NIXIFY_MOCK=true → code is always "123456")
+      await fetch('/api/auth/signup/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'ta@iso-playwright.test', code: '123456', requestId })
+      })
+      // Step 3: complete signup (creates user + tenant + membership)
+      await fetch('/api/auth/signup/complete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'ta@iso-playwright.test', requestId, password: 'password123', workspaceName: 'TA ISO WS' })
       })
       // Get CSRF
       const csrfRes = await fetch('/api/auth/csrf')
@@ -74,10 +89,22 @@ test.describe('Cross-tenant isolation', () => {
     await pageB.waitForLoadState('networkidle')
 
     const tenantBData = await pageB.evaluate(async () => {
-      await fetch('/api/auth/signup', {
+      // 3-step OTP signup for Tenant B
+      const startRes = await fetch('/api/auth/signup/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: 'tb@iso-playwright.test', password: 'password123', name: 'TB', workspaceName: 'TB ISO WS' })
+        body: JSON.stringify({ email: 'tb@iso-playwright.test' })
+      })
+      const { requestId } = await startRes.json()
+      await fetch('/api/auth/signup/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'tb@iso-playwright.test', code: '123456', requestId })
+      })
+      await fetch('/api/auth/signup/complete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'tb@iso-playwright.test', requestId, password: 'password123', workspaceName: 'TB ISO WS' })
       })
       const csrfRes = await fetch('/api/auth/csrf')
       const { csrfToken } = await csrfRes.json()

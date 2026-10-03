@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test'
+import { otpSignupPlaywright } from './helpers/otp-signup'
 
 /**
  * Module 2 smoke test — real-time messaging golden path.
@@ -30,10 +31,8 @@ function creds(label: string) {
 }
 
 async function signupAndGetSlug(page: Page, email: string, workspace: string): Promise<string> {
-  // API-based signup (reliable, no hydration issues)
-  await page.request.post(`${DASHBOARD}/api/auth/signup`, {
-    data: { email, password: 'password123', name: 'Agent Test', workspaceName: workspace },
-  })
+  // 3-step OTP signup (reliable, no hydration issues)
+  await otpSignupPlaywright(page.request, DASHBOARD, email, workspace)
   const csrfRes = await page.request.get(`${DASHBOARD}/api/auth/csrf`)
   const { csrfToken } = await csrfRes.json()
   await page.request.post(`${DASHBOARD}/api/auth/callback/credentials`, {

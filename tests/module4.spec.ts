@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test'
+import { otpSignupPlaywright } from './helpers/otp-signup'
 
 /**
  * Module 4 tests — AI FAQ auto-responder + Product Q&A.
@@ -17,9 +18,7 @@ const DASHBOARD = 'http://127.0.0.1:3000'
 const WIDGET = 'http://127.0.0.1:81'
 
 async function signupAndSignin(page: Page, email: string, workspace: string): Promise<string> {
-  await page.request.post(`${DASHBOARD}/api/auth/signup`, {
-    data: { email, password: 'password123', name: 'Agent', workspaceName: workspace },
-  })
+  await otpSignupPlaywright(page.request, DASHBOARD, email, workspace)
   const csrfRes = await page.request.get(`${DASHBOARD}/api/auth/csrf`)
   const { csrfToken } = await csrfRes.json()
   await page.request.post(`${DASHBOARD}/api/auth/callback/credentials`, {
@@ -235,9 +234,7 @@ test.describe('Module 4 — AI features', () => {
     const page = await ctx.newPage()
 
     // Signup WITHOUT upgrading to pro (stays on free tier — aiActions: 0)
-    await page.request.post(`${DASHBOARD}/api/auth/signup`, {
-      data: { email, password: 'password123', name: 'Agent', workspaceName: `Cap ${stamp}` },
-    })
+    await otpSignupPlaywright(page.request, DASHBOARD, email, `Cap ${stamp}`)
     const csrfRes = await page.request.get(`${DASHBOARD}/api/auth/csrf`)
     const { csrfToken } = await csrfRes.json()
     await page.request.post(`${DASHBOARD}/api/auth/callback/credentials`, {

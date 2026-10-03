@@ -42,7 +42,18 @@ export async function GET(
     return widgetHeaders(NextResponse.json({ error: 'invalid_token' }, { status: 401 }))
   }
 
-  const { contactId, tenantId } = payload as VisitorTokenPayload
+  const { contactId, tenantId, slug: tokenSlug } = payload as VisitorTokenPayload
+
+  // Bind visitor token to the route slug — token A + slug B must be rejected.
+  if (tokenSlug !== slug) {
+    return widgetHeaders(NextResponse.json({ error: 'token_slug_mismatch' }, { status: 403 }))
+  }
+  // Verify the token's tenant corresponds to this slug.
+  const tokenTenant = await db.tenant.findUnique({ where: { slug }, select: { id: true } })
+  if (!tokenTenant || tokenTenant.id !== tenantId) {
+    return widgetHeaders(NextResponse.json({ error: 'token_tenant_mismatch' }, { status: 403 }))
+  }
+
   const conversationId = new URL(req.url).searchParams.get('conversationId')
 
   if (!conversationId) {
@@ -90,7 +101,17 @@ export async function POST(
     return widgetHeaders(NextResponse.json({ error: 'invalid_token' }, { status: 401 }))
   }
 
-  const { contactId, tenantId } = payload as VisitorTokenPayload
+  const { contactId, tenantId, slug: tokenSlug } = payload as VisitorTokenPayload
+
+  // Bind visitor token to the route slug — token A + slug B must be rejected.
+  if (tokenSlug !== slug) {
+    return widgetHeaders(NextResponse.json({ error: 'token_slug_mismatch' }, { status: 403 }))
+  }
+  // Verify the token's tenant corresponds to this slug.
+  const tokenTenant = await db.tenant.findUnique({ where: { slug }, select: { id: true } })
+  if (!tokenTenant || tokenTenant.id !== tenantId) {
+    return widgetHeaders(NextResponse.json({ error: 'token_tenant_mismatch' }, { status: 403 }))
+  }
 
   // Free plan checks: domain validation + message limit + trial expiry
   const domain = getRequestDomain(req)

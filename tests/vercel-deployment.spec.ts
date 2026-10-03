@@ -45,13 +45,26 @@ async function signupAndSignIn(page: Page, email: string, workspace: string) {
   await page.goto(DASHBOARD)
   await page.waitForLoadState('networkidle')
   await page.evaluate(async (args) => {
-    await fetch('/api/auth/signup', {
+    // 3-step OTP signup (start → verify → complete) — the legacy
+    // /api/auth/signup endpoint is now deprecated (returns 410 Gone).
+    const startRes = await fetch('/api/auth/signup/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: args.email }),
+    })
+    const { requestId } = await startRes.json()
+    await fetch('/api/auth/signup/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: args.email, code: '123456', requestId }),
+    })
+    await fetch('/api/auth/signup/complete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         email: args.email,
+        requestId,
         password: 'password123',
-        name: args.email.split('@')[0],
         workspaceName: args.workspace,
       }),
     })
