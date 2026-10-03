@@ -35,6 +35,9 @@ services:
       NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost}
       # Postgres connection string — built from POSTGRES_PASSWORD.
       DATABASE_URL: postgresql://sukhan:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/sukhan?schema=public
+      # Direct (non-pooled) connection for Prisma migrations.
+      # Docker PostgreSQL has no pooler, so this is the same as DATABASE_URL.
+      DIRECT_URL: postgresql://sukhan:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/sukhan?schema=public
       # Redis for realtime adapter + future caching/queues.
       REDIS_URL: redis://redis:6379
       # Internal publish URL — server-to-server HTTP to the realtime service.

@@ -259,3 +259,42 @@ test('Vercel mode uses websocket-only transports (not inferred from URL)', () =>
   expect(inboxTxt).toContain('isVercel')
   expect(inboxTxt).toContain("transports: isVercel || isApiRealtime ? ['websocket'] : ['websocket', 'polling']")
 })
+
+test('Full docker-compose.yml sets DIRECT_URL for app service', () => {
+  const txt = readFileSync(join(root, 'docker-compose.yml'), 'utf8')
+  // Full Compose must set both DATABASE_URL and DIRECT_URL
+  expect(txt).toContain('DATABASE_URL: postgresql://sukhan:')
+  expect(txt).toContain('DIRECT_URL: postgresql://sukhan:')
+})
+
+test('Lite docker-compose.lite.yml sets both DATABASE_URL and DIRECT_URL', () => {
+  const txt = readFileSync(join(root, 'docker-compose.lite.yml'), 'utf8')
+  expect(txt).toContain('DATABASE_URL: postgresql://')
+  expect(txt).toContain('DIRECT_URL: postgresql://')
+})
+
+test('docker-entrypoint.sh runs prisma migrate deploy (not --skip-generate)', () => {
+  const txt = readFileSync(join(root, 'docker-entrypoint.sh'), 'utf8')
+  expect(txt).toMatch(/prisma\s+migrate\s+deploy/)
+  expect(txt).not.toContain('--skip-generate')
+})
+
+test('docker-entrypoint.sh does NOT swallow migration failure', () => {
+  const txt = readFileSync(join(root, 'docker-entrypoint.sh'), 'utf8')
+  // Must NOT contain the old "|| { echo WARNING ... continue }" pattern
+  expect(txt).not.toContain('Continuing anyway')
+  expect(txt).not.toMatch(/migrate\s+deploy.*\|\|/)
+  // Must NOT skip migrations when DATABASE_URL is set
+  expect(txt).not.toContain('skipping migrations')
+})
+
+test('docker-entrypoint.sh fails closed on missing env vars', () => {
+  const txt = readFileSync(join(root, 'docker-entrypoint.sh'), 'utf8')
+  expect(txt).toContain('exit 1')
+  // Must check for NEXTAUTH_SECRET
+  expect(txt).toMatch(/NEXTAUTH_SECRET.*exit 1|exit 1.*NEXTAUTH_SECRET/)
+  // Must check for DATABASE_URL
+  expect(txt).toMatch(/DATABASE_URL.*exit 1|exit 1.*DATABASE_URL/)
+  // Must check for DIRECT_URL
+  expect(txt).toMatch(/DIRECT_URL.*exit 1|exit 1.*DIRECT_URL/)
+})

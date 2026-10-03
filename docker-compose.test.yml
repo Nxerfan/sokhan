@@ -1,0 +1,16 @@
+# Test-only Compose override — exposes app and caddy ports for Playwright.
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.test.yml up -d --build
+#
+# This override ONLY adds port mappings. It does NOT change services,
+# volumes, env vars, or health checks. Production deployments do NOT
+# use this file.
+services:
+  app:
+    ports:
+      - "3000:3000"
+
+  caddy:
+    ports:
+      - "81:80"
+      - "443:443"
