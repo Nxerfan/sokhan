@@ -316,6 +316,8 @@ test.describe('Module 2 — Realtime messaging', () => {
     // This is a static analysis test — it doesn't hit the server. It catches
     // the exact class of bug that caused the department 500 error in Module 1
     // (the Prisma extension not injecting tenantId on create).
+    const { createRequire } = await import('module')
+    const require = createRequire(import.meta.url)
     const { execSync } = require('child_process')
 
     // Files to check — all the new Module 2 write paths
