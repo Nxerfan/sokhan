@@ -351,7 +351,7 @@ Architecture summary:
 - Next.js → Vercel serverless functions
 - PostgreSQL → Neon (pooled DATABASE_URL + direct DIRECT_URL)
 - Migrations → prisma migrate deploy at Vercel build time (NOT db push)
-- Realtime → separately-hosted Socket.IO service + Upstash Redis pub/sub
+- Realtime → Vercel-native Socket.IO Function (api/realtime.ts) + Redis pub/sub
 - Attachments → Vercel Blob
 - Authentication → NextAuth (unchanged)
 

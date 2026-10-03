@@ -10,15 +10,12 @@
  *                   The realtime service then emits to connected sockets.
  *                   No external Redis needed.
  *
- *   - vercel      : Redis PUBLISH (when `REDIS_URL` is set) OR HTTP POST
- *                   to an external realtime endpoint (when
- *                   `REALTIME_INTERNAL_URL` is set). The realtime service
- *                   — running on a separate long-lived host (Railway,
- *                   Render, Fly.io, a VPS) — subscribes to Redis and
- *                   fans out to connected sockets.
- *
- *                   If neither env var is set, publish is a no-op and
- *                   clients fall back to the polling safety net (10s).
+ *   - vercel      : Redis PUBLISH to the `sukhan:realtime:publish` channel.
+ *                   The root `api/realtime.ts` Vercel Function subscribes
+ *                   to this channel and emits to connected Socket.IO clients.
+ *                   Redis is REQUIRED for realtime delivery on Vercel —
+ *                   without it, publish is a no-op and clients fall back to
+ *                   the 10-second polling safety net.
  *
  * This is a refactor of the previous `realtime-publish.ts` — same
  * public API plus a Redis adapter and a deployment-aware factory.
