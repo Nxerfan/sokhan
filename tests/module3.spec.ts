@@ -6,8 +6,8 @@ import { test, expect, type Page } from '@playwright/test'
  * Uses API-based signup (reliable) like the isolation test.
  */
 
-const DASHBOARD = 'http://localhost:3000'
-const WIDGET = 'http://localhost:81'
+const DASHBOARD = 'http://127.0.0.1:3000'
+const WIDGET = 'http://127.0.0.1:81'
 
 async function signupAndSignin(page: Page, email: string, workspace: string): Promise<string> {
   await page.request.post(`${DASHBOARD}/api/auth/signup`, {

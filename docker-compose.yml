@@ -35,6 +35,9 @@ services:
       NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost}
       # Postgres connection string — built from POSTGRES_PASSWORD.
       DATABASE_URL: postgresql://sukhan:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/sukhan?schema=public
+      # Direct (non-pooled) connection for Prisma migrations.
+      # Docker PostgreSQL has no pooler, so this is the same as DATABASE_URL.
+      DIRECT_URL: postgresql://sukhan:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/sukhan?schema=public
       # Redis for realtime adapter + future caching/queues.
       REDIS_URL: redis://redis:6379
       # Internal publish URL — server-to-server HTTP to the realtime service.
@@ -71,6 +74,12 @@ services:
     environment:
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?NEXTAUTH_SECRET is required}
       REDIS_URL: redis://redis:6379
+      # Internal URL of the Next.js app — used by the realtime service to
+      # verify conversation ownership via the app's /api/realtime/verify-conversation
+      # endpoint. In Docker Compose, the Next.js service is named 'app'.
+      # Without this, the realtime service would fall back to localhost:3000,
+      # which is unreachable from inside the realtime container.
+      APP_INTERNAL_URL: http://app:3000
     depends_on:
       redis:
         condition: service_healthy

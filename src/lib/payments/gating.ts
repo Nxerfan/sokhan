@@ -177,6 +177,9 @@ export async function getTenantUsage(tenantId: string): Promise<{
       agents: { current: agents, limit: plan.limits.agents },
       conversations: { current: conversations, limit: plan.limits.conversations },
       departments: { current: departments, limit: plan.limits.departments },
+      aiActions: { current: 0, limit: (plan.limits as any).aiActions ?? -1 },
+      websites: { current: 0, limit: (plan.limits as any).websites ?? 1 },
+      weeklyMessages: { current: 0, limit: (plan.limits as any).weeklyMessages ?? 100 },
     },
   }
 }

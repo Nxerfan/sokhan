@@ -1,0 +1,10 @@
+# Test-only Compose override for Lite — exposes app and caddy ports.
+services:
+  app:
+    ports:
+      - "3000:3000"
+
+  caddy:
+    ports:
+      - "81:80"
+      - "443:443"

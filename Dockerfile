@@ -55,6 +55,12 @@ RUN npx prisma generate \
 FROM deps AS builder
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
+# Build-time placeholder for NEXTAUTH_SECRET. The real secret is provided
+# at RUNTIME via docker-compose environment. This placeholder exists ONLY
+# so the Next.js build can complete (env-check.ts fail-closes in production
+# without it). This value is NEVER used at runtime — docker-entrypoint.sh
+# validates the real secret before starting the server.
+ENV NEXTAUTH_SECRET=sukhan-build-time-placeholder-not-for-runtime
 
 # Copy the rest of the source.
 COPY . .

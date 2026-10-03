@@ -1,0 +1,129 @@
+name: CI
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [fix/vercel-deployment]
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Install dependencies
+        run: bun install
+      - name: Prisma generate
+        run: bunx prisma generate
+        env:
+          DATABASE_URL: postgresql://user:password@localhost:5432/dummy
+          DIRECT_URL: postgresql://user:password@localhost:5432/dummy
+      - name: Lint
+        run: bun run lint
+      - name: TypeScript check
+        run: bun run typecheck
+      - name: Prisma validate
+        run: bunx prisma validate
+        env:
+          DATABASE_URL: postgresql://user:password@localhost:5432/dummy
+          DIRECT_URL: postgresql://user:password@localhost:5432/dummy
+      - name: Vercel build script syntax check
+        run: bash -n vercel-build.sh
+      - name: Unit tests
+        run: bun test tests/unit/
+      - name: Production build
+        run: bunx next build
+        env:
+          VERCEL: '1'
+          DATABASE_URL: postgresql://user:password@localhost:5432/dummy
+          DIRECT_URL: postgresql://user:password@localhost:5432/dummy
+          NIXIFY_MOCK: 'true'
+          NEXTAUTH_SECRET: 'ci-test-secret-not-for-production'
+
+  docker-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      NEXTAUTH_SECRET: ci-docker-test-secret-not-production
+      POSTGRES_PASSWORD: ci-postgres-password
+      NIXIFY_MOCK: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Install dependencies
+        run: bun install
+      - name: Prisma generate
+        run: bunx prisma generate
+        env:
+          DATABASE_URL: postgresql://user:password@localhost:5432/dummy
+          DIRECT_URL: postgresql://user:password@localhost:5432/dummy
+      - name: Install Playwright Chromium
+        run: bunx playwright install --with-deps chromium
+
+      # Build the image once — both Full and Lite reuse it.
+      - name: Build Docker image
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.test.yml build app
+
+      # === Full edition ===
+      - name: Start Full Docker stack
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.test.yml up -d --no-build
+      - name: Wait for Full health
+        run: |
+          echo "Waiting for Full services to be healthy..."
+          timeout 180 bash -c '
+            while true; do
+              APP=$(curl -sf -o /dev/null http://127.0.0.1:3000/api 2>/dev/null && echo ok || echo fail)
+              CADDY=$(curl -sf -o /dev/null http://127.0.0.1:81/api 2>/dev/null && echo ok || echo fail)
+              if [ "$APP" = "ok" ] && [ "$CADDY" = "ok" ]; then
+                echo "Full stack healthy"
+                exit 0
+              fi
+              echo "  app=$APP caddy=$CADDY"
+              sleep 5
+            done
+          '
+      - name: Run Full regression tests
+        run: |
+          bunx playwright test             tests/module2.spec.ts             tests/socketio-verify.spec.ts             tests/socket-race.spec.ts             tests/realtime-authz.spec.ts             tests/widget-external-origin.spec.ts
+      - name: Print Full container logs on failure
+        if: failure()
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.test.yml logs app realtime postgres redis caddy || true
+      - name: Tear down Full
+        if: always()
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.test.yml down -v --remove-orphans || true
+
+      # === Lite edition ===
+      - name: Start Lite Docker stack
+        run: |
+          docker compose -f docker-compose.lite.yml -f docker-compose.lite.test.yml up -d --no-build
+      - name: Wait for Lite health
+        run: |
+          echo "Waiting for Lite services to be healthy..."
+          timeout 180 bash -c '
+            while true; do
+              APP=$(curl -sf -o /dev/null http://127.0.0.1:3000/api 2>/dev/null && echo ok || echo fail)
+              CADDY=$(curl -sf -o /dev/null http://127.0.0.1:81/api 2>/dev/null && echo ok || echo fail)
+              if [ "$APP" = "ok" ] && [ "$CADDY" = "ok" ]; then
+                echo "Lite stack healthy"
+                exit 0
+              fi
+              echo "  app=$APP caddy=$CADDY"
+              sleep 5
+            done
+          '
+      - name: Run Lite regression tests
+        run: |
+          bunx playwright test             tests/module2.spec.ts             tests/socketio-verify.spec.ts             tests/socket-race.spec.ts             tests/realtime-authz.spec.ts             tests/widget-external-origin.spec.ts
+      - name: Print Lite container logs on failure
+        if: failure()
+        run: |
+          docker compose -f docker-compose.lite.yml -f docker-compose.lite.test.yml logs app realtime postgres caddy || true
+      - name: Tear down Lite
+        if: always()
+        run: |
+          docker compose -f docker-compose.lite.yml -f docker-compose.lite.test.yml down -v --remove-orphans || true

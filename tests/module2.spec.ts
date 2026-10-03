@@ -17,8 +17,8 @@ import { test, expect, type Page } from '@playwright/test'
 
 // IMPORTANT: use port 81 (Caddy gateway) for the widget (Socket.IO needs Caddy).
 // The dashboard signup uses Playwright's APIRequestContext for reliable cookie handling.
-const BASE = 'http://localhost:81'
-const DASHBOARD = 'http://localhost:3000'
+const BASE = 'http://127.0.0.1:81'
+const DASHBOARD = 'http://127.0.0.1:3000'
 
 function creds(label: string) {
   const stamp = `${process.pid}-${Date.now()}-${label}`
@@ -188,8 +188,11 @@ test.describe('Module 2 — Realtime messaging', () => {
     await conversationItem.click()
     await dashboardPage.waitForTimeout(500)
 
-    // The message should appear in the thread
-    await expect(dashboardPage.getByText('سلام، کمک می‌خوام')).toBeVisible({ timeout: 5000 })
+    // The message should appear in the thread. Use .first() because the
+    // same text ALSO appears in the conversation-list preview (lastMessagePreview)
+    // after the message arrives — without .first() Playwright's strict mode
+    // rejects the ambiguous match.
+    await expect(dashboardPage.getByText('سلام، کمک می‌خوام').first()).toBeVisible({ timeout: 5000 })
 
     // === ASSERTION 3: typing indicator (agent → visitor) ===
     // Type in the dashboard reply box — the widget should show a typing indicator
@@ -313,6 +316,8 @@ test.describe('Module 2 — Realtime messaging', () => {
     // This is a static analysis test — it doesn't hit the server. It catches
     // the exact class of bug that caused the department 500 error in Module 1
     // (the Prisma extension not injecting tenantId on create).
+    const { createRequire } = await import('module')
+    const require = createRequire(import.meta.url)
     const { execSync } = require('child_process')
 
     // Files to check — all the new Module 2 write paths

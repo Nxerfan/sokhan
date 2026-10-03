@@ -16,7 +16,7 @@ export async function GET() {
     // Conversation volume over last 7 days (by day)
     const conversations = await db.conversation.findMany({
       where: { tenantId: tid, createdAt: { gte: sevenDaysAgo } },
-      select: { createdAt: true, status: true, csatRating: true, firstResponseAt: true, updatedAt: true, createdAt: true },
+      select: { createdAt: true, status: true, csatRating: true, firstResponseAt: true },
     })
 
     // Build per-day buckets

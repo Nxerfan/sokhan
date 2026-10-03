@@ -872,3 +872,283 @@ Work Log:
 8. Mock mode works (OTP code 123456 accepted) ✓
 
 **Regression: Smoke + Security (8/8 pass).** Production build: 0 errors.
+
+---
+Task ID: 12-vercel
+Agent: main (Senior Full-Stack Engineer — Vercel deployment support)
+Task: Add Vercel-native deployment support — PostgreSQL, Redis pub/sub realtime, Vercel Blob storage, deployment-mode abstraction, remove tracked secrets, tenant-isolation hardening via AsyncLocalStorage, regression tests, push to GitHub + open PR.
+
+Work Log:
+
+**Phase 1 — Remove tracked secret files:**
+- Discovered via `git ls-files` that `.env` (containing a LIVE Nixify production API key `mg_live_...`) and `db/custom.db` (binary SQLite DB with user data) and 10 PNG test artifacts in `public/uploads/` were all tracked in git history.
+- Untracked them via `git rm --cached .env db/custom.db public/uploads/*.png`.
+- Updated `.gitignore` to add `db/*.db`, `public/uploads/`, with `!public/uploads/.gitkeep` exception.
+- Added `public/uploads/.gitkeep` to keep the dir tracked (empty).
+- The live Nixify key in git history is now an INCIDENT — needs rotation by the repo owner. Documented in the PR description under "Security Warning".
+
+**Phase 2 — Deployment-mode detection (`src/lib/deployment.ts`):**
+- New module: `getDeploymentMode()` returns 'vercel' | 'docker' | 'dev'.
+- Resolution: explicit `DEPLOYMENT_MODE` env > `VERCEL=1` auto-detect > `DOCKER=1`/`NODE_ENV=production` > 'dev'.
+- Helper functions: `isVercel()`, `isDocker()`, `isDev()`, `hasLocalRealtimeService()`, `hasPersistentFilesystem()`.
+- Test hook: `__setDeploymentModeOverride()` for unit tests.
+
+**Phase 3 — Realtime publishing abstraction (`src/lib/realtime/index.ts`):**
+- New unified abstraction with three publishers:
+  - `HttpRealtimePublisher` — HTTP POST to localhost:3004 (docker/dev) or external REALTIME_INTERNAL_URL (vercel).
+  - `RedisRealtimePublisher` — Redis PUBLISH to channel `sukhan:realtime:publish` when `REDIS_URL` is set.
+  - `NoopRealtimePublisher` — degraded mode (polling fallback) when neither env var is set.
+- Factory `getRealtimePublisher()` selects based on env vars:
+  1. `REDIS_URL` set → Redis (required for Vercel).
+  2. `REALTIME_INTERNAL_URL` set → HTTP to external host.
+  3. `hasLocalRealtimeService()` (docker/dev) → HTTP to localhost:3004.
+  4. Otherwise → Noop (loud warning).
+- Old `realtime-publish.ts` now re-exports from the new abstraction — existing callers (`publishToRealtime()`, `room`, `EVENTS`) unchanged.
+- Channel name matched to the realtime service's subscription (`sukhan:realtime:publish`).
+- `REDIS_CHANNEL` env var is now configurable on BOTH the publisher and the realtime service.
+
+**Phase 4 — Realtime client URL env-driven:**
+- `src/lib/realtime-client.ts` — `SOCKET_URL` resolved from `process.env.NEXT_PUBLIC_REALTIME_URL` (defaults to `/?XTransformPort=3003` for docker/dev through Caddy).
+- Added `__lastJoinedConv` tracking on the socket so the auto-reconnect handler can re-join the conversation room (regression item #10).
+- `src/components/dashboard/views/inbox-view.tsx` — duplicate Socket.IO URL replaced with env-var-driven default; added `selectedIdRef` (useRef) so the reconnect handler can read the latest selected conversation; added `s.io.on('reconnect', ...)` that re-emits `conversation:join` for the currently-open conversation.
+- Widget scripts (`src/app/api/widget/[slug]/script/route.ts` and `src/app/api/widget/v1/sukhan.js/route.ts`) — `SOCKET_URL` is now baked into the script as a server-resolved JSON-encoded literal from `NEXT_PUBLIC_REALTIME_URL` (default `/?XTransformPort=3003`). The widget can no longer accidentally fall back to a hardcoded URL — the server controls it.
+- Doc reference (`src/components/marketing/doc/doc-page.tsx`) — updated to show `NEXT_PUBLIC_REALTIME_URL || "/?XTransformPort=3003"` as the canonical URL.
+
+**Phase 5 — Storage abstraction (`src/lib/storage/index.ts`):**
+- New unified abstraction with two adapters:
+  - `LocalStorageAdapter` — writes to `public/uploads/<tenantId>/<uuid><ext>` (lazy dir resolution so tests can chdir). Tenant namespacing prevents cross-tenant file collisions in a shared FS.
+  - `VercelBlobStorageAdapter` — uploads to Vercel Blob via `@vercel/blob` (lazy import so the package is optional in docker/dev). Uses Buffer for body to satisfy Vercel Blob's type.
+- Factory `getStorage()` selects based on env:
+  1. `BLOB_READ_WRITE_TOKEN` set → Vercel Blob.
+  2. `hasPersistentFilesystem()` (docker/dev) → Local FS.
+  3. Otherwise → throw a clear configuration error.
+- Attachments route (`src/app/api/attachments/route.ts`) rewritten to use `getStorage().put()` — no more direct `fs.writeFile`. The 10MB size limit + MIME/extension whitelist (rejects HTML/SVG/JS) preserved.
+
+**Phase 6 — Prisma multi-provider:**
+- `prisma/schema.prisma` — kept as sqlite (default for dev/Docker Lite). Header updated to point to the sync script.
+- `prisma/schema.postgres.prisma` — new file, postgres-flavoured mirror. Generated from the sqlite one.
+- `scripts/sync-prisma-schemas.mjs` — script that reads sqlite schema, swaps `provider = "sqlite"` → `"postgresql"`, swaps the header, writes the postgres schema. Then runs `prisma validate` against BOTH schemas (with a postgres-format DATABASE_URL placeholder for the postgres validation since Prisma validate checks URL format).
+- `package.json` scripts added: `sync-prisma-schemas`, `db:generate:pg`, `db:validate:pg`, `db:migrate:pg`, `build:vercel`.
+- `vercel-build.sh` — Vercel build script: runs sync-prisma-schemas → prisma generate (postgres schema) → next build (no standalone).
+- `vercel.json` — `buildCommand: "bash vercel-build.sh"`, framework: nextjs, region: iad1.
+- Both schemas pass `prisma validate`.
+
+**Phase 7 — next.config.ts Vercel-aware:**
+- `output: 'standalone'` is now CONDITIONAL — only set when NOT building for Vercel.
+- Detection mirrors `deployment.ts`: `DEPLOYMENT_MODE=vercel` or `VERCEL=1` → skip standalone output.
+- Comment documents the Docker-only standalone flow.
+
+**Phase 8 — Tenant-isolation hardening (AsyncLocalStorage):**
+- Critical fix: replaced the mutable global var (`globalForPrisma.__currentTenantId`) with `AsyncLocalStorage<string>` from `node:async_hooks`.
+- Old implementation leaked tenant context across concurrent async requests (two API routes running in the same Node process — common in dev and Docker — could overwrite each other's tenantId during await I/O).
+- `withTenant(tenantId, fn)` now uses `tenantContext.run(tenantId, fn)` — each async chain gets its own context.
+- New unit tests verify isolation under concurrent await chains + nesting + sibling-chains-after-exit.
+
+**Phase 9 — Realtime service updates (`mini-services/realtime/index.ts`):**
+- `REDIS_CHANNEL` env var now configurable (defaults to `sukhan:realtime:publish` to match the publisher).
+- Existing Redis adapter + pub/sub subscription kept intact.
+
+**Phase 10 — Dependency installs:**
+- Installed `redis` (^6.2.1) and `@vercel/blob` (^2.8.0) as production dependencies. They are dynamically imported so they don't bloat the docker/dev bundle path; they only load when their env var is set.
+
+**Phase 11 — Documentation:**
+- `DEPLOYMENT.md` — appended comprehensive "Vercel Deployment" section with architecture comparison table, one-time setup steps for Neon/Supabase Postgres, Upstash Redis, Vercel Blob, Railway/Render/Fly realtime service, Vercel project import, env var table, verification commands, and Docker compatibility statement.
+- `.env.vercel.example` — new file, full template with `[REQUIRED]`/`[OPTIONAL]` annotations for every Vercel-specific env var.
+
+**Phase 12 — Regression tests:**
+- `tests/unit/abstractions.test.ts` — 38 unit tests covering:
+  - Deployment mode detection (5 tests)
+  - Realtime publisher selection (6 tests)
+  - Storage adapter selection (5 tests, including local-FS tenant partitioning)
+  - Realtime publish error swallowing (2 tests)
+  - Tenant context isolation via AsyncLocalStorage (3 tests: concurrent chains, nesting, sibling-after-exit)
+  - Postgres + sqlite schema validation (2 tests)
+  - Static source guards: no `localhost:3004` in app code (except factory default), no `XTransformPort=3003` outside env-var-overridable defaults, no SQLite-specific Prisma code, realtime service exposes configurable `REDIS_CHANNEL` (5 tests)
+  - Attachments route uses `getStorage()` + preserves MIME whitelist (2 tests)
+  - next.config.ts does NOT force standalone in Vercel + vercel-build.sh exists + vercel.json buildCommand (3 tests)
+  - package.json has new scripts (1 test)
+  - Realtime token verification rejects wrong/missing/garbage/invalid-type tokens (5 tests)
+- `tests/vercel-deployment.spec.ts` — 6 Playwright e2e tests covering:
+  - Duplicate conversations not created after reconnect (visitor sends two messages with same visitorId → same conversationId)
+  - Attachment authorization (401 for unauth, 400 for HTML MIME rejection)
+  - Legacy signup + signin flow still works
+  - Health endpoint /api returns 200
+  - Unauthenticated /api/conversations is 401/403
+- All 38 unit tests PASS. All 6 Playwright tests PASS.
+
+**Phase 13 — Verification:**
+- `bun run lint`: 0 errors, 1 pre-existing warning (inbox-view.tsx unused eslint-disable directive — pre-existing).
+- `bunx tsc --noEmit`: 0 errors in new files (`src/lib/storage`, `src/lib/realtime`, `src/lib/deployment`, `tests/unit/abstractions.test.ts`). Pre-existing TS errors in API routes (session.user typing) and tests unchanged.
+- `bun test tests/unit/abstractions.test.ts`: 38/38 pass.
+- `bunx playwright test tests/vercel-deployment.spec.ts`: 6/6 pass.
+- `bunx prisma validate --schema=prisma/schema.prisma`: PASS.
+- `bunx prisma validate --schema=prisma/schema.postgres.prisma` with postgres-format DATABASE_URL: PASS.
+- `bun run sync-prisma-schemas`: writes schema.postgres.prisma + validates both schemas.
+
+Stage Summary:
+- All Vercel-deployment blockers identified by the EXPLORE-1 audit are addressed:
+  1. Two-process architecture → Vercel uses serverless Next.js + separately-hosted realtime (architecture documented, env vars wired).
+  2. Caddy hard-dependency → `NEXT_PUBLIC_REALTIME_URL` env var replaces all 5 hardcoded `XTransformPort=3003` references.
+  3. `output: "standalone"` in next.config → conditional on Docker mode only.
+  4. `build` script writes to `.next/standalone/` → only the Docker `build` script does this; `vercel-build.sh` runs `next build` directly.
+  5. SQLite hardcoded in prisma schema → second schema file `schema.postgres.prisma` + sync script.
+  6. `db/custom.db` shipped with absolute path → untracked.
+  7. `prisma db push` at container startup → not needed in Vercel mode; documented one-time manual step.
+  8. Filesystem writes for attachments → storage abstraction with Vercel Blob adapter.
+  9. In-memory rate limiter → out of scope for this PR (documented as known limitation).
+  10. `.env` tracked with live Nixify key → UNTRACKED + documented as security incident for credential rotation.
+  11. `db/custom.db` tracked → UNTRACKED.
+  12. No deployment-mode abstraction → `src/lib/deployment.ts` added.
+  13. Playwright tests hardcoded to localhost:81 → new tests use 127.0.0.1:3000 (IPv4) + page.evaluate (browser fetch).
+  14. Realtime token verification depends on shared NEXTAUTH_SECRET → unchanged; documented in `.env.vercel.example`.
+
+- All 20 regression items covered (12 via unit tests, 6 via new Playwright tests, 2 via existing test suites documented in the new test file's header).
+- All 38 unit tests + 6 Playwright tests pass.
+- Both prisma schemas (sqlite + postgres) validate.
+- Lint clean. No new TS errors.
+- The live Nixify API key in git history MUST be rotated by the repo owner (documented in the PR Security Warning section).
+
+---
+Task ID: 13-supabase
+Agent: main (Senior Full-Stack Engineer — Supabase standardization)
+Task: Update PR #1 to standardize cloud database on Supabase PostgreSQL (remove Neon, drop SQLite, add Prisma migrations, document Supabase setup).
+
+Work Log:
+- Searched repo for Neon references: found 3 in DEPLOYMENT.md. Removed all.
+- Standardized on ONE canonical PostgreSQL schema (dropped SQLite + dual-schema setup).
+- DELETED: prisma/schema.postgres.prisma, scripts/sync-prisma-schemas.mjs.
+- Created prisma/migrations/ with migration_lock.toml + baseline migration (510 lines, generated via prisma migrate diff).
+- vercel-build.sh + docker-entrypoint.sh now run `prisma migrate deploy` (NOT `db push`).
+- package.json scripts updated: added db:migrate:deploy, db:migrate:status, etc. Removed db:push, db:*:pg, sync-prisma-schemas.
+- docker-compose.lite.yml: now uses postgres:16-alpine instead of SQLite.
+- VERCEL_DEPLOYMENT.md (NEW): comprehensive Supabase-focused deployment guide.
+- .env.vercel.example (NEW): Supabase-specific placeholders.
+- .env.docker.example: updated to Postgres-only.
+- tests/unit/abstractions.test.ts: 45/45 PASS (added Supabase-specific tests).
+- Tenant isolation preserved (AsyncLocalStorage + explicit tenantId filters). RLS treated as defense-in-depth ONLY.
+- Authentication unchanged (NextAuth, no Supabase Auth migration).
+- Committed 2ef3550 + cleanup 2242d33, pushed to fix/vercel-deployment.
+- PR #1 updated: mergeable=true, mergeable_state=clean, commits=3.
+- Supabase remote verification: NOT VERIFIED (no credentials in sandbox — documented).
+- Playwright e2e tests: NOT RE-RUN (need a real Postgres DB — sandbox limitation, documented).
+
+---
+Task ID: 14-realtime-fixes
+Agent: main (Senior Full-Stack Engineer — Socket.IO namespace bug + Docker authz + fail-closed verify)
+Task: Fix the Socket.IO namespace bug still present in HEAD, broken vercel-build.sh syntax, missing APP_INTERNAL_URL in Docker compose, fail-closed behavior for the verify-conversation endpoint, and CI not running all unit tests. Add a Docker cross-tenant/cross-contact conversation:join authz test.
+
+Work Log:
+- Inspected the actual current HEAD (commit c0aeb56) for each issue listed by the user.
+- Confirmed the Socket.IO namespace bug was still present in realtime-client.ts (line 21 returned '/api/realtime' on Vercel), inbox-view.tsx (line 92), widget [slug]/script (line 602), widget v1/sukhan.js (line 65 + 300).
+- Confirmed vercel-build.sh was syntactically broken (`bash -n` exited with code 2 — malformed echo with embedded newline).
+- Confirmed CI only ran tests/unit/abstractions.test.ts (missing widget-config.test.ts).
+- Confirmed docker-compose.yml + docker-compose.lite.yml had no APP_INTERNAL_URL for the realtime service (would fall back to localhost:3000, unreachable inside the realtime container).
+- Confirmed mini-services/realtime/index.ts line 328 hardcoded `http://localhost:3000` for the /internal/verify-conversation proxy.
+- Confirmed verify-conversation endpoint silently allowed visitor without contactId to fall through to a tenant-only check.
+
+Fixes applied (all on fix/vercel-deployment branch):
+- src/lib/realtime-client.ts: Refactored `resolveSocketUrl()` → `resolveSocketConfig()` returning {url, path, transports}. Vercel mode now returns `{ url: '', path: '/api/realtime/socket.io', transports: ['websocket'] }` — `io('')` connects to the page origin (Sukhan deployment) using the default namespace, Vercel's edge strips the /api/realtime prefix and routes the remaining /socket.io/ request to the WebSocket Function. Docker mode unchanged (`/?XTransformPort=3003` + path `/`).
+- src/components/dashboard/views/inbox-view.tsx: Same namespace fix — `socketUrl = isVercel ? '' : (explicit || '/?XTransformPort=3003')`, `path: isVercel || isApiRealtime ? '/api/realtime/socket.io' : '/'`. Removed the `'/api/realtime'` URL on Vercel.
+- src/app/api/widget/[slug]/script/route.ts: Added `__API_URL__` placeholder pattern. The widget now extracts the Sukhan origin from `document.currentScript.src` (split on `/api/widget/`) so it works even when embedded on a customer website with a different origin. On Vercel, the placeholder is replaced at runtime with the Sukhan origin and the path is forced to `/api/realtime/socket.io`. On Docker, the relative `/?XTransformPort=3003` is preserved (works same-origin via Caddy).
+- src/app/api/widget/v1/sukhan.js/route.ts: Same fix. The Caddy fallback (`API_URL + "/?XTransformPort=3003"`) is preserved for Docker mode but only when NOT on Vercel. On Vercel without explicit URL, the `__API_URL__` placeholder is replaced at runtime with API_URL.
+- vercel-build.sh: Rewrote the malformed echo lines. `bash -n` now passes.
+- .github/workflows/ci.yml: Added `bash -n vercel-build.sh` step (prevents broken script from re-entering CI). Changed unit-test command from `bun test tests/unit/abstractions.test.ts` to `bun test tests/unit/` (runs ALL unit tests, including widget-config.test.ts).
+- docker-compose.yml + docker-compose.lite.yml: Added `APP_INTERNAL_URL: http://app:3000` to the realtime service environment. This lets the realtime container reach the Next.js container through Docker DNS (was previously falling back to localhost:3000, unreachable inside the container).
+- mini-services/realtime/index.ts: Replaced hardcoded `http://localhost:3000` in the /internal/verify-conversation proxy with `${APP_INTERNAL_URL}`. The fallback to localhost:3000 is now ONLY in the variable declaration (dev mode where the Next.js app and realtime service share the same host).
+- src/app/api/realtime/verify-conversation/route.ts: Fail-closed behavior:
+  - Validates `type` is exactly `'agent'` or `'visitor'` — anything else returns 400 (invalid_type).
+  - Visitors without `contactId` → 400 (missing_contact_id). No silent fall-through to a tenant-only check.
+  - Visitor: filter by `tenantId` AND `contactId`.
+  - Agent: filter by `tenantId` only.
+  - Not found → 403.
+- tests/unit/widget-config.test.ts: Added 7 new unit tests covering the namespace fix, fail-closed verify-conversation behavior, Docker APP_INTERNAL_URL config, mini-service hardcoded localhost removal, and the widget __API_URL__ placeholder.
+- tests/realtime-authz.spec.ts: NEW Playwright spec with 2 tests:
+  - Agent CANNOT join cross-tenant conversation (joins own conversation as control, then tries to join another tenant's conversation — server logs `[join] REJECTED` and the socket is NOT in the room, proven by emitting typing:start and confirming no echo).
+  - Visitor CANNOT join another contact's conversation in the same tenant (same control+attack pattern).
+
+Verification:
+- bash -n vercel-build.sh: PASS (was failing before fix).
+- bun test tests/unit/: 66/66 PASS (was 38/38 — added 28 new tests).
+- bun run lint: 0 errors, 1 pre-existing warning.
+- bun run typecheck: 0 errors in app code (2 pre-existing errors in skills/ sample code, unrelated).
+- bunx next build (VERCEL=1): PASS — production build succeeds.
+- bunx playwright test tests/socketio-verify.spec.ts: PASS (delivery latency 212ms — proves real-time Socket.IO delivery, polling is 10s).
+- bunx playwright test tests/socket-race.spec.ts: PASS (agent reply received in 239ms via Socket.IO — no race).
+- bunx playwright test tests/module2.spec.ts: PASS (3/3 — two-way chat, routing rules, tenantId convention).
+- bunx playwright test tests/realtime-authz.spec.ts: PASS (2/2 — cross-tenant and cross-contact joins REJECTED with `[join] REJECTED ... (403)` server logs).
+
+Stage Summary:
+- Socket.IO namespace bug is FIXED across all four affected files (realtime-client.ts, inbox-view.tsx, [slug]/script route, v1/sukhan.js route). Vercel mode now uses `io('')` + `path: '/api/realtime/socket.io'` (default namespace) instead of `io('/api/realtime')` (which created a namespace).
+- Vercel widget deployment: now works for cross-origin embedding (script extracts Sukhan origin from its own `src` attribute).
+- vercel-build.sh: syntactically valid; CI enforces this going forward.
+- CI: runs ALL unit tests + bash -n syntax check on every PR.
+- Docker: realtime service reaches the Next.js app via `http://app:3000` (Docker DNS), no more localhost:3000 fallback inside the container.
+- verify-conversation: fail-closed (invalid type → 400, visitor without contactId → 400).
+- Realtime E2E: all 7 Playwright tests pass (module2 + socket-race + socketio-verify + realtime-authz).
+- Realtime service logs confirm: `[join] REJECTED agent → ... (403)` for cross-tenant, `[join] REJECTED visitor → ... (403)` for cross-contact.
+
+---
+Task ID: 15-authz-external-widget
+Agent: main (Senior Full-Stack Engineer — authz test correction + external-origin widget)
+Task: Correct the invalid realtime-authz test (it relied on socket.to() echo which excludes the sender), fix the slug widget REST URLs to use API_URL prefix for cross-origin embedding, add an external-origin widget regression test, and inspect Vercel build logs (if accessible).
+
+Work Log:
+- Inspected the current HEAD (commit 3079d57) and confirmed all three issues.
+- Issue 1 (authz test invalid): The test emitted `typing:start` from the MALICIOUS socket and expected it to echo back. But `socket.to(room).emit(...)` explicitly EXCLUDES the sender (per Socket.IO rooms docs), so the echo NEVER arrives regardless of whether the join was accepted. The test was passing for the WRONG reason.
+- Rewrote tests/realtime-authz.spec.ts with a corrected approach:
+  - CONTROL case: a SECOND authorized socket (same tenant) joins the target conversation. The first authorized socket emits `typing:start`. The second socket SHOULD receive the event — proves the room subscription + event broadcast works.
+  - ATTACK case: the malicious socket (cross-tenant or cross-contact) attempts to join the target conversation. The authorized socket emits `typing:start`. The malicious socket should NOT receive the event — proves its join was rejected.
+  - Both attack cases (cross-tenant + cross-contact) use this pattern.
+  - The test now has THREE sockets per case: authorized emitter, malicious listener, and control receiver. This gives a genuine positive control (the control receiver DOES get the event) and a genuine negative test (the malicious listener does NOT).
+- Issue 2 (slug widget REST URLs break on external websites): The slug widget correctly derived API_URL for Socket.IO but still used RELATIVE URLs for config/contact/messages/csat REST endpoints. On a customer's website, these would resolve to the customer's origin (wrong server).
+  - Fixed src/app/api/widget/[slug]/script/route.ts:
+    - CONFIG_URL, CONTACT_URL, MESSAGES_URL now use `API_URL + "/api/widget/..."` prefix.
+    - Added CSAT_URL variable (was previously a hardcoded relative fetch).
+    - SOCKET_URL in Docker mode now uses the runtime JavaScript expression `API_URL + "/?XTransformPort=3003"` (absolute URL) instead of the relative JSON string `"/?XTransformPort=3003"` — consistent with the v1 widget, and works for cross-origin embedding.
+- Added tests/widget-external-origin.spec.ts (NEW): regression test that embeds the slug widget on a simulated customer website (real HTTP server on port 8082, different origin from the Sukhan app on port 81). Verifies ALL widget traffic — REST (config, contact) + realtime (socket.io.min.js + WebSocket handshake) — points to the Sukhan origin, NOT the customer's origin. The test embeds the customer HTTP server in beforeAll/afterAll (self-contained, no external dependencies).
+- Fixed a pre-existing strict-mode violation in tests/module2.spec.ts: the test's `getByText('سلام، کمک می‌خوام')` matched BOTH the conversation-list preview AND the thread message. Added `.first()` to disambiguate. (The test was fragile — my changes to the slug widget's socket URL timing exposed the pre-existing issue.)
+- Added 2 new unit tests to tests/unit/widget-config.test.ts:
+  - "slug widget REST URLs are prefixed with API_URL (cross-origin support)"
+  - "slug widget Docker-mode SOCKET_URL uses API_URL prefix (cross-origin support)"
+- Issue 3 (Vercel deployment failure): The Vercel deployment for commit 3079d57 failed (status: "failure" via GitHub statuses API). The deployment URL is https://vercel.com/nxerfan/sokhan/GjdSFK9tgjF2wAQf1qnRt6HDjC5R. Attempted to access the build logs via the Vercel API (https://api.vercel.com/v13/deployments/dpl_GjdSFK9tgjF2wAQf1qnRt6HD) — returns 403 "The request is missing an authentication token". No Vercel access token is available in the sandbox. Per the user's instructions ("If you do not have access, make no speculative Vercel code changes and report that the logs are unavailable"), I made NO speculative Vercel code changes.
+
+Verification:
+- bun test tests/unit/: 68/68 PASS (added 2 new tests for slug widget API_URL prefixing).
+- bun run lint: 0 errors, 1 pre-existing warning.
+- bun run typecheck: 0 errors in app code (2 pre-existing errors in skills/ sample code, unrelated).
+- bunx next build (VERCEL=1): PASS.
+- bunx playwright test tests/realtime-authz.spec.ts: PASS 2/2 — both corrected authz tests pass. Realtime log confirms: `[join] REJECTED agent → ... (403)` and `[join] REJECTED visitor → ... (403)`. The control receiver DOES receive the typing event (proves room subscription works), and the malicious listener does NOT (proves join was rejected).
+- bunx playwright test tests/widget-external-origin.spec.ts: PASS — all widget REST + realtime traffic points to the Sukhan origin (http://127.0.0.1:81), NOT the customer origin (http://127.0.0.1:8082). Captured requests: config fetch, contact fetch, socket.io.min.js script load, and WebSocket handshake — ALL on the Sukhan origin.
+- bunx playwright test tests/socketio-verify.spec.ts: PASS — 472ms delivery (proves Socket.IO, polling is 10s).
+- bunx playwright test tests/socket-race.spec.ts: PASS — agent reply received in 360ms via Socket.IO.
+- bunx playwright test tests/module2.spec.ts: PASS 3/3 (after strict-mode fix).
+- All 8 E2E tests pass.
+
+Stage Summary:
+- The realtime-authz test is now VALID: it uses a second authorized socket as the event receiver, so the control case genuinely proves room subscription works, and the attack case genuinely proves the malicious socket's join was rejected.
+- The slug widget now works on external websites: all REST endpoints (config, contact, messages, csat) and the Socket.IO connection use the Sukhan origin (extracted from the script's own src attribute), NOT the customer's page origin.
+- The external-origin widget regression test is self-contained (embeds its own HTTP server) and verifies all widget traffic points to the Sukhan origin.
+- Vercel deployment status: STILL FAILING (deployment GjdSFK9tgjF2wAQf1qnRt6HDjC5R). Build logs NOT accessible (no Vercel API token in the sandbox). No speculative Vercel code changes made.
+
+---
+Task ID: final-verification
+Agent: main
+Task: addTrailingSlash: false fix + Vercel WebSocket verification
+
+Work Log:
+- Added addTrailingSlash: false to all Vercel Socket.IO clients and server
+- Fixed Vercel transports to use isVercel flag (not URL check)
+- Added regression tests for addTrailingSlash: false and websocket-only transports
+- Deployed to Vercel Preview
+- Verified WebSocket connection: CONNECTED with valid token, TRANSPORT websocket
+- Verified invalid auth rejection: CONNECT_ERROR invalid_token
+- my-project Vercel project deleted (again)
+- Redis NOT configured (no Upstash integration on Vercel project)
+- DIRECT_URL only set for Production (Preview still missing)
+
+Stage Summary:
+- WebSocket connection: PASS (transport: websocket, no 308 redirect)
+- Auth: PASS (valid connects, invalid rejected)
+- Redis: NOT CONFIGURED (message delivery E2E blocked)
+- DIRECT_URL Preview: NOT CONFIGURED
+- my-project: deleted (need to verify on new commit)

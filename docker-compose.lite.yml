@@ -1,26 +1,38 @@
 # ============================================================
 # Sukhan Live Chat SaaS — Lite Docker Compose
 # ============================================================
-# Includes: Next.js app (SQLite), realtime service (in-memory), Caddy.
-# No Postgres, no Redis — for small VPS / single-user deployments.
+# Includes: Next.js app + Postgres (small) + realtime service (in-memory) +
+# Caddy. No Redis.
 #
-# Usage:
-#   1. Copy .env.docker.example to .env and fill in values.
-#   2. docker compose -f docker-compose.lite.yml up -d
+# Standardized on PostgreSQL across all editions. The "Lite" vs "Full"
+# distinction is now Redis/no-Redis + resource sizing, NOT the database
+# engine (both editions use Postgres).
 #
 # Required env (in .env):
-#   - NEXTAUTH_SECRET  (generate with: openssl rand -base64 32)
-#
-# Lite vs Full:
-#   - Database: SQLite file (in a volume) instead of Postgres
-#   - Realtime adapter: in-memory (single instance — no horizontal scaling)
-#   - Resource usage: ~512MB RAM (vs ~1GB for full)
-#   - Backup: copy the SQLite file (vs pg_dump + uploads)
-#
-# Migrating to Full: see SELF_HOSTING.md → "Lite vs Full" section.
+#   - NEXTAUTH_SECRET     (generate with: openssl rand -base64 32)
+#   - POSTGRES_PASSWORD   (a strong password for the local Postgres)
 # ============================================================
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: sukhan-postgres-lite
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sukhan}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (set a strong password)}
+      POSTGRES_DB: ${POSTGRES_DB:-sukhan}
+    volumes:
+      - postgres-data-lite:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sukhan} -d ${POSTGRES_DB:-sukhan}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - sukhan
+
   app:
     build:
       context: .
@@ -30,22 +42,22 @@ services:
     restart: unless-stopped
     command: ["web"]
     environment:
-      # Fail-fast: ${VAR:?error} makes docker-compose refuse to start if unset.
       NEXTAUTH_SECRET: '${NEXTAUTH_SECRET:?NEXTAUTH_SECRET is required (generate with: openssl rand -base64 32)}'
       NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost}
-      # SQLite — file lives in the sqlite-data volume for persistence.
-      DATABASE_URL: file:/app/data/sukhan.db
-      # No REDIS_URL — realtime uses the in-memory adapter (single instance).
+      DATABASE_URL: postgresql://${POSTGRES_USER:-sukhan}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-sukhan}?schema=public
+      DIRECT_URL: postgresql://${POSTGRES_USER:-sukhan}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-sukhan}?schema=public
       REALTIME_INTERNAL_URL: http://realtime:3004
       ZARINPAL_MERCHANT_ID: ${ZARINPAL_MERCHANT_ID:-}
       IDPAY_API_KEY: ${IDPAY_API_KEY:-}
       NEXT_PUBLIC_APP_NAME: ${NEXT_PUBLIC_APP_NAME:-Sukhan}
     volumes:
-      - sqlite-data:/app/data
       - uploads:/app/uploads
       - logs:/app/logs
     depends_on:
-      - realtime
+      postgres:
+        condition: service_healthy
+      realtime:
+        condition: service_started
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api"]
       interval: 30s
@@ -62,7 +74,12 @@ services:
     command: ["realtime"]
     environment:
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?NEXTAUTH_SECRET is required}
-      # No REDIS_URL — uses the in-memory adapter. Single instance only.
+      # Internal URL of the Next.js app — used by the realtime service to
+      # verify conversation ownership via the app's /api/realtime/verify-conversation
+      # endpoint. In Docker Compose, the Next.js service is named 'app'.
+      # Without this, the realtime service would fall back to localhost:3000,
+      # which is unreachable from inside the realtime container.
+      APP_INTERNAL_URL: http://app:3000
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:3004/health"]
       interval: 30s
@@ -84,8 +101,6 @@ services:
       - caddy-data:/data
       - caddy-config:/config
     environment:
-      # If DOMAIN is empty/unset in .env, default to ":80" (HTTP-only).
-      # When set to a real domain (e.g. chat.example.com), Caddy auto-provisions HTTPS.
       DOMAIN: ${DOMAIN:-:80}
       ACME_EMAIL: ${ACME_EMAIL:-admin@example.com}
     depends_on:
@@ -101,7 +116,7 @@ services:
       - sukhan
 
 volumes:
-  sqlite-data:
+  postgres-data-lite:
   uploads:
   logs:
   caddy-data:

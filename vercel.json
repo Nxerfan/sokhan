@@ -1,0 +1,15 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "installCommand": "bash vercel-install.sh",
+  "framework": "nextjs",
+  "fluid": true,
+  "github": { "silent": true },
+  "regions": ["iad1"],
+  "routes": [
+    { "src": "^/api/realtime$", "dest": "/api/realtime", "important": true },
+    { "src": "^/api/realtime/(.*)$", "dest": "/api/realtime", "important": true }
+  ],
+  "functions": {
+    "api/realtime.ts": { "maxDuration": 300 }
+  }
+}

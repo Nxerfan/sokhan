@@ -1,15 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { withSessionTenant, hasRole } from '@/lib/auth'
-import { writeFile, mkdir } from 'fs/promises'
+import { getStorage } from '@/lib/storage'
 import path from 'path'
-import crypto from 'crypto'
 
 /**
- * File attachment upload. Stores files locally in /public/uploads/ for the
- * sandbox. In production, this would use S3/MinIO via the object storage layer.
+ * File attachment upload.
  *
- * Accepts multipart form data with a single 'file' field.
- * Returns the public URL of the stored file.
+ * Uses the storage abstraction (`src/lib/storage/index.ts`) so the same
+ * route works in:
+ *   - docker/dev (LocalStorageAdapter → writes to public/uploads/)
+ *   - vercel     (VercelBlobStorageAdapter → uploads to Vercel Blob)
+ *
+ * Authorization: only agents/admins/managers can upload. Visitors use
+ * the public /api/widget/[slug]/upload endpoint instead (separate route,
+ * separate authorization, scoped to the visitor's own conversation).
+ *
+ * Validation: file size (10MB max) and a MIME-type + extension whitelist
+ * that explicitly rejects HTML/SVG/JS (which could execute when served).
  */
 export async function POST(req: NextRequest) {
   const result = await withSessionTenant(async ({ session }) => {
@@ -44,20 +51,23 @@ export async function POST(req: NextRequest) {
       return { error: 'file_type_not_allowed' as const }
     }
 
-    // Generate a unique filename (extension already validated)
-    const filename = `${crypto.randomUUID()}${ext}`
-    const uploadDir = path.join(process.cwd(), 'public', 'uploads')
-    await mkdir(uploadDir, { recursive: true })
+    // Read bytes once — the storage adapter handles the rest.
+    const bytes = new Uint8Array(await file.arrayBuffer())
 
-    // Write the file
-    const bytes = await file.arrayBuffer()
-    await writeFile(path.join(uploadDir, filename), Buffer.from(bytes))
+    // Use the storage abstraction. The tenantId namespaces the key so a
+    // single bucket can host multiple tenants without collisions.
+    const storage = getStorage()
+    const stored = await storage.put({
+      tenantId: session.user.workspaceId,
+      filename: file.name,
+      bytes,
+      contentType: file.type,
+    })
 
     const isImage = file.type.startsWith('image/')
-    const url = `/uploads/${filename}`
 
     return {
-      url,
+      url: stored.url,
       type: isImage ? 'image' : 'file',
       name: file.name,
       size: file.size,

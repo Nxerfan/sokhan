@@ -16,8 +16,8 @@ import { test, expect, type Page } from '@playwright/test'
  * polling standing in for it?"
  */
 
-const BASE = 'http://localhost:81'
-const DASHBOARD = 'http://localhost:81'  // Use Caddy for Socket.IO access
+const BASE = 'http://127.0.0.1:81'
+const DASHBOARD = 'http://127.0.0.1:81'  // Use Caddy for Socket.IO access
 
 function creds() {
   const stamp = `${process.pid}-${Date.now()}-socketio`

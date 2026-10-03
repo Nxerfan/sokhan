@@ -60,6 +60,13 @@ export function InboxView() {
   const [connected, setConnected] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  // Ref to the currently-selected conversation, so socket reconnect handlers
+  // (registered once at mount) can read the latest value without re-running
+  // the effect.
+  const selectedIdRef = useRef<string | null>(null)
+  useEffect(() => {
+    selectedIdRef.current = selectedId
+  }, [selectedId])
 
   // Load conversation list
   const loadConversations = useCallback(async () => {
@@ -82,15 +89,36 @@ export function InboxView() {
         const tokenRes = await fetch('/api/realtime-token')
         if (!tokenRes.ok) return
         const { token } = await tokenRes.json()
-        const s = io('/?XTransformPort=3003', {
-          path: '/',
+        // CRITICAL: passing '/api/realtime' as the URL to io() makes Socket.IO
+        // treat it as a NAMESPACE, not a path. On Vercel we pass an empty URL
+        // (default namespace) and route via path: '/api/realtime' which
+        // Vercel forwards to the root-level api/realtime.ts function.
+        // Transports: websocket-only on Vercel (no polling fallback).
+        const isVercel = process.env.NEXT_PUBLIC_VERCEL === '1' || process.env.VERCEL === '1'
+        const explicit = process.env.NEXT_PUBLIC_REALTIME_URL
+        const socketUrl = isVercel ? '' : (explicit || '/?XTransformPort=3003')
+        const isApiRealtime = socketUrl.includes('/api/realtime')
+        const s = io(socketUrl, {
+          path: isVercel || isApiRealtime ? '/api/realtime' : '/',
+          addTrailingSlash: false,
           auth: { token },
-          transports: ['websocket', 'polling'],
+          transports: isVercel || isApiRealtime ? ['websocket'] : ['websocket', 'polling'],
           reconnection: true,
         })
         if (!active) { s.disconnect(); return }
         s.on('connect', () => setConnected(true))
         s.on('disconnect', () => setConnected(false))
+        // CRITICAL: on reconnect, re-join the currently open conversation so
+        // we keep receiving its messages. The server's room state is lost
+        // when the socket disconnects, so re-joining is required.
+        // We use a ref because this handler is registered once (on mount)
+        // but selectedId changes over time without re-mounting the effect.
+        s.io.on('reconnect', () => {
+          const conv = selectedIdRef.current
+          if (conv) {
+            s.emit('conversation:join', conv)
+          }
+        })
         // New conversation arrives
         s.on(RT_EVENTS.CONVERSATION_NEW, () => loadConversations())
         // Conversation updated (assignment/status change)

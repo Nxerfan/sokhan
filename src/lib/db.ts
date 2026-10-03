@@ -1,17 +1,28 @@
 import { PrismaClient, type Prisma } from '@prisma/client'
+import { AsyncLocalStorage } from 'node:async_hooks'
 
 /**
  * Tenant isolation layer.
  *
- * Sandbox constraint: SQLite (no native RLS). We enforce tenant_id scoping in
- * the application via a Prisma client extension that:
- *   - injects `where: { tenantId }` on reads of tenant-scoped models,
- *   - injects `data: { tenantId }` on creates,
- *   - strips cross-tenant rows silently from results.
+ * PostgreSQL is the official database across all deployment modes
+ * (Neon cloud, Docker Full, Docker Lite, local dev). The Prisma
+ * client extension below is the PRIMARY tenant-isolation boundary:
+ *   - auto-injects `where: { tenantId }` on reads of tenant-scoped models,
+ *   - auto-injects `data: { tenantId }` on creates,
+ *   - strips cross-tenant rows from results.
  *
- * The cloud Postgres deployment layers Row-Level Security *underneath* this
- * same client, so the application contract is identical and the extension
- * becomes a defense-in-depth check rather than the sole boundary.
+ * PostgreSQL Row-Level Security is treated as DEFENSE-IN-DEPTH ONLY.
+ * Prisma's privileged server-side database connection (which may use a
+ * dedicated Prisma role) MAY bypass RLS policies depending on the
+ * configured role. Therefore:
+ *   - NEVER weaken the application-layer tenant filtering here.
+ *   - NEVER assume that "RLS is enabled" means tenant isolation is
+ *     guaranteed. The extension below is the authoritative boundary.
+ *
+ * The application contract is identical across modes: the extension
+ * auto-injects `where: { tenantId }` on reads and `data: { tenantId }` on
+ * creates for tenant-scoped models, and strips cross-tenant rows from
+ * results.
  *
  * Tenant-scoped models (must declare here):
  *
@@ -23,6 +34,7 @@ import { PrismaClient, type Prisma } from '@prisma/client'
  * Module 2 models: Contact, Conversation, Message, Participant, RoutingRule
  * Module 3 models: Subscription, Invoice (Plan is global — NOT tenant-scoped)
  * Module 4 models: FaqPair, Product, AiConfig, ConnectorConfig
+ * Module 6 models: WidgetDomain
  */
 const TENANT_SCOPED_MODELS = [
   'Membership',
@@ -45,35 +57,51 @@ const TENANT_SCOPED_MODELS = [
 
 type TenantScopedModel = (typeof TENANT_SCOPED_MODELS)[number]
 
-const globalForPrisma = globalThis as unknown as {
-  prisma: PrismaClient | undefined
-  /** Active tenant id for the current async context (set by withTenant). */
-  __currentTenantId?: string
-}
+/* ------------------------------------------------------------------ */
+/* Per-request tenant context via AsyncLocalStorage                  */
+/* ------------------------------------------------------------------ */
+//
+// CRITICAL: the previous implementation used a single mutable global variable
+// (`globalForPrisma.__currentTenantId`). Under concurrent async requests
+// (e.g., two API routes running in the same Node process — common in dev
+// and in Docker, possible even on Vercel when a warm instance handles
+// back-to-back requests), the second request's `withTenant(tenantIdB)`
+// would overwrite the first request's `__currentTenantId` while the first
+// was still awaiting I/O. The result: cross-tenant data leaks.
+//
+// `AsyncLocalStorage` correctly tracks context per async execution
+// chain — each request gets its own context that does not leak across
+// concurrent awaits, even within the same process.
+const tenantContext = new AsyncLocalStorage<string>()
 
 function currentTenantId(): string | undefined {
-  return globalForPrisma.__currentTenantId
+  return tenantContext.getStore()
 }
 
 /**
  * Run a block of DB work scoped to a tenant. All Prisma calls inside that
  * touch tenant-scoped models are automatically filtered/injected.
+ *
+ * Concurrent calls to `withTenant` with different tenant IDs in the same
+ * process are isolated via AsyncLocalStorage — no leaks.
  */
 export async function withTenant<T>(
   tenantId: string,
   fn: () => Promise<T>,
 ): Promise<T> {
-  const prev = globalForPrisma.__currentTenantId
-  globalForPrisma.__currentTenantId = tenantId
-  try {
-    return await fn()
-  } finally {
-    globalForPrisma.__currentTenantId = prev
-  }
+  return tenantContext.run(tenantId, fn)
 }
 
 export function getCurrentTenantId(): string | undefined {
   return currentTenantId()
+}
+
+/* ------------------------------------------------------------------ */
+/* Prisma client with tenant-scoping extension                       */
+/* ------------------------------------------------------------------ */
+
+const globalForPrisma = globalThis as unknown as {
+  prisma: PrismaClient | undefined
 }
 
 function buildTenantScopedClient() {
@@ -131,6 +159,10 @@ function buildTenantScopedClient() {
 export const db = (globalForPrisma.prisma ?? buildTenantScopedClient()) as PrismaClient
 
 if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = db
+
+/* ------------------------------------------------------------------ */
+/* Role helpers (kept here for backwards-compat — also in auth.ts)    */
+/* ------------------------------------------------------------------ */
 
 /** Roles, in descending privilege order. */
 export const ROLE_RANK: Record<string, number> = {

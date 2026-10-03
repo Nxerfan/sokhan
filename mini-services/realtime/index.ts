@@ -87,9 +87,10 @@ if (!process.env.NEXTAUTH_SECRET) {
   }
 }
 const SECRET = process.env.NEXTAUTH_SECRET
+const APP_INTERNAL_URL = process.env.APP_INTERNAL_URL || 'http://localhost:3000'
 const REDIS_URL = process.env.REDIS_URL
 
-console.log('[secret] using NEXTAUTH_SECRET:', SECRET.slice(0, 8) + '...')
+// NEXTAUTH_SECRET is used for token verification — never log it.
 if (REDIS_URL) {
   console.log('[redis] REDIS_URL set — will enable adapter + pub/sub subscription')
 } else {
@@ -162,15 +163,38 @@ io.on('connection', (socket: AuthenticatedSocket) => {
   const payload = socket.payload!
   console.log(`[connect] type=${payload.type} id=${socket.id}`)
 
-  socket.join(`tenant:${payload.tenantId}`)
-
+  // Only agents join the tenant-wide room.
+  // Visitors only receive events for their own conversation.
   if (payload.type === 'agent') {
+    socket.join(`tenant:${payload.tenantId}`)
     socket.join(`agent:${payload.userId}`)
   }
 
-  socket.on('conversation:join', (conversationId: string) => {
-    socket.join(`conversation:${conversationId}`)
-    console.log(`[join] ${payload.type} → conversation:${conversationId}`)
+  socket.on('conversation:join', async (conversationId: string) => {
+    // Verify conversation ownership via the Next.js app's verify-conversation endpoint.
+    // Agents: must match tenant. Visitors: must match tenant AND contactId.
+    // In Docker Compose, the Next.js service is 'app' (not localhost).
+    try {
+      const params = new URLSearchParams({
+        conversationId,
+        tenantId: payload.tenantId,
+        type: payload.type,
+        contactId: payload.type === 'visitor' ? payload.contactId : '',
+        userId: payload.type === 'agent' ? payload.userId : '',
+      })
+      const verifyUrl = `${APP_INTERNAL_URL}/api/realtime/verify-conversation?${params}`
+      const res = await fetch(verifyUrl, {
+        headers: { 'X-Internal-Secret': SECRET },
+      })
+      if (res.ok) {
+        socket.join(`conversation:${conversationId}`)
+        console.log(`[join] ${payload.type} → conversation:${conversationId}`)
+      } else {
+        console.log(`[join] REJECTED ${payload.type} → conversation:${conversationId} (${res.status})`)
+      }
+    } catch (e) {
+      console.error('[join] verify error:', e instanceof Error ? e.message : e)
+    }
   })
 
   socket.on('conversation:leave', (conversationId: string) => {
@@ -178,6 +202,7 @@ io.on('connection', (socket: AuthenticatedSocket) => {
   })
 
   socket.on('typing:start', (data: { conversationId: string }) => {
+    if (!socket.rooms.has(`conversation:${data.conversationId}`)) return
     socket.to(`conversation:${data.conversationId}`).emit('typing:start', {
       conversationId: data.conversationId,
       senderType: payload.type,
@@ -186,6 +211,7 @@ io.on('connection', (socket: AuthenticatedSocket) => {
   })
 
   socket.on('typing:stop', (data: { conversationId: string }) => {
+    if (!socket.rooms.has(`conversation:${data.conversationId}`)) return
     socket.to(`conversation:${data.conversationId}`).emit('typing:stop', {
       conversationId: data.conversationId,
       senderType: payload.type,
@@ -193,6 +219,7 @@ io.on('connection', (socket: AuthenticatedSocket) => {
   })
 
   socket.on('message:read', (data: { conversationId: string }) => {
+    if (!socket.rooms.has(`conversation:${data.conversationId}`)) return
     socket.to(`conversation:${data.conversationId}`).emit('message:read', {
       conversationId: data.conversationId,
       readerType: payload.type,
@@ -224,7 +251,7 @@ io.on('connection', (socket: AuthenticatedSocket) => {
 // Each realtime instance receives the Redis publish and emits to its own
 // local sockets. The HTTP endpoint, by contrast, uses `io.to(room).emit(...)`
 // (with adapter fan-out) so a single HTTP POST reaches all instances' sockets.
-const PUBLISH_CHANNEL = 'sukhan:realtime:publish'
+const PUBLISH_CHANNEL = process.env.REDIS_CHANNEL || 'sukhan:realtime:publish'
 let redisEnabled = false
 
 async function setupRedis() {
@@ -283,10 +310,29 @@ async function setupRedis() {
 // ============================================================
 // Internal HTTP server (port 3004 — server-to-server only)
 // ============================================================
-const internalServer = createServer((req: IncomingMessage, res: ServerResponse) => {
+const internalServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
   if (req.method === 'GET' && req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ ok: true, connections: io.engine.clientsCount, redis: redisEnabled }))
+    return
+  }
+
+  if (req.method === 'GET' && req.url?.startsWith('/internal/verify-conversation')) {
+    // Proxy to the Next.js app for DB-backed verification
+    const authHeader = req.headers['x-internal-secret']
+    if (authHeader !== SECRET) {
+      res.writeHead(403); res.end('forbidden'); return
+    }
+    // Forward to Next.js app via APP_INTERNAL_URL (Docker: http://app:3000).
+    // The fallback to localhost:3000 only applies in dev where the Next.js
+    // app and the realtime service share the same host.
+    try {
+      const nextUrl = `${APP_INTERNAL_URL}/api/realtime/verify-conversation${req.url.replace('/internal/verify-conversation', '')}`
+      const nextRes = await fetch(nextUrl, { headers: { 'X-Internal-Secret': SECRET } })
+      res.writeHead(nextRes.status); res.end(await nextRes.text())
+    } catch (e) {
+      res.writeHead(500); res.end('error')
+    }
     return
   }
 

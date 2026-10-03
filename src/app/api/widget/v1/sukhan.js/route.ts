@@ -34,7 +34,32 @@ import { normalizeApiKey } from '@/lib/widget/widget-utils'
  *     the contract is forward-compatible).
  */
 
-function buildScript(): string {
+function buildScript(socketUrlOverride: string | null, isVercel: boolean): string {
+  // When isVercel is true and no explicit override is set, the script resolves
+  // SOCKET_URL at runtime from the Sukhan origin (API_URL). The placeholder
+  // "__API_URL__" is baked-in server-side and the script replaces it at runtime.
+  //
+  // The baked SOCKET_URL value can be one of THREE things:
+  //   1. The literal placeholder string "__API_URL__" (Vercel, no override) —
+  //      the script replaces this with API_URL at runtime.
+  //   2. A JSON-stringified absolute URL (when NEXT_PUBLIC_REALTIME_URL is set).
+  //   3. The raw JavaScript expression `API_URL + "/?XTransformPort=3003"`
+  //      (Docker/dev, no override) — NOT a JSON string, this is live JS code
+  //      that builds the Caddy URL at runtime.
+  const vercelPlaceholder = '__API_URL__'
+  // Determine the literal text that goes between `var SOCKET_URL = ` and `;`.
+  let bakedSocketUrlExpr: string
+  if (isVercel && !socketUrlOverride) {
+    bakedSocketUrlExpr = JSON.stringify(vercelPlaceholder)
+  } else if (socketUrlOverride) {
+    bakedSocketUrlExpr = JSON.stringify(socketUrlOverride)
+  } else {
+    // Docker/dev default — bake the raw JavaScript expression (NOT a JSON
+    // string). This is the original behaviour: the expression is evaluated
+    // at runtime in the browser.
+    bakedSocketUrlExpr = 'API_URL + "/?XTransformPort=3003"'
+  }
+  const forceVercelPath = isVercel && !socketUrlOverride
   return `(function(){
   "use strict";
 
@@ -59,7 +84,27 @@ function buildScript(): string {
   var MESSAGES_URL = API_URL + "/api/widget/" + SLUG + "/messages";
   var CSAT_URL = API_URL + "/api/widget/" + SLUG + "/csat";
   var SOCKET_IO_JS = API_URL + "/socket.io.min.js";
-  var SOCKET_URL = API_URL + "/?XTransformPort=3003";
+  // SOCKET_URL is resolved server-side and baked in.
+  //   - docker/dev (no env, VERCEL!=1) → API_URL + "/?XTransformPort=3003"
+  //     (Caddy reverse-proxies to the realtime service on port 3003).
+  //   - vercel (VERCEL=1, no NEXT_PUBLIC_REALTIME_URL) → the placeholder
+  //     "__API_URL__", replaced at runtime with the Sukhan origin. We must
+  //     NOT bake "/api/realtime" — passing it to io() as the URL creates a
+  //     NAMESPACE, not a path, and silently breaks on Vercel. Connecting
+  //     to the Sukhan origin with path /api/realtime lets
+  //     Vercel's edge route the WebSocket request to the Function.
+  //   - explicit (NEXT_PUBLIC_REALTIME_URL set) → that absolute URL.
+  var SOCKET_URL = ${bakedSocketUrlExpr};
+  if (SOCKET_URL === ${JSON.stringify(vercelPlaceholder)}) {
+    SOCKET_URL = API_URL;
+  }
+  var SOCKET_PATH = SOCKET_URL.indexOf("/api/realtime") >= 0 ? "/api/realtime" : "/";
+  // On Vercel, SOCKET_URL is API_URL (just an origin — no /api/realtime
+  // substring), so SOCKET_PATH defaults to "/". Force it to the Vercel
+  // WebSocket Function path.
+  if (${forceVercelPath ? 'true' : 'false'} && SOCKET_PATH === '/') {
+    SOCKET_PATH = "/api/realtime";
+  }
 
   var state = {
     open: false,
@@ -294,9 +339,10 @@ function buildScript(): string {
     loadSocketIO(function(){
       if (state.socket) return;
       state.socket = window.io(SOCKET_URL, {
-        path: '/',
+        path: SOCKET_PATH,
+        addTrailingSlash: false,
         auth: { token: state.token },
-        transports: ['websocket', 'polling'],
+        transports: (${forceVercelPath ? "true" : "false"} || SOCKET_PATH.indexOf("/api/realtime") >= 0) ? ["websocket"] : ["websocket", "polling"],
         reconnection: true,
       });
       state.socket.on('connect', function(){
@@ -551,7 +597,15 @@ function buildScript(): string {
  *     fallback when `data-api-key` is missing. Useful for testing.
  */
 export async function GET(_req: Request): Promise<Response> {
-  const script = buildScript()
+  // Resolve the public Socket.IO URL the widget will connect to.
+  //   - explicit (NEXT_PUBLIC_REALTIME_URL set) → that absolute URL.
+  //   - vercel (VERCEL=1, no explicit URL) → use the Sukhan origin at
+  //     runtime (the script's __API_URL__ placeholder is replaced with
+  //     API_URL extracted from the script's own src).
+  //   - docker/dev (default) → API_URL + "/?XTransformPort=3003" (Caddy).
+  const socketUrlOverride = process.env.NEXT_PUBLIC_REALTIME_URL || null
+  const isVercel = process.env.VERCEL === '1'
+  const script = buildScript(socketUrlOverride, isVercel)
   return new Response(script, {
     headers: {
       'Content-Type': 'application/javascript; charset=utf-8',

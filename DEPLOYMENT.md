@@ -46,9 +46,11 @@ docker compose version    # Docker Compose v2+
 
 ---
 
-## Deployment — Lite Edition (SQLite, no Redis)
+## Deployment — Lite Edition (PostgreSQL, no Redis)
 
 Best for: small VPS, single-tenant, testing, low traffic.
+
+**Note**: The Lite edition now uses a small `postgres:16-alpine` container instead of SQLite. Both Lite and Full editions use PostgreSQL — the distinction is now Redis/no-Redis + resource sizing.
 
 ### Step 1: Get the code
 
@@ -69,6 +71,9 @@ Set these required values:
 ```bash
 # REQUIRED — generate with: openssl rand -base64 32
 NEXTAUTH_SECRET=<paste the generated value here>
+
+# REQUIRED — strong password for the local Postgres container
+POSTGRES_PASSWORD=<paste a strong password here>
 
 # For OTP email verification (required for signup)
 NIXIFY_API_KEY=<your-nixify-api-key>
@@ -91,8 +96,8 @@ docker compose -f docker-compose.lite.yml up -d --build
 
 This will:
 1. Build the Docker image (Next.js standalone + realtime service)
-2. Start three containers: app (Next.js), realtime (Socket.IO), caddy (reverse proxy)
-3. Apply the database schema automatically (Prisma `db push` at startup)
+2. Start four containers: postgres (PostgreSQL 16), app (Next.js), realtime (Socket.IO), caddy (reverse proxy)
+3. Apply Prisma migrations automatically (`prisma migrate deploy` at startup — production-safe, no `db push`)
 
 ### Step 4: Verify
 
@@ -199,12 +204,13 @@ docker compose -f docker-compose.lite.yml down
 
 ### Backup
 
-#### Lite edition (SQLite)
+#### Lite edition (PostgreSQL)
 
 ```bash
-# The SQLite database is in a Docker volume named sukhan_sqlite-data
-docker compose -f docker-compose.lite.yml exec app cp /app/data/sukhan.db /app/uploads/sukhan-backup.db
-docker cp sukhan-app-lite:/app/uploads/sukhan-backup.db ./sukhan-backup-$(date +%Y%m%d).db
+# Back up the Postgres database using pg_dump.
+docker compose -f docker-compose.lite.yml exec postgres \
+  pg_dump -U sukhan -d sukhan -F c -f /tmp/sukhan-backup.dump
+docker cp sukhan-postgres-lite:/tmp/sukhan-backup.dump ./sukhan-backup-$(date +%Y%m%d).dump
 ```
 
 #### Full edition (PostgreSQL)
@@ -218,8 +224,10 @@ docker compose exec postgres pg_dump -U sukhan sukhan > backup-$(date +%Y%m%d).s
 #### Lite edition
 
 ```bash
-docker cp ./sukhan-backup-20240101.db sukhan-app-lite:/app/data/sukhan.db
-docker compose -f docker-compose.lite.yml restart app
+# Copy the dump into the Postgres container and restore it.
+docker cp ./sukhan-backup.dump sukhan-postgres-lite:/tmp/sukhan-backup.dump
+docker compose -f docker-compose.lite.yml exec postgres \
+  pg_restore -U sukhan -d sukhan --clean --if-exists /tmp/sukhan-backup.dump
 ```
 
 #### Full edition
@@ -290,7 +298,7 @@ docker compose logs realtime
 ```bash
 # Lite: reset the database (WARNING: loses all data)
 docker compose -f docker-compose.lite.yml down
-docker volume rm sukhan_sqlite-data
+docker volume rm sukhan_postgres-data-lite
 docker compose -f docker-compose.lite.yml up -d --build
 
 # Full: check PostgreSQL logs
@@ -330,6 +338,24 @@ docker compose logs postgres
 | `docker compose down` | Stop all services |
 | `docker compose restart app` | Restart just the app |
 | `git pull && docker compose up -d --build` | Update to latest version |
+
+---
+
+## Vercel Deployment (Neon PostgreSQL)
+
+Sukhan also runs on Vercel (serverless) — see `VERCEL_DEPLOYMENT.md` for the complete setup guide.
+
+**Official cloud database: Neon PostgreSQL** (pooled + direct connections). Other Postgres providers are NOT supported by the Vercel deployment path.
+
+Architecture summary:
+- Next.js → Vercel serverless functions
+- PostgreSQL → Neon (pooled DATABASE_URL + direct DIRECT_URL)
+- Migrations → prisma migrate deploy at Vercel build time (NOT db push)
+- Realtime → Vercel-native Socket.IO Function (api/realtime.ts) + Redis pub/sub
+- Attachments → Vercel Blob
+- Authentication → NextAuth (unchanged)
+
+The Vercel deployment mode is INDEPENDENT of Docker — they share the same canonical PostgreSQL Prisma schema and the same Prisma migrations.
 
 ---
 
