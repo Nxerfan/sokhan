@@ -77,6 +77,16 @@ test('expired token is rejected', () => {
   expect(verifyToken(token, SECRET)).toBeNull()
 })
 
+test('token with exp == now (boundary) is rejected', () => {
+  // A token whose exp equals the current epoch second must be treated as expired.
+  const now = Math.floor(Date.now() / 1000)
+  const fullPayload = { type: 'agent', userId: 'u1', tenantId: 't1', role: 'agent', iat: now - 60, exp: now }
+  const encoded = Buffer.from(JSON.stringify(fullPayload)).toString('base64url')
+  const sig = crypto.createHmac('sha256', SECRET).update(encoded).digest('base64url')
+  const result = verifyToken(`${encoded}.${sig}`, SECRET)
+  expect(result).toBeNull()
+})
+
 test('future iat is rejected', () => {
   const token = makeFutureIatToken({ type: 'agent', userId: 'u1', tenantId: 't1', role: 'agent' }, SECRET)
   expect(verifyToken(token, SECRET)).toBeNull()
@@ -143,8 +153,8 @@ test('visitor token verifies successfully', () => {
   const token = signToken({ type: 'visitor', contactId: 'c1', tenantId: 't1', slug: 'test-slug' }, SECRET)
   const payload = verifyToken(token, SECRET)
   expect(payload).not.toBeNull()
-  expect(payload!.type).toBe('visitor')
-  if (payload!.type === 'visitor') {
+  if (payload && payload.type === 'visitor') {
+    expect(payload.type).toBe('visitor')
     expect(payload.contactId).toBe('c1')
     expect(payload.slug).toBe('test-slug')
   }

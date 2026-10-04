@@ -301,3 +301,112 @@ test('#10b Docker realtime internal endpoints use timing-safe comparison', () =>
   expect(source).toContain('timingSafeEqualStr')
   expect(source).not.toContain('authHeader !== SECRET')
 })
+
+
+// ------------------------------------------------------------------
+// #2: Docker packaging — shared token module must be in the image
+// ------------------------------------------------------------------
+
+test('#2 Dockerfile copies shared realtime-token module to runtime image', () => {
+  const source = readSrc('Dockerfile')
+  expect(source).toContain('realtime-token-shared')
+  expect(source).toContain('COPY --from=builder /app/src/lib/realtime-token-shared.ts ./src/lib/realtime-token-shared.ts')
+})
+
+// ------------------------------------------------------------------
+// #3: NIXIFY_MOCK is test-only (not in production Compose)
+// ------------------------------------------------------------------
+
+test('#3 test Compose overrides set NIXIFY_MOCK=true', () => {
+  const testCompose = readSrc('docker-compose.test.yml')
+  expect(testCompose).toContain('NIXIFY_MOCK: "true"')
+
+  const liteTestCompose = readSrc('docker-compose.lite.test.yml')
+  expect(liteTestCompose).toContain('NIXIFY_MOCK: "true"')
+})
+
+test('#3 production Compose does NOT set NIXIFY_MOCK', () => {
+  const prodCompose = readSrc('docker-compose.yml')
+  expect(prodCompose).not.toContain('NIXIFY_MOCK')
+
+  const prodLiteCompose = readSrc('docker-compose.lite.yml')
+  expect(prodLiteCompose).not.toContain('NIXIFY_MOCK')
+})
+
+// ------------------------------------------------------------------
+// #5: Membership revalidation in Socket.IO middleware (not connection handler)
+// ------------------------------------------------------------------
+
+test('#5 Vercel realtime validates agent membership in io.use() middleware', () => {
+  const source = readSrc('api/realtime.ts')
+  // The middleware must be async and call next(new Error("membership_inactive"))
+  expect(source).toContain('io.use(async')
+  expect(source).toContain("membership_inactive")
+  expect(source).toContain("membership_check_failed")
+  // The middleware must call next(new Error(...)) — not socket.emit + disconnect
+  expect(source).toContain("return next(new Error('membership_inactive'))")
+})
+
+test('#5 Docker realtime validates agent membership in io.use() middleware', () => {
+  const source = readSrc('mini-services/realtime/index.ts')
+  expect(source).toContain('io.use(async')
+  expect(source).toContain("membership_inactive")
+  expect(source).toContain("membership_check_failed")
+  expect(source).toContain("return next(new Error('membership_inactive'))")
+})
+
+// ------------------------------------------------------------------
+// #6: Expired-token manual reconnect (socket.connect())
+// ------------------------------------------------------------------
+
+test('#6 dashboard realtime-client calls socket.connect() after refresh', () => {
+  const source = readSrc('src/lib/realtime-client.ts')
+  expect(source).toContain('createdSocket.connect()')
+  expect(source).toContain('refreshToken')
+  expect(source).toContain('membershipRevoked')
+  // membership_inactive stops reconnection
+  expect(source).toContain("membership_inactive")
+  expect(source).toContain('reconnection = false')
+})
+
+test('#6 slug widget calls socket.connect() after refresh', () => {
+  const source = readSrc('src/app/api/widget/[slug]/script/route.ts')
+  expect(source).toContain('state.socket.connect()')
+  expect(source).toContain('visitorMembershipRevoked')
+  expect(source).toContain("membership_inactive")
+})
+
+test('#6 v1 widget calls socket.connect() after refresh', () => {
+  const source = readSrc('src/app/api/widget/v1/sukhan.js/route.ts')
+  expect(source).toContain('state.socket.connect()')
+  expect(source).toContain('visitorMembershipRevoked')
+  expect(source).toContain("membership_inactive")
+})
+
+test('#6 NPM socket calls socket.connect() after refresh', () => {
+  const source = readSrc('packages/widget-npm/src/socket.ts')
+  expect(source).toContain('this.socket.connect()')
+  expect(source).toContain('membershipRevoked')
+  expect(source).toContain("membership_inactive")
+})
+
+// ------------------------------------------------------------------
+// #8: exp <= now boundary (not exp < now)
+// ------------------------------------------------------------------
+
+test('#8 shared token module uses exp <= now (boundary-safe)', () => {
+  const source = readSrc('src/lib/realtime-token-shared.ts')
+  expect(source).toContain('exp <= now')
+  expect(source).not.toContain('exp < now')
+})
+
+// ------------------------------------------------------------------
+// #9: Agent artifacts removed
+// ------------------------------------------------------------------
+
+test('#9 agent-ctx directory is not present', () => {
+  const fs = require('fs')
+  const path = require('path')
+  const agentCtxPath = path.resolve(__dirname, '../../agent-ctx')
+  expect(fs.existsSync(agentCtxPath)).toBe(false)
+})

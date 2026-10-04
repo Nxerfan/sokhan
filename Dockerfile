@@ -108,6 +108,12 @@ COPY --from=builder /app/public ./public
 # Copy the Prisma schema (for `prisma db push` at startup).
 COPY --from=builder /app/prisma ./prisma
 
+# Copy the shared realtime-token module — the realtime service imports it
+# via a relative path (../../src/lib/realtime-token-shared) and the Next.js
+# app also imports it. Without this, the realtime service fails at runtime:
+#   Cannot find module '../../src/lib/realtime-token-shared'
+COPY --from=builder /app/src/lib/realtime-token-shared.ts ./src/lib/realtime-token-shared.ts
+
 # Copy the realtime service source + install its production deps.
 # We use --frozen-lockfile so the build fails loudly if out of sync.
 COPY --from=builder /app/mini-services/realtime ./mini-services/realtime

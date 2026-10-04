@@ -16,7 +16,9 @@ import {
  *   - @socket.io/redis-adapter broadcasts across Function instances
  *   - Redis pub/sub receives events from Next.js API routes
  *   - Token verification uses the shared pure module (expiry + timing-safe)
- *   - Agent membership is revalidated against the DB on connect
+ *   - Agent membership revalidation runs in io.use() MIDDLEWARE — before
+ *     the `connect` event reaches the client. An inactive membership
+ *     REFUSES the connection with `connect_error: membership_inactive`.
  *   - Tenant isolation enforced on conversation:join (DB check)
  */
 
@@ -63,44 +65,57 @@ if (redisUrl) {
   })();
 }
 
-// Auth middleware — uses the shared verifyToken (expiry + timing-safe)
+// Auth + authorization middleware.
+// Runs BEFORE the socket is considered connected. If next(new Error(...))
+// is called, the client receives a `connect_error` event and the socket
+// is never connected — no `connect` event, no room joins, no handlers.
 const secret = process.env.NEXTAUTH_SECRET;
 if (!secret) {
   console.error('[rt] FATAL: NEXTAUTH_SECRET is not set. Refusing to start.');
   process.exit(1);
 }
 
-io.use((socket: AuthSocket, next) => {
+io.use(async (socket: AuthSocket, next) => {
   const token = (socket.handshake.auth as { token?: string })?.token;
   if (!token) return next(new Error('no_token'));
+
   const payload = verifyTokenShared(token, secret);
   if (!payload) return next(new Error('invalid_token'));
+
+  // For agents: revalidate membership against CURRENT DB state.
+  // A removed/inactive membership must NOT retain realtime access,
+  // even if the token is still signed and not yet expired.
+  if (payload.type === 'agent') {
+    const agent = payload as AgentTokenPayload;
+    let membership: { status: string } | null = null;
+    try {
+      membership = await prisma.membership.findFirst({
+        where: { userId: agent.userId, tenantId: agent.tenantId, status: 'active' },
+        select: { id: true, role: true, status: true },
+      });
+    } catch (e) {
+      // Infrastructure failure — do NOT reveal DB errors to clients.
+      console.error('[rt] membership revalidation DB error:', e instanceof Error ? e.message : e);
+      return next(new Error('membership_check_failed'));
+    }
+    if (!membership || membership.status !== 'active') {
+      console.log(`[rt] REJECTED agent — membership not active (user=${agent.userId}, tenant=${agent.tenantId})`);
+      return next(new Error('membership_inactive'));
+    }
+  }
+
   socket.payload = payload;
   next();
 });
 
-io.on('connection', async (socket: AuthSocket) => {
+io.on('connection', (socket: AuthSocket) => {
   const payload = socket.payload!;
   console.log(`[rt] connect type=${payload.type} id=${socket.id}`);
 
-  // For agents: revalidate membership against the CURRENT DB state before
-  // granting tenant-wide realtime access. A removed or inactive membership
-  // must NOT retain realtime access, even if the token is still signed.
+  // Connection is fully authorized by the middleware.
+  // Agents join tenant-wide + agent rooms immediately.
   if (payload.type === 'agent') {
     const agent = payload as AgentTokenPayload;
-    const membership = await prisma.membership.findFirst({
-      where: { userId: agent.userId, tenantId: agent.tenantId, status: 'active' },
-      select: { id: true, role: true, status: true },
-    }).catch((e: unknown) => {
-      console.error('[rt] membership revalidation DB error:', e instanceof Error ? e.message : e);
-      return null;
-    });
-    if (!membership || membership.status !== 'active') {
-      console.log(`[rt] REJECTED agent connect — membership not active (user=${agent.userId}, tenant=${agent.tenantId})`);
-      socket.emit('auth_error', { error: 'membership_inactive' });
-      socket.disconnect(true);
-      return;
-    }
     socket.join(`tenant:${agent.tenantId}`);
     socket.join(`agent:${agent.userId}`);
   }
@@ -119,7 +134,7 @@ io.on('connection', async (socket: AuthSocket) => {
       const conv = await prisma.conversation.findFirst({ where, select: { id: true } });
       if (!conv) {
         console.log(`[rt] REJECTED conversation:join — tenant mismatch (conv=${conversationId}, tenant=${payload.tenantId})`);
-        return;
+        return; // silently reject — don't join the room
       }
       socket.join(`conversation:${conversationId}`);
       console.log(`[rt] join conversation:${conversationId} (tenant=${payload.tenantId})`);

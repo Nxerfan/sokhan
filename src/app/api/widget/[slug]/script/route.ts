@@ -382,13 +382,26 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
       });
       state.socket.on('disconnect', function(){ state.connected = false; });
       // When a reconnect fails due to an expired token, refresh the token
-      // using the SAME visitorId (no new Contact), then update the socket
-      // auth. Socket.IO will automatically retry with the new auth.
+      // When the server middleware rejects the connection (invalid/expired
+      // token), Socket.IO does NOT auto-reconnect. We must:
+      //   1. Re-identify using the SAME visitorId (no new Contact)
+      //   2. Update socket.auth with the fresh token
+      //   3. Manually call socket.connect()
+      // For membership_inactive, do NOT retry — remain disconnected.
+      var visitorMembershipRevoked = false;
       state.socket.on('connect_error', function(err){
-        if (err && (err.message === 'invalid_token' || err.message === 'no_token')) {
+        if (!err) return;
+        if (err.message === 'membership_inactive' || err.message === 'membership_check_failed') {
+          visitorMembershipRevoked = true;
+          if (state.socket) { state.socket.io.opts.reconnection = false; state.socket.disconnect(); }
+          return;
+        }
+        if (visitorMembershipRevoked) return;
+        if (err.message === 'invalid_token' || err.message === 'no_token') {
           refreshVisitorToken(function(data){
             if (data && data.realtimeToken && state.socket) {
               state.socket.auth = { token: data.realtimeToken };
+              state.socket.connect();
             }
           });
         }

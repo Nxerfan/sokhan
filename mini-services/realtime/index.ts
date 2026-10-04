@@ -101,7 +101,11 @@ interface AuthenticatedSocket extends Socket {
   payload?: RealtimeTokenPayload
 }
 
-io.use((socket: AuthenticatedSocket, next) => {
+// Auth + authorization middleware.
+// Runs BEFORE the socket is considered connected. If next(new Error(...))
+// is called, the client receives a `connect_error` event and the socket
+// is never connected — no `connect` event, no room joins, no handlers.
+io.use(async (socket: AuthenticatedSocket, next) => {
   const token = socket.handshake.auth?.token as string | undefined
   if (!token) {
     console.log('[auth] no token provided')
@@ -112,18 +116,11 @@ io.use((socket: AuthenticatedSocket, next) => {
     console.log('[auth] invalid or expired token')
     return next(new Error('invalid_token'))
   }
-  socket.payload = payload
-  next()
-})
 
-io.on('connection', async (socket: AuthenticatedSocket) => {
-  const payload = socket.payload!
-  console.log(`[connect] type=${payload.type} id=${socket.id}`)
-
-  // For agents: revalidate membership against the CURRENT DB state via the
-  // Next.js app's internal verify-membership endpoint. A removed or inactive
-  // membership must NOT retain tenant-wide realtime access, even if the
-  // token is still signed and not yet expired.
+  // For agents: revalidate membership against CURRENT DB state via the
+  // Next.js app's internal verify-membership endpoint. A removed/inactive
+  // membership must NOT retain realtime access. This runs in MIDDLEWARE
+  // so the connection is REFUSED before `connect` reaches the client.
   if (payload.type === 'agent') {
     const agent = payload as AgentTokenPayload
     try {
@@ -136,18 +133,28 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
         headers: { 'X-Internal-Secret': SECRET! },
       })
       if (!res.ok) {
-        console.log(`[connect] REJECTED agent — membership not active (user=${agent.userId}, tenant=${agent.tenantId}, status=${res.status})`)
-        socket.emit('auth_error', { error: 'membership_inactive' })
-        socket.disconnect(true)
-        return
+        console.log(`[auth] REJECTED agent — membership not active (user=${agent.userId}, tenant=${agent.tenantId}, status=${res.status})`)
+        return next(new Error('membership_inactive'))
       }
     } catch (e) {
-      console.error('[connect] membership revalidation error:', e instanceof Error ? e.message : e)
-      // Fail-closed: if we can't verify membership, don't grant access.
-      socket.emit('auth_error', { error: 'membership_check_failed' })
-      socket.disconnect(true)
-      return
+      // Infrastructure failure — do NOT reveal DB errors to clients.
+      console.error('[auth] membership revalidation error:', e instanceof Error ? e.message : e)
+      return next(new Error('membership_check_failed'))
     }
+  }
+
+  socket.payload = payload
+  next()
+})
+
+io.on('connection', (socket: AuthenticatedSocket) => {
+  const payload = socket.payload!
+  console.log(`[connect] type=${payload.type} id=${socket.id}`)
+
+  // Connection is fully authorized by the middleware.
+  // Agents join tenant-wide + agent rooms immediately.
+  if (payload.type === 'agent') {
+    const agent = payload as AgentTokenPayload
     socket.join(`tenant:${agent.tenantId}`)
     socket.join(`agent:${agent.userId}`)
   }

@@ -3,6 +3,11 @@ services:
   app:
     ports:
       - "3000:3000"
+    environment:
+      # Test-only: enables mock OTP (code 123456) so tests can use the
+      # 3-step OTP signup flow without a real Nixify API key.
+      # Production docker-compose.lite.yml must NOT set this.
+      NIXIFY_MOCK: "true"
 
   caddy:
     ports:

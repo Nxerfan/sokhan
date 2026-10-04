@@ -124,7 +124,7 @@ export function verifyToken(
   if (typeof p.exp !== 'number' || !Number.isFinite(p.exp)) return null
   const now = Math.floor(Date.now() / 1000)
   if (p.iat > now + CLOCK_SKEW_SECONDS) return null // future iat
-  if (p.exp < now) return null // expired
+  if (p.exp <= now) return null // expired (boundary: exp == now is expired)
 
   return p as unknown as RealtimeTokenPayload
 }

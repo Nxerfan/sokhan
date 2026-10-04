@@ -67,6 +67,27 @@ function resolveSocketConfig(): SocketConfig {
 
 const { url: SOCKET_URL, path: SOCKET_PATH, transports: SOCKET_TRANSPORTS } = resolveSocketConfig()
 
+// Refresh-in-flight guard — prevents concurrent token refresh storms.
+let refreshPromise: Promise<string | null> | null = null
+
+async function refreshToken(): Promise<string | null> {
+  // If a refresh is already in-flight, reuse it.
+  if (refreshPromise) return refreshPromise
+  refreshPromise = (async () => {
+    try {
+      const res = await fetch('/api/realtime-token')
+      if (!res.ok) return null
+      const { token } = await res.json()
+      return token as string
+    } catch {
+      return null
+    } finally {
+      refreshPromise = null
+    }
+  })()
+  return refreshPromise
+}
+
 export async function connectRealtime(): Promise<Socket> {
   if (socketInstance?.connected) return socketInstance
 
@@ -83,15 +104,15 @@ export async function connectRealtime(): Promise<Socket> {
     auth: { token },
     transports: SOCKET_TRANSPORTS,
     reconnection: true,
-    reconnectionAttempts: Infinity, // keep trying — we refresh expired tokens
+    reconnectionAttempts: Infinity,
     reconnectionDelay: 1000,
     timeout: 10000,
   })
 
-  // CRITICAL: after a reconnect, the server has lost all room subscriptions.
-  // We re-emit `conversation:join` for the conversation currently open so we
-  // keep receiving its messages.
   const createdSocket = socketInstance
+
+  // After a reconnect, the server has lost all room subscriptions.
+  // Re-emit conversation:join for the currently open conversation.
   createdSocket.on('connect', () => {
     if (socketInstance !== createdSocket) return
     const openConv = (createdSocket as Socket & { __lastJoinedConv?: string }).__lastJoinedConv
@@ -100,20 +121,33 @@ export async function connectRealtime(): Promise<Socket> {
     }
   })
 
-  // When a reconnect fails due to an expired token, fetch a fresh
-  // /api/realtime-token and update the socket auth. Socket.IO will
-  // automatically retry with the new token.
+  // When the server middleware rejects the connection (invalid/expired
+  // token), Socket.IO does NOT auto-reconnect. We must:
+  //   1. Fetch a fresh token
+  //   2. Update socket.auth
+  //   3. Manually call socket.connect()
+  // For membership_inactive, do NOT retry — a new token cannot fix a
+  // revoked membership. Stop the retry loop and remain disconnected.
+  let membershipRevoked = false
   createdSocket.on('connect_error', async (err: Error) => {
     if (socketInstance !== createdSocket) return
-    if (err.message === 'invalid_token' || err.message === 'no_token' || err.message === 'membership_inactive') {
-      try {
-        const refreshRes = await fetch('/api/realtime-token')
-        if (refreshRes.ok) {
-          const { token: freshToken } = await refreshRes.json()
-          createdSocket.auth = { token: freshToken }
-        }
-      } catch (e) {
-        console.error('[realtime] token refresh failed:', e)
+    const msg = err.message
+    if (msg === 'membership_inactive' || msg === 'membership_check_failed') {
+      // A new token cannot repair a revoked membership. Stop retrying.
+      membershipRevoked = true
+      createdSocket.io.opts.reconnection = false
+      console.error('[realtime] membership inactive — disconnecting')
+      createdSocket.disconnect()
+      return
+    }
+    if (msg === 'invalid_token' || msg === 'no_token') {
+      if (membershipRevoked) return
+      const freshToken = await refreshToken()
+      if (freshToken) {
+        createdSocket.auth = { token: freshToken }
+        // Socket.IO does NOT auto-reconnect after a middleware rejection.
+        // We must manually initiate a new connection attempt.
+        createdSocket.connect()
       }
     }
   })

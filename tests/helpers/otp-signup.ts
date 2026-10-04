@@ -5,13 +5,17 @@
  * Uses the 3-step OTP flow (start → verify → complete) with the Nixify
  * mock OTP code "123456" (requires NIXIFY_MOCK=true in the dev env).
  *
- * Works with both `fetch` and Playwright's `page.request` patterns.
+ * FAIL-FAST: If any stage fails, throws an Error with safe diagnostic data
+ * (stage, HTTP status, bounded API error code). This prevents misleading
+ * downstream failures like "unauthorized" when the real problem was a
+ * failed signup step.
  */
 
 export const MOCK_OTP_CODE = '123456'
 
 /**
  * Perform a 3-step OTP signup via fetch().
+ * Throws on any stage failure with actionable diagnostics.
  * Returns the parsed JSON from /complete (contains `tenantId`).
  */
 export async function otpSignupFetch(
@@ -29,7 +33,8 @@ export async function otpSignupFetch(
     body: JSON.stringify({ email }),
   })
   if (!startRes.ok) {
-    return { ok: false, error: (await startRes.json().catch(() => ({}))).error, status: startRes.status }
+    const err = (await startRes.json().catch(() => ({}))).error ?? 'unknown'
+    throw new Error(`OTP signup start failed: status=${startRes.status} error=${err}`)
   }
   const { requestId } = await startRes.json()
 
@@ -40,7 +45,8 @@ export async function otpSignupFetch(
     body: JSON.stringify({ email, code: MOCK_OTP_CODE, requestId }),
   })
   if (!verifyRes.ok) {
-    return { ok: false, error: (await verifyRes.json().catch(() => ({}))).error, status: verifyRes.status }
+    const err = (await verifyRes.json().catch(() => ({}))).error ?? 'unknown'
+    throw new Error(`OTP signup verify failed: status=${verifyRes.status} error=${err}`)
   }
 
   // Step 3: complete
@@ -50,11 +56,15 @@ export async function otpSignupFetch(
     body: JSON.stringify({ email, requestId, password, workspaceName }),
   })
   const data = await completeRes.json().catch(() => ({}))
-  return { ok: completeRes.ok, tenantId: data.tenantId, error: data.error, status: completeRes.status }
+  if (!completeRes.ok) {
+    throw new Error(`OTP signup complete failed: status=${completeRes.status} error=${data.error ?? 'unknown'}`)
+  }
+  return { ok: true, tenantId: data.tenantId, status: completeRes.status }
 }
 
 /**
  * Perform a 3-step OTP signup via Playwright's APIRequestContext.
+ * Throws on any stage failure with actionable diagnostics.
  * Returns the parsed JSON from /complete.
  */
 export async function otpSignupPlaywright(
@@ -72,7 +82,8 @@ export async function otpSignupPlaywright(
     headers,
   })
   if (!startRes.ok()) {
-    return { ok: false, status: startRes.status() }
+    const err = ((await startRes.json().catch(() => ({}))) as { error?: string }).error ?? 'unknown'
+    throw new Error(`OTP signup start failed: status=${startRes.status()} error=${err}`)
   }
   const startData = await startRes.json() as { requestId: string }
 
@@ -82,7 +93,8 @@ export async function otpSignupPlaywright(
     headers,
   })
   if (!verifyRes.ok()) {
-    return { ok: false, status: verifyRes.status() }
+    const err = ((await verifyRes.json().catch(() => ({}))) as { error?: string }).error ?? 'unknown'
+    throw new Error(`OTP signup verify failed: status=${verifyRes.status()} error=${err}`)
   }
 
   // Step 3: complete
@@ -90,6 +102,10 @@ export async function otpSignupPlaywright(
     data: { email, requestId: startData.requestId, password, workspaceName },
     headers,
   })
+  if (!completeRes.ok()) {
+    const err = ((await completeRes.json().catch(() => ({}))) as { error?: string }).error ?? 'unknown'
+    throw new Error(`OTP signup complete failed: status=${completeRes.status()} error=${err}`)
+  }
   const data = await completeRes.json() as { tenantId?: string }
-  return { ok: completeRes.ok(), tenantId: data?.tenantId, status: completeRes.status() }
+  return { ok: true, tenantId: data?.tenantId, status: completeRes.status() }
 }

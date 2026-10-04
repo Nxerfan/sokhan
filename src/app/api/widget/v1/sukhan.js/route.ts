@@ -380,11 +380,20 @@ function buildScript(socketUrlOverride: string | null, isVercel: boolean): strin
         }
       });
       state.socket.on('disconnect', function(){ state.connected = false; });
+      var visitorMembershipRevoked = false;
       state.socket.on('connect_error', function(err){
-        if (err && (err.message === 'invalid_token' || err.message === 'no_token')) {
+        if (!err) return;
+        if (err.message === 'membership_inactive' || err.message === 'membership_check_failed') {
+          visitorMembershipRevoked = true;
+          if (state.socket) { state.socket.io.opts.reconnection = false; state.socket.disconnect(); }
+          return;
+        }
+        if (visitorMembershipRevoked) return;
+        if (err.message === 'invalid_token' || err.message === 'no_token') {
           refreshVisitorToken(function(data){
             if (data && data.realtimeToken && state.socket) {
               state.socket.auth = { token: data.realtimeToken };
+              state.socket.connect();
             }
           });
         }
