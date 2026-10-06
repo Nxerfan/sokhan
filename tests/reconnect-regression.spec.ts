@@ -15,17 +15,15 @@ const BASE = 'http://127.0.0.1:81'
 
 async function signupAndSignIn(page: Page, email: string, workspace: string): Promise<void> {
   await otpSignupPlaywright(page.request, BASE, email, workspace)
-  await page.goto(`${BASE}/`)
-  await page.evaluate(async (email) => {
-    const csrfRes = await fetch('/api/auth/csrf')
-    const { csrfToken } = await csrfRes.json()
-    const res = await fetch('/api/auth/callback/credentials', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ email, password: 'password123', csrfToken }),
-    })
-    if (!res.ok) throw new Error(`signin failed: ${res.status}`)
-  }, email)
+  // Sign in via NextAuth credentials using Playwright's APIRequestContext
+  // (avoids page.evaluate + fetch which can fail in Docker)
+  const csrfRes = await page.request.get(`${BASE}/api/auth/csrf`)
+  const { csrfToken } = await csrfRes.json()
+  const signinRes = await page.request.post(`${BASE}/api/auth/callback/credentials`, {
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ email, password: 'password123', csrfToken }).toString(),
+  })
+  if (!signinRes.ok()) throw new Error(`signin failed: ${signinRes.status()}`)
 }
 
 /**
