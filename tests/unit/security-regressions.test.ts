@@ -359,12 +359,11 @@ test('#5 Docker realtime validates agent membership in io.use() middleware', () 
 // #6: Expired-token manual reconnect (socket.connect())
 // ------------------------------------------------------------------
 
-test('#6 dashboard realtime-client calls socket.connect() after refresh', () => {
-  const source = readSrc('src/lib/realtime-client.ts')
-  expect(source).toContain('createdSocket.connect()')
+test('#6 dashboard realtime-handlers calls socket.connect() after refresh', () => {
+  const source = readSrc('src/lib/realtime-handlers.ts')
+  expect(source).toContain('socket.connect()')
   expect(source).toContain('refreshToken')
   expect(source).toContain('membershipRevoked')
-  // membership_inactive stops reconnection
   expect(source).toContain("membership_inactive")
   expect(source).toContain('reconnection = false')
 })

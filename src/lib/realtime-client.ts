@@ -1,6 +1,7 @@
 'use client'
 
 import { io, type Socket } from 'socket.io-client'
+import { setupRealtimeHandlers, type RealtimeSocket } from './realtime-handlers'
 
 let socketInstance: Socket | null = null
 
@@ -38,11 +39,6 @@ interface SocketConfig {
 }
 
 function resolveSocketConfig(): SocketConfig {
-  // Vercel mode — VERCEL=1 is set by the Vercel runtime.
-  // Use the DEFAULT namespace (no URL) with path /api/realtime.
-  // Vercel routes /api/realtime* to the root-level api/realtime.ts function.
-  // The server's Socket.IO path is /api/realtime (not /api/realtime/socket.io).
-  // Transports: websocket-only on Vercel (no polling fallback).
   const isVercel = process.env.NEXT_PUBLIC_VERCEL === '1' || process.env.VERCEL === '1'
   if (isVercel) {
     return { url: '', path: '/api/realtime', transports: ['websocket'] }
@@ -56,8 +52,6 @@ function resolveSocketConfig(): SocketConfig {
       transports: isApiRealtime ? ['websocket'] : ['websocket', 'polling'],
     }
   }
-  // Default: rely on Caddy's XTransformPort forwarding.
-  // Works in docker + dev; on Vercel this must be overridden via env.
   return {
     url: '/?XTransformPort=3003',
     path: '/',
@@ -71,7 +65,6 @@ const { url: SOCKET_URL, path: SOCKET_PATH, transports: SOCKET_TRANSPORTS } = re
 let refreshPromise: Promise<string | null> | null = null
 
 async function refreshToken(): Promise<string | null> {
-  // If a refresh is already in-flight, reuse it.
   if (refreshPromise) return refreshPromise
   refreshPromise = (async () => {
     try {
@@ -111,71 +104,20 @@ export async function connectRealtime(): Promise<Socket> {
 
   const createdSocket = socketInstance
 
-  // After a reconnect, the server has lost all room subscriptions.
-  // Re-emit conversation:join for the currently open conversation.
+  // Use the extracted handler logic (shared with unit tests).
+  // See src/lib/realtime-handlers.ts for the behavioral test coverage.
+  const handlers = setupRealtimeHandlers(
+    createdSocket as unknown as RealtimeSocket,
+    refreshToken,
+    { backoffMs: 2000 },
+  )
   createdSocket.on('connect', () => {
     if (socketInstance !== createdSocket) return
-    const openConv = (createdSocket as Socket & { __lastJoinedConv?: string }).__lastJoinedConv
-    if (openConv) {
-      createdSocket.emit('conversation:join', openConv)
-    }
+    handlers.onConnect()
   })
-
-  // When the server middleware rejects the connection (invalid/expired
-  // token), Socket.IO does NOT auto-reconnect. We must:
-  //   1. Fetch a fresh token
-  //   2. Update socket.auth
-  //   3. Manually call socket.connect()
-  //
-  // membership_inactive: TERMINAL — a new token cannot fix a revoked
-  //   membership. Stop the retry loop and remain disconnected.
-  //
-  // membership_check_failed: TRANSIENT infrastructure error — do NOT
-  //   fetch a new token (the token is fine). Retry socket.connect()
-  //   with a bounded backoff. Prevent duplicate retry timers.
-  let membershipRevoked = false
-  let membershipCheckRetryTimer: ReturnType<typeof setTimeout> | null = null
-
   createdSocket.on('connect_error', async (err: Error) => {
     if (socketInstance !== createdSocket) return
-    const msg = err.message
-
-    // TERMINAL: membership is revoked. Stop everything.
-    if (msg === 'membership_inactive') {
-      membershipRevoked = true
-      createdSocket.io.opts.reconnection = false
-      console.error('[realtime] membership inactive — disconnecting')
-      createdSocket.disconnect()
-      return
-    }
-
-    // TRANSIENT: infrastructure error during membership check.
-    // Do NOT fetch a new token — the token is still valid.
-    // Retry socket.connect() with bounded backoff.
-    if (msg === 'membership_check_failed') {
-      if (membershipRevoked) return
-      if (membershipCheckRetryTimer) return // prevent duplicate retry timers
-      console.error('[realtime] membership check failed — retrying with backoff')
-      membershipCheckRetryTimer = setTimeout(() => {
-        membershipCheckRetryTimer = null
-        if (socketInstance === createdSocket && !membershipRevoked) {
-          createdSocket.connect()
-        }
-      }, 2000) // 2s backoff
-      return
-    }
-
-    // EXPIRED TOKEN: refresh + manual reconnect.
-    if (msg === 'invalid_token' || msg === 'no_token') {
-      if (membershipRevoked) return
-      const freshToken = await refreshToken()
-      if (freshToken) {
-        createdSocket.auth = { token: freshToken }
-        // Socket.IO does NOT auto-reconnect after a middleware rejection.
-        // We must manually initiate a new connection attempt.
-        createdSocket.connect()
-      }
-    }
+    await handlers.onConnectError(err)
   })
 
   return socketInstance

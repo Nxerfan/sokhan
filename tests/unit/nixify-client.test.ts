@@ -354,3 +354,61 @@ test('NIXIFY_ENDPOINTS are hardcoded to nixify.ir', () => {
   expect(NIXIFY_ENDPOINTS.verify).toBe('https://nixify.ir/api/v1/otp/verify')
   expect(NIXIFY_ENDPOINTS.resend).toBe('https://nixify.ir/api/v1/otp/resend')
 })
+
+
+// ─── Nixify OTP correlation enforcement (executable) ───────────
+
+test('correlation A: matching otp_request_id → success', async () => {
+  mockResponses.push({
+    status: 200,
+    body: { verified: true, otp_request_id: 'otp_A', request_id: 'trace_1' },
+  })
+  const result = await verifyOtp('user@test.com', '123456', 'signup', 'otp_A')
+  expect(result.verified).toBe(true)
+  expect(result.otpRequestId).toBe('otp_A')
+  expect(result.apiRequestId).toBe('trace_1')
+})
+
+test('correlation B: missing otp_request_id → nixify_invalid_response (502)', async () => {
+  mockResponses.push({
+    status: 200,
+    body: { verified: true, request_id: 'trace_2' },
+  })
+  try {
+    await verifyOtp('user@test.com', '123456', 'signup', 'otp_A')
+    expect(false).toBe(true) // should have thrown
+  } catch (e) {
+    const err = e as InstanceType<typeof NixifyError>
+    expect(err.code).toBe('nixify_invalid_response')
+    expect(err.statusCode).toBe(502)
+  }
+})
+
+test('correlation C: mismatched otp_request_id → nixify_correlation_mismatch (409)', async () => {
+  mockResponses.push({
+    status: 200,
+    body: { verified: true, otp_request_id: 'otp_B', request_id: 'trace_3' },
+  })
+  try {
+    await verifyOtp('user@test.com', '123456', 'signup', 'otp_A')
+    expect(false).toBe(true) // should have thrown
+  } catch (e) {
+    const err = e as InstanceType<typeof NixifyError>
+    expect(err.code).toBe('nixify_correlation_mismatch')
+    expect(err.statusCode).toBe(409)
+    expect(err.apiRequestId).toBe('trace_3')
+  }
+})
+
+test('correlation D: outgoing verify body contains ONLY { email, code, purpose }', async () => {
+  mockResponses.push({
+    status: 200,
+    body: { verified: true, otp_request_id: 'otp_A', request_id: 'trace_1' },
+  })
+  await verifyOtp('user@test.com', '123456', 'signup', 'otp_A')
+  const body = JSON.parse(fetchCalls[0].body)
+  expect(Object.keys(body).sort()).toEqual(['code', 'email', 'purpose'])
+  expect(body).not.toHaveProperty('request_id')
+  expect(body).not.toHaveProperty('otp_request_id')
+  expect(body).not.toHaveProperty('expectedOtpRequestId')
+})

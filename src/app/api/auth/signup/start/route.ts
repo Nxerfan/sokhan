@@ -26,31 +26,32 @@ export async function POST(req: NextRequest) {
     const purpose: OtpPurpose = 'signup'
     const result = await sendOtp(email, purpose)
 
-    // Create PendingSignup — store otp_request_id (NOT api request_id)
-    await db.pendingSignup.upsert({
-      where: { email },
-      create: {
-        email,
-        nixifyRequestId: result.otpRequestId,
-        expiresAt: new Date(result.expiresAt),
-      },
-      update: {
-        nixifyRequestId: result.otpRequestId,
-        expiresAt: new Date(result.expiresAt),
-        otpVerified: false,
-      },
-    })
-
-    // Create OtpRequest
-    await db.otpRequest.create({
-      data: {
-        email,
-        purpose,
-        requestId: result.otpRequestId,
-        expiresAt: new Date(result.expiresAt),
-        ipAddress: req.headers.get('x-forwarded-for')?.split(',')[0] || null,
-      },
-    })
+    // Persist local OTP correlation state atomically — both writes must
+    // succeed or fail together (no partial PendingSignup without OtpRequest).
+    await db.$transaction([
+      db.pendingSignup.upsert({
+        where: { email },
+        create: {
+          email,
+          nixifyRequestId: result.otpRequestId,
+          expiresAt: new Date(result.expiresAt),
+        },
+        update: {
+          nixifyRequestId: result.otpRequestId,
+          expiresAt: new Date(result.expiresAt),
+          otpVerified: false,
+        },
+      }),
+      db.otpRequest.create({
+        data: {
+          email,
+          purpose,
+          requestId: result.otpRequestId,
+          expiresAt: new Date(result.expiresAt),
+          ipAddress: req.headers.get('x-forwarded-for')?.split(',')[0] || null,
+        },
+      }),
+    ])
 
     return NextResponse.json({ requestId: result.otpRequestId, expiresAt: result.expiresAt })
   } catch (e) {
