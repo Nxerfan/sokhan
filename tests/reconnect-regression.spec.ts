@@ -20,8 +20,7 @@ async function signupAndSignIn(page: Page, email: string, workspace: string): Pr
   const csrfRes = await page.request.get(`${BASE}/api/auth/csrf`)
   const { csrfToken } = await csrfRes.json()
   const signinRes = await page.request.post(`${BASE}/api/auth/callback/credentials`, {
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ email, password: 'password123', csrfToken }).toString(),
+    form: { email, password: 'password123', csrfToken },
   })
   if (!signinRes.ok()) throw new Error(`signin failed: ${signinRes.status()}`)
 }
