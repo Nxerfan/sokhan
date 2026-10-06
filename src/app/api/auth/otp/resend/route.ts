@@ -1,18 +1,26 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
-import { resendOtp, NixifyError } from '@/lib/nixify/client'
+import { resendOtp, NixifyError, type OtpPurpose } from '@/lib/nixify/client'
 
 const MAX_RESENDS = 3
+
+const VALID_PURPOSES: OtpPurpose[] = ['signup', 'login', 'reset_password']
 
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => null)
   const email = String(body?.email ?? '').trim().toLowerCase()
-  const purpose = String(body?.purpose ?? '').trim()
+  const purposeStr = String(body?.purpose ?? '').trim()
   const originalRequestId = String(body?.originalRequestId ?? '').trim()
 
-  if (!email || !purpose || !originalRequestId) {
+  if (!email || !purposeStr || !originalRequestId) {
     return NextResponse.json({ error: 'missing_fields' }, { status: 400 })
   }
+
+  // Validate purpose against our internal vocabulary
+  if (!VALID_PURPOSES.includes(purposeStr as OtpPurpose)) {
+    return NextResponse.json({ error: 'invalid_purpose' }, { status: 400 })
+  }
+  const purpose = purposeStr as OtpPurpose
 
   // Find original OtpRequest
   const otpReq = await db.otpRequest.findFirst({
@@ -32,7 +40,7 @@ export async function POST(req: NextRequest) {
     await db.otpRequest.update({
       where: { id: otpReq.id },
       data: {
-        requestId: result.requestId,
+        requestId: result.otpRequestId,
         expiresAt: new Date(result.expiresAt),
         resendCount: { increment: 1 },
         verified: false,
@@ -43,11 +51,11 @@ export async function POST(req: NextRequest) {
     if (purpose === 'signup') {
       await db.pendingSignup.updateMany({
         where: { email },
-        data: { nixifyRequestId: result.requestId, expiresAt: new Date(result.expiresAt), otpVerified: false },
+        data: { nixifyRequestId: result.otpRequestId, expiresAt: new Date(result.expiresAt), otpVerified: false },
       })
     }
 
-    return NextResponse.json({ requestId: result.requestId, expiresAt: result.expiresAt })
+    return NextResponse.json({ requestId: result.otpRequestId, expiresAt: result.expiresAt })
   } catch (e) {
     if (e instanceof NixifyError) return NextResponse.json({ error: e.code }, { status: e.statusCode })
     return NextResponse.json({ error: 'unknown_error' }, { status: 500 })

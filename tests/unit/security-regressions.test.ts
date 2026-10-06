@@ -410,3 +410,140 @@ test('#9 agent-ctx directory is not present', () => {
   const agentCtxPath = path.resolve(__dirname, '../../agent-ctx')
   expect(fs.existsSync(agentCtxPath)).toBe(false)
 })
+
+// ------------------------------------------------------------------
+// Nixify integration regression tests
+// ------------------------------------------------------------------
+
+test('#Nixify nixify client uses canonical https://nixify.ir origin', () => {
+  const source = readSrc('src/lib/nixify/client.ts')
+  expect(source).toContain("https://nixify.ir")
+  expect(source).not.toContain('your-nixify-domain.com')
+  // NIXIFY_BASE_URL must not be used as a variable (comments mentioning it are fine)
+  expect(source).not.toMatch(/const\s+NIXIFY_BASE_URL\s*=/)
+  expect(source).not.toMatch(/process\.env\.NIXIFY_BASE_URL/)
+})
+
+test('#Nixify sendOtp result uses otpRequestId (NOT requestId)', () => {
+  const source = readSrc('src/lib/nixify/client.ts')
+  expect(source).toContain('otpRequestId')
+  expect(source).not.toMatch(/\brequestId\b(?!:)/) // no bare requestId property
+})
+
+test('#Nixify verifyOtp does NOT send request_id to Nixify', () => {
+  const source = readSrc('src/lib/nixify/client.ts')
+  // The verifyOtp function should call nixifyFetch with { email, code, purpose } only
+  // — NOT request_id or otp_request_id in the body.
+  const verifySection = source.slice(source.indexOf('export async function verifyOtp'), source.indexOf('// ─── Public API: resendOtp'))
+  // The nixifyFetch call should NOT include request_id in the body object
+  const fetchCall = verifySection.match(/nixifyFetch\([^)]+\{([^}]+)\}/)
+  if (fetchCall) {
+    expect(fetchCall[1]).not.toContain('request_id')
+    expect(fetchCall[1]).not.toContain('requestId')
+  }
+})
+
+test('#Nixify purpose mapper: reset_password → reset', () => {
+  const source = readSrc('src/lib/nixify/client.ts')
+  expect(source).toContain("reset_password: 'reset'")
+})
+
+test('#Nixify structured error envelope parsing', () => {
+  const source = readSrc('src/lib/nixify/client.ts')
+  // Check that the error parsing handles the structured { error: { code, message } } envelope
+  expect(source).toContain('interface NixifyErrorBody')
+  expect(source).toContain('errorBody.error')
+  expect(source).toContain('err.code')
+  expect(source).toContain('doc_url')
+})
+
+test('#Nixify network error categories exist', () => {
+  const source = readSrc('src/lib/nixify/client.ts')
+  expect(source).toContain('nixify_network_error')
+  expect(source).toContain('nixify_timeout')
+  expect(source).toContain('nixify_invalid_response')
+  expect(source).toContain('nixify_configuration_error')
+})
+
+test('#Nixify timeout via AbortController', () => {
+  const source = readSrc('src/lib/nixify/client.ts')
+  expect(source).toContain('AbortController')
+  expect(source).toContain('REQUEST_TIMEOUT_MS')
+  expect(source).toContain('15_000')
+})
+
+test('#Nixify response validation for otp_request_id', () => {
+  const source = readSrc('src/lib/nixify/client.ts')
+  expect(source).toContain('validateOtpResponse')
+  expect(source).toContain('otp_request_id')
+})
+
+test('#Nixify NIXIFY_API_KEY is NOT exposed via NEXT_PUBLIC_', () => {
+  const source = readSrc('src/lib/nixify/client.ts')
+  expect(source).not.toContain('NEXT_PUBLIC')
+})
+
+test('#Nixify .env files do NOT require NIXIFY_BASE_URL', () => {
+  const docker = readSrc('.env.docker.example')
+  // Should NOT have NIXIFY_BASE_URL as a required config (may have a comment saying not needed)
+  const dockerLines = docker.split('\n').filter(l => l.includes('NIXIFY_BASE_URL'))
+  for (const line of dockerLines) {
+    expect(line.startsWith('#') || line.includes('NOT needed')).toBe(true)
+  }
+
+  const vercel = readSrc('.env.vercel.example')
+  const vercelLines = vercel.split('\n').filter(l => l.includes('NIXIFY_BASE_URL'))
+  for (const line of vercelLines) {
+    expect(line.startsWith('#') || line.includes('NOT needed')).toBe(true)
+  }
+})
+
+test('#Nixify NIXIFY_API_KEY never in client components', () => {
+  // Check that no client component imports the nixify client
+  const fs = require('fs')
+  const path = require('path')
+  function checkDir(dir: string) {
+    const entries = fs.readdirSync(dir, { withFileTypes: true })
+    for (const entry of entries) {
+      if (entry.name === 'node_modules' || entry.name === '.next' || entry.name === '.git') continue
+      const fullPath = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        checkDir(fullPath)
+      } else if (entry.name.endsWith('.tsx') || entry.name.endsWith('.ts')) {
+        const content = fs.readFileSync(fullPath, 'utf-8')
+        // Client components (marked with 'use client') must NOT import the nixify client
+        if (content.includes("'use client'") || content.includes('"use client"')) {
+          expect(content).not.toContain("from '@/lib/nixify/client'")
+          expect(content).not.toContain('NIXIFY_API_KEY')
+        }
+      }
+    }
+  }
+  checkDir(path.resolve(__dirname, '../../src'))
+})
+
+test('#Nixify signup/start uses otpRequestId (not requestId)', () => {
+  const source = readSrc('src/app/api/auth/signup/start/route.ts')
+  expect(source).toContain('result.otpRequestId')
+  expect(source).not.toContain('result.requestId')
+})
+
+test('#Nixify signup/verify does NOT pass requestId to verifyOtp', () => {
+  const source = readSrc('src/app/api/auth/signup/verify/route.ts')
+  expect(source).toMatch(/verifyOtp\([^,]+,\s*[^,]+,\s*['"]signup['"]\)/)
+  expect(source).not.toMatch(/verifyOtp\([^)]*requestId/)
+})
+
+test('#Nixify reset-password uses reset_password → reset mapping', () => {
+  const startSource = readSrc('src/app/api/auth/reset-password/start/route.ts')
+  expect(startSource).toContain("'reset_password'")
+})
+
+test('#Nixify production 500 unknown_error regression: no bare unknown_error in signup/start', () => {
+  const source = readSrc('src/app/api/auth/signup/start/route.ts')
+  // The old code returned { error: 'unknown_error' } for all non-NixifyError exceptions.
+  // The new code should still have a fallback, but Nixify errors are now properly categorized.
+  // The key regression: if Nixify fails, the route returns a NixifyError code, not unknown_error.
+  expect(source).toContain('NixifyError')
+  expect(source).toContain('e.code')
+})

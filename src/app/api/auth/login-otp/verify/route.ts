@@ -27,7 +27,7 @@ export async function POST(req: NextRequest) {
   })
 
   try {
-    const result = await verifyOtp(email, code, 'login', requestId)
+    const result = await verifyOtp(email, code, 'login')
     if (!result.verified) return NextResponse.json({ error: 'code_mismatch' }, { status: 400 })
 
     await db.otpRequest.update({

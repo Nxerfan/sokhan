@@ -19,7 +19,7 @@ export async function POST(req: NextRequest) {
   await db.otpRequest.update({ where: { id: otpReq.id }, data: { attempts: { increment: 1 } } })
 
   try {
-    const result = await verifyOtp(email, code, 'reset_password', requestId)
+    const result = await verifyOtp(email, code, 'reset_password')
     if (!result.verified) return NextResponse.json({ error: 'code_mismatch' }, { status: 400 })
 
     await db.otpRequest.update({

@@ -26,16 +26,16 @@ export async function POST(req: NextRequest) {
     const purpose: OtpPurpose = 'signup'
     const result = await sendOtp(email, purpose)
 
-    // Create PendingSignup
+    // Create PendingSignup — store otp_request_id (NOT api request_id)
     await db.pendingSignup.upsert({
       where: { email },
       create: {
         email,
-        nixifyRequestId: result.requestId,
+        nixifyRequestId: result.otpRequestId,
         expiresAt: new Date(result.expiresAt),
       },
       update: {
-        nixifyRequestId: result.requestId,
+        nixifyRequestId: result.otpRequestId,
         expiresAt: new Date(result.expiresAt),
         otpVerified: false,
       },
@@ -46,13 +46,13 @@ export async function POST(req: NextRequest) {
       data: {
         email,
         purpose,
-        requestId: result.requestId,
+        requestId: result.otpRequestId,
         expiresAt: new Date(result.expiresAt),
         ipAddress: req.headers.get('x-forwarded-for')?.split(',')[0] || null,
       },
     })
 
-    return NextResponse.json({ requestId: result.requestId, expiresAt: result.expiresAt })
+    return NextResponse.json({ requestId: result.otpRequestId, expiresAt: result.expiresAt })
   } catch (e) {
     if (e instanceof NixifyError) {
       return NextResponse.json({ error: e.code }, { status: e.statusCode })

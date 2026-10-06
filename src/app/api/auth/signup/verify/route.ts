@@ -33,7 +33,7 @@ export async function POST(req: NextRequest) {
   })
 
   try {
-    const result = await verifyOtp(email, code, 'signup', requestId)
+    const result = await verifyOtp(email, code, 'signup')
 
     if (!result.verified) {
       return NextResponse.json({ error: 'code_mismatch' }, { status: 400 })
