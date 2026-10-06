@@ -33,7 +33,7 @@ export async function POST(req: NextRequest) {
   })
 
   try {
-    const result = await verifyOtp(email, code, 'signup')
+    const result = await verifyOtp(email, code, 'signup', requestId)
 
     if (!result.verified) {
       return NextResponse.json({ error: 'code_mismatch' }, { status: 400 })
@@ -56,6 +56,7 @@ export async function POST(req: NextRequest) {
     if (e instanceof NixifyError) {
       return NextResponse.json({ error: e.code }, { status: e.statusCode })
     }
-    return NextResponse.json({ error: 'unknown_error' }, { status: 500 })
+    console.error('[auth:signup/verify] internal error', { component: 'auth', route: '/api/auth/signup/verify', errorName: e instanceof Error ? e.name : 'unknown' })
+    return NextResponse.json({ error: 'internal_error' }, { status: 500 })
   }
 }

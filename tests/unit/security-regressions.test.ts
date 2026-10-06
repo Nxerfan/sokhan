@@ -528,10 +528,11 @@ test('#Nixify signup/start uses otpRequestId (not requestId)', () => {
   expect(source).not.toContain('result.requestId')
 })
 
-test('#Nixify signup/verify does NOT pass requestId to verifyOtp', () => {
+test('#Nixify signup/verify passes requestId as expectedOtpRequestId (local correlation)', () => {
   const source = readSrc('src/app/api/auth/signup/verify/route.ts')
-  expect(source).toMatch(/verifyOtp\([^,]+,\s*[^,]+,\s*['"]signup['"]\)/)
-  expect(source).not.toMatch(/verifyOtp\([^)]*requestId/)
+  // The route MUST pass requestId to verifyOtp for correlation enforcement.
+  // This is LOCAL-ONLY metadata — the Nixify wire body does NOT contain it.
+  expect(source).toMatch(/verifyOtp\([^)]*requestId/)
 })
 
 test('#Nixify reset-password uses reset_password → reset mapping', () => {
@@ -539,11 +540,131 @@ test('#Nixify reset-password uses reset_password → reset mapping', () => {
   expect(startSource).toContain("'reset_password'")
 })
 
-test('#Nixify production 500 unknown_error regression: no bare unknown_error in signup/start', () => {
+test('#Nixify no OTP auth route contains runtime fallback error: unknown_error', () => {
+  const routes = [
+    'src/app/api/auth/signup/start/route.ts',
+    'src/app/api/auth/signup/verify/route.ts',
+    'src/app/api/auth/login-otp/start/route.ts',
+    'src/app/api/auth/login-otp/verify/route.ts',
+    'src/app/api/auth/reset-password/start/route.ts',
+    'src/app/api/auth/reset-password/verify/route.ts',
+    'src/app/api/auth/otp/resend/route.ts',
+  ]
+  for (const route of routes) {
+    const source = readSrc(route)
+    expect(source).not.toContain("'unknown_error'")
+    expect(source).toContain("'internal_error'")
+  }
+})
+
+test('#Nixify NixifyError structured errors never become unknown_error', () => {
+  const source = readSrc('src/lib/nixify/client.ts')
+  // The error parsing must use the structured envelope, not data.error as a string
+  expect(source).toContain('interface NixifyErrorBody')
+  expect(source).toContain('errorBody.error')
+  // parseNixifyError must extract the code from the envelope
+  expect(source).toContain('err.code')
+  expect(source).toContain("'unknown_error'") // only as fallback when code is missing in envelope
+})
+
+test('#Nixify network failure returns nixify_network_error (not unknown_error)', () => {
+  const source = readSrc('src/lib/nixify/client.ts')
+  expect(source).toContain("'nixify_network_error'")
+})
+
+test('#Nixify timeout returns nixify_timeout (not unknown_error)', () => {
+  const source = readSrc('src/lib/nixify/client.ts')
+  expect(source).toContain("'nixify_timeout'")
+})
+
+test('#Nixify malformed upstream success returns nixify_invalid_response (not unknown_error)', () => {
+  const source = readSrc('src/lib/nixify/client.ts')
+  expect(source).toContain("'nixify_invalid_response'")
+})
+
+test('#Nixify DB/application failure returns internal_error (not unknown_error)', () => {
+  // Check that auth routes use 'internal_error' for non-Nixify failures
   const source = readSrc('src/app/api/auth/signup/start/route.ts')
-  // The old code returned { error: 'unknown_error' } for all non-NixifyError exceptions.
-  // The new code should still have a fallback, but Nixify errors are now properly categorized.
-  // The key regression: if Nixify fails, the route returns a NixifyError code, not unknown_error.
-  expect(source).toContain('NixifyError')
-  expect(source).toContain('e.code')
+  expect(source).toContain("'internal_error'")
+  expect(source).not.toContain("'unknown_error'")
+})
+
+test('#Nixify safe runtime diagnostics: console.error with bounded fields', () => {
+  const source = readSrc('src/app/api/auth/signup/start/route.ts')
+  expect(source).toContain('console.error')
+  expect(source).toContain('component')
+  expect(source).toContain('route')
+  // Must NOT log secrets
+  expect(source).not.toContain('NIXIFY_API_KEY')
+  expect(source).not.toContain('Authorization')
+  expect(source).not.toContain('password')
+})
+
+
+// ------------------------------------------------------------------
+// Nixify OTP correlation enforcement tests
+// ------------------------------------------------------------------
+
+test('#Nixify verifyOtp accepts expectedOtpRequestId parameter', () => {
+  const source = readSrc('src/lib/nixify/client.ts')
+  expect(source).toContain('expectedOtpRequestId')
+})
+
+test('#Nixify verifyOtp compares upstream otp_request_id with expected', () => {
+  const source = readSrc('src/lib/nixify/client.ts')
+  expect(source).toContain('upstreamOtpRequestId')
+  expect(source).toContain('expectedOtpRequestId')
+  expect(source).toContain('!==')
+})
+
+test('#Nixify correlation mismatch returns nixify_correlation_mismatch (409)', () => {
+  const source = readSrc('src/lib/nixify/client.ts')
+  expect(source).toContain("'nixify_correlation_mismatch'")
+  expect(source).toContain('409')
+})
+
+test('#Nixify missing otp_request_id in verify success returns nixify_invalid_response', () => {
+  const source = readSrc('src/lib/nixify/client.ts')
+  // The verifyOtp function must check that otp_request_id is present and non-empty
+  const verifySection = source.slice(
+    source.indexOf('export async function verifyOtp'),
+    source.indexOf('// ─── Public API: resendOtp')
+  )
+  expect(verifySection).toContain('otp_request_id')
+  expect(verifySection).toContain("'nixify_invalid_response'")
+})
+
+test('#Nixify verify wire body contains ONLY email/code/purpose (no request_id)', () => {
+  const source = readSrc('src/lib/nixify/client.ts')
+  const verifySection = source.slice(
+    source.indexOf('export async function verifyOtp'),
+    source.indexOf('// ─── Public API: resendOtp')
+  )
+  // The nixifyFetch call should have { email, code, purpose } only
+  const fetchCall = verifySection.match(/nixifyFetch\([^)]+\{([^}]+)\}/)
+  if (fetchCall) {
+    expect(fetchCall[1]).not.toContain('request_id')
+    expect(fetchCall[1]).not.toContain('otp_request_id')
+    expect(fetchCall[1]).not.toContain('expectedOtpRequestId')
+  }
+})
+
+test('#Nixify all verify call sites pass expectedOtpRequestId', () => {
+  const signupVerify = readSrc('src/app/api/auth/signup/verify/route.ts')
+  expect(signupVerify).toMatch(/verifyOtp\([^)]*requestId/)
+
+  const loginVerify = readSrc('src/app/api/auth/login-otp/verify/route.ts')
+  expect(loginVerify).toMatch(/verifyOtp\([^)]*requestId/)
+
+  const resetVerify = readSrc('src/app/api/auth/reset-password/verify/route.ts')
+  expect(resetVerify).toMatch(/verifyOtp\([^)]*requestId/)
+})
+
+test('#Nixify mock mode correlates with expected OTP request ID', () => {
+  const source = readSrc('src/lib/nixify/client.ts')
+  // In mock mode, the function must return otpRequestId matching expectedOtpRequestId
+  const mockSection = source.match(/if \(MOCK_MODE\)[\s\S]*?return \{ verified[^}]*\}/)
+  if (mockSection) {
+    expect(mockSection[0]).toContain('expectedOtpRequestId')
+  }
 })

@@ -97,6 +97,7 @@ export type NixifyErrorCode =
   | 'nixify_timeout'
   | 'nixify_invalid_response'
   | 'nixify_configuration_error'
+  | 'nixify_correlation_mismatch'
   | 'unknown_error'
 
 export class NixifyError extends Error {
@@ -231,23 +232,40 @@ export async function sendOtp(email: string, purpose: OtpPurpose): Promise<SendO
 /**
  * Verify an OTP code with Nixify.
  *
- * NOTE: Nixify verification is by { email, code, purpose } — it does NOT
- * accept otp_request_id or request_id in the verify body. Sokhan may
- * validate its OWN local pending-signup correlation before calling this.
+ * Nixify wire request (documented):
+ *   { email, code, purpose }
+ *
+ * The `expectedOtpRequestId` is LOCAL-ONLY metadata — it is NEVER sent to
+ * Nixify. After a successful upstream verify, the returned `otp_request_id`
+ * MUST match the local expected correlation ID. If it does not, the
+ * verification is rejected fail-closed (nixify_correlation_mismatch, 409).
+ *
+ * This prevents local request A from being verified using upstream OTP B.
  */
 export async function verifyOtp(
   email: string,
   code: string,
   purpose: OtpPurpose,
+  expectedOtpRequestId: string,
 ): Promise<VerifyOtpResult> {
   validateEmail(email)
   const nixifyPurpose = mapPurpose(purpose)
 
   if (MOCK_MODE) {
-    return { verified: code === MOCK_CODE }
+    // Mock mode: correlate with the expected local OTP request ID so tests
+    // exercise the same application path as production.
+    if (code !== MOCK_CODE) {
+      throw new NixifyError('code_mismatch', 'Mock code mismatch', 400)
+    }
+    return { verified: true, otpRequestId: expectedOtpRequestId }
   }
 
-  const { res, data } = await nixifyFetch(NIXIFY_ENDPOINTS.verify, { email, code, purpose: nixifyPurpose }, 'otp_verify')
+  // Wire body contains ONLY documented fields — NEVER otp_request_id or request_id.
+  const { res, data } = await nixifyFetch(
+    NIXIFY_ENDPOINTS.verify,
+    { email, code, purpose: nixifyPurpose },
+    'otp_verify',
+  )
 
   if (!res.ok) {
     throw parseNixifyError(res, data)
@@ -258,12 +276,38 @@ export async function verifyOtp(
   }
   const d = data as Record<string, unknown>
   if (d.verified !== true) {
-    throw new NixifyError('nixify_invalid_response', 'Nixify otp_verify: verified field is not true', 502, typeof d.request_id === 'string' ? d.request_id : undefined)
+    throw new NixifyError(
+      'nixify_invalid_response',
+      'Nixify otp_verify: verified field is not true',
+      502,
+      typeof d.request_id === 'string' ? d.request_id : undefined,
+    )
+  }
+
+  // A successful real Nixify verify MUST contain a non-empty otp_request_id.
+  const upstreamOtpRequestId = d.otp_request_id
+  if (typeof upstreamOtpRequestId !== 'string' || upstreamOtpRequestId.length === 0) {
+    throw new NixifyError(
+      'nixify_invalid_response',
+      'Nixify otp_verify: missing otp_request_id in success response',
+      502,
+      typeof d.request_id === 'string' ? d.request_id : undefined,
+    )
+  }
+
+  // Fail-closed: upstream otp_request_id MUST match the local expected correlation ID.
+  if (upstreamOtpRequestId !== expectedOtpRequestId) {
+    throw new NixifyError(
+      'nixify_correlation_mismatch',
+      'OTP correlation mismatch: upstream otp_request_id does not match local expected ID',
+      409,
+      typeof d.request_id === 'string' ? d.request_id : undefined,
+    )
   }
 
   return {
     verified: true,
-    otpRequestId: typeof d.otp_request_id === 'string' ? d.otp_request_id : undefined,
+    otpRequestId: upstreamOtpRequestId,
     apiRequestId: typeof d.request_id === 'string' ? d.request_id : undefined,
   }
 }
@@ -316,6 +360,7 @@ export function getErrorMessage(code: string): { fa: string; en: string } {
     nixify_timeout: { fa: 'زمان اتصال به سرویس تأیید تمام شد', en: 'OTP service timeout' },
     nixify_invalid_response: { fa: 'پاسخ نامعتبر از سرویس تأیید', en: 'Invalid OTP service response' },
     nixify_configuration_error: { fa: 'خطای پیکربندی سرور', en: 'Server configuration error' },
+    nixify_correlation_mismatch: { fa: 'عدم تطابق درخواست تأیید', en: 'OTP correlation mismatch' },
   }
   return messages[code] || { fa: 'خطای ناشناخته', en: 'Unknown error' }
 }

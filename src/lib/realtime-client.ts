@@ -126,20 +126,46 @@ export async function connectRealtime(): Promise<Socket> {
   //   1. Fetch a fresh token
   //   2. Update socket.auth
   //   3. Manually call socket.connect()
-  // For membership_inactive, do NOT retry — a new token cannot fix a
-  // revoked membership. Stop the retry loop and remain disconnected.
+  //
+  // membership_inactive: TERMINAL — a new token cannot fix a revoked
+  //   membership. Stop the retry loop and remain disconnected.
+  //
+  // membership_check_failed: TRANSIENT infrastructure error — do NOT
+  //   fetch a new token (the token is fine). Retry socket.connect()
+  //   with a bounded backoff. Prevent duplicate retry timers.
   let membershipRevoked = false
+  let membershipCheckRetryTimer: ReturnType<typeof setTimeout> | null = null
+
   createdSocket.on('connect_error', async (err: Error) => {
     if (socketInstance !== createdSocket) return
     const msg = err.message
-    if (msg === 'membership_inactive' || msg === 'membership_check_failed') {
-      // A new token cannot repair a revoked membership. Stop retrying.
+
+    // TERMINAL: membership is revoked. Stop everything.
+    if (msg === 'membership_inactive') {
       membershipRevoked = true
       createdSocket.io.opts.reconnection = false
       console.error('[realtime] membership inactive — disconnecting')
       createdSocket.disconnect()
       return
     }
+
+    // TRANSIENT: infrastructure error during membership check.
+    // Do NOT fetch a new token — the token is still valid.
+    // Retry socket.connect() with bounded backoff.
+    if (msg === 'membership_check_failed') {
+      if (membershipRevoked) return
+      if (membershipCheckRetryTimer) return // prevent duplicate retry timers
+      console.error('[realtime] membership check failed — retrying with backoff')
+      membershipCheckRetryTimer = setTimeout(() => {
+        membershipCheckRetryTimer = null
+        if (socketInstance === createdSocket && !membershipRevoked) {
+          createdSocket.connect()
+        }
+      }, 2000) // 2s backoff
+      return
+    }
+
+    // EXPIRED TOKEN: refresh + manual reconnect.
     if (msg === 'invalid_token' || msg === 'no_token') {
       if (membershipRevoked) return
       const freshToken = await refreshToken()

@@ -100,8 +100,8 @@ test('send uses canonical https://nixify.ir/api/v1/otp/send', async () => {
 })
 
 test('verify uses canonical https://nixify.ir/api/v1/otp/verify', async () => {
-  mockResponses.push({ status: 200, body: { verified: true, otp_request_id: 'otp_1', request_id: 'trace_1' } })
-  await verifyOtp('user@test.com', '123456', 'signup')
+  mockResponses.push({ status: 200, body: { verified: true, otp_request_id: 'otp_expected_123', request_id: 'trace_1' } })
+  await verifyOtp('user@test.com', '123456', 'signup', 'otp_expected_123')
   expect(fetchCalls[0].url).toBe('https://nixify.ir/api/v1/otp/verify')
 })
 
@@ -137,8 +137,8 @@ test('send sends mapped purpose in body', async () => {
 })
 
 test('verify sends mapped purpose in body', async () => {
-  mockResponses.push({ status: 200, body: { verified: true } })
-  await verifyOtp('user@test.com', '123456', 'reset_password')
+  mockResponses.push({ status: 200, body: { verified: true, otp_request_id: 'otp_expected_reset' } })
+  await verifyOtp('user@test.com', '123456', 'reset_password', 'otp_expected_reset')
   const body = JSON.parse(fetchCalls[0].body)
   expect(body.purpose).toBe('reset')
 })
@@ -157,11 +157,11 @@ test('send preserves otp_request_id as otpRequestId (NOT apiRequestId)', async (
 test('verify preserves both IDs', async () => {
   mockResponses.push({
     status: 200,
-    body: { verified: true, otp_request_id: 'otp_123', request_id: 'api_trace_456' },
+    body: { verified: true, otp_request_id: 'otp_expected_123', request_id: 'api_trace_456' },
   })
-  const result = await verifyOtp('user@test.com', '123456', 'signup')
+  const result = await verifyOtp('user@test.com', '123456', 'signup', 'otp_expected_123')
   expect(result.verified).toBe(true)
-  expect(result.otpRequestId).toBe('otp_123')
+  expect(result.otpRequestId).toBe('otp_expected_123')
   expect(result.apiRequestId).toBe('api_trace_456')
 })
 
@@ -209,7 +209,7 @@ test('parses 401 unauthorized', async () => {
 test('parses 403 key_revoked', async () => {
   mockResponses.push({ status: 403, body: { error: { code: 'key_revoked', message: 'Key revoked' }, request_id: 't2' } })
   try {
-    await verifyOtp('user@test.com', '123456', 'signup')
+    await verifyOtp('user@test.com', '123456', 'signup', 'otp_expected_123')
     expect(false).toBe(true)
   } catch (e) {
     expect((e as InstanceType<typeof NixifyError>).code).toBe('key_revoked')
@@ -219,7 +219,7 @@ test('parses 403 key_revoked', async () => {
 test('parses 400 code_mismatch from verify', async () => {
   mockResponses.push({ status: 400, body: { error: { code: 'code_mismatch', message: 'Wrong code' }, request_id: 't3' } })
   try {
-    await verifyOtp('user@test.com', '000000', 'signup')
+    await verifyOtp('user@test.com', '000000', 'signup', 'otp_expected_123')
     expect(false).toBe(true)
   } catch (e) {
     expect((e as InstanceType<typeof NixifyError>).code).toBe('code_mismatch')
@@ -311,7 +311,7 @@ test('throws nixify_invalid_response when expires_at is invalid', async () => {
 test('throws nixify_invalid_response when verify response has verified !== true', async () => {
   mockResponses.push({ status: 200, body: { verified: false } })
   try {
-    await verifyOtp('user@test.com', '123456', 'signup')
+    await verifyOtp('user@test.com', '123456', 'signup', 'otp_expected_123')
     expect(false).toBe(true)
   } catch (e) {
     expect((e as InstanceType<typeof NixifyError>).code).toBe('nixify_invalid_response')
@@ -326,8 +326,8 @@ test('send sends only { email, purpose } — no request_id, no locale', async ()
 })
 
 test('verify sends only { email, code, purpose } — no request_id, no otp_request_id', async () => {
-  mockResponses.push({ status: 200, body: { verified: true } })
-  await verifyOtp('user@test.com', '123456', 'signup')
+  mockResponses.push({ status: 200, body: { verified: true, otp_request_id: 'otp_expected_123' } })
+  await verifyOtp('user@test.com', '123456', 'signup', 'otp_expected_123')
   const body = JSON.parse(fetchCalls[0].body)
   expect(Object.keys(body).sort()).toEqual(['code', 'email', 'purpose'])
 })

@@ -57,6 +57,7 @@ export async function POST(req: NextRequest) {
     if (e instanceof NixifyError) {
       return NextResponse.json({ error: e.code }, { status: e.statusCode })
     }
-    return NextResponse.json({ error: 'unknown_error' }, { status: 500 })
+    console.error('[auth:signup/start] internal error', { component: 'auth', route: '/api/auth/signup/start', errorName: e instanceof Error ? e.name : 'unknown' })
+    return NextResponse.json({ error: 'internal_error' }, { status: 500 })
   }
 }

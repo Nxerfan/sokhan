@@ -19,7 +19,7 @@ export async function POST(req: NextRequest) {
   await db.otpRequest.update({ where: { id: otpReq.id }, data: { attempts: { increment: 1 } } })
 
   try {
-    const result = await verifyOtp(email, code, 'reset_password')
+    const result = await verifyOtp(email, code, 'reset_password', requestId)
     if (!result.verified) return NextResponse.json({ error: 'code_mismatch' }, { status: 400 })
 
     await db.otpRequest.update({
@@ -29,6 +29,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ verified: true })
   } catch (e) {
     if (e instanceof NixifyError) return NextResponse.json({ error: e.code }, { status: e.statusCode })
-    return NextResponse.json({ error: 'unknown_error' }, { status: 500 })
+    console.error('[auth:reset-password/verify] internal error', { component: 'auth', route: '/api/auth/reset-password/verify', errorName: e instanceof Error ? e.name : 'unknown' })
+    return NextResponse.json({ error: 'internal_error' }, { status: 500 })
   }
 }
