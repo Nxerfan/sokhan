@@ -211,9 +211,14 @@ export async function createCheckout(args: {
   const provider = deps.resolveProvider(gatewayName)
   if (!provider) throw new BillingError('unknown/disabled gateway', 'invalid_gateway')
 
-  // The caller MUST be inside withTenant(tenantId). Assert.
+  // Defense-in-depth: if the caller is ALREADY inside a tenant context and it
+  // mismatches the tenantId they passed, reject (a session-scoped caller must
+  // not act on a different tenant). If there is NO context (e.g. a test or a
+  // bootstrap caller), createCheckout establishes its own below — this matches
+  // handleCallback / transitionToFreePlan / getBillingState which all wrap
+  // internally without requiring a pre-existing context.
   const ctxTid = getCurrentTenantId()
-  if (ctxTid !== tenantId) {
+  if (ctxTid !== undefined && ctxTid !== tenantId) {
     throw new BillingError('tenant context mismatch', 'tenant_context_required')
   }
 
