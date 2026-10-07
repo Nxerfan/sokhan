@@ -15,12 +15,13 @@ export async function POST(req: NextRequest) {
     await db.otpRequest.create({
       data: {
         userId: user.id, email, purpose: 'reset_password',
-        requestId: result.requestId, expiresAt: new Date(result.expiresAt),
+        requestId: result.otpRequestId, expiresAt: new Date(result.expiresAt),
       },
     })
-    return NextResponse.json({ requestId: result.requestId, expiresAt: result.expiresAt })
+    return NextResponse.json({ requestId: result.otpRequestId, expiresAt: result.expiresAt })
   } catch (e) {
     if (e instanceof NixifyError) return NextResponse.json({ error: e.code }, { status: e.statusCode })
-    return NextResponse.json({ error: 'unknown_error' }, { status: 500 })
+    console.error('[auth:reset-password/start] internal error', { component: 'auth', route: '/api/auth/reset-password/start', errorName: e instanceof Error ? e.name : 'unknown' })
+    return NextResponse.json({ error: 'internal_error' }, { status: 500 })
   }
 }

@@ -1,48 +1,33 @@
 import http from 'http';
 import { Server, type Socket } from 'socket.io';
-import crypto from 'crypto';
 import { PrismaClient } from '@prisma/client';
+import {
+  verifyToken as verifyTokenShared,
+  type AgentTokenPayload,
+  type VisitorTokenPayload,
+  type RealtimeTokenPayload,
+} from '../src/lib/realtime-token-shared';
 
 /**
  * Vercel-native WebSocket endpoint (official Vercel Socket.IO pattern).
- *
- * Per https://vercel.com/docs/functions/websockets — Vercel Functions can
- * serve WebSocket connections using standard Node.js libraries like Socket.IO.
- * The pattern: create an HTTP server, attach Socket.IO, export the server.
  *
  * Architecture:
  *   - Socket.IO server runs IN the Vercel Function (no separate host)
  *   - @socket.io/redis-adapter broadcasts across Function instances
  *   - Redis pub/sub receives events from Next.js API routes
+ *   - Token verification uses the shared pure module (expiry + timing-safe)
+ *   - Agent membership revalidation runs in io.use() MIDDLEWARE — before
+ *     the `connect` event reaches the client. An inactive membership
+ *     REFUSES the connection with `connect_error: membership_inactive`.
  *   - Tenant isolation enforced on conversation:join (DB check)
  */
 
 const prisma = new PrismaClient({ log: ['error'] });
 
-// Token verification (mirrors src/lib/realtime-token.ts)
-interface AgentPayload { type: 'agent'; userId: string; tenantId: string; role: string }
-interface VisitorPayload { type: 'visitor'; contactId: string; tenantId: string; slug: string }
-type TokenPayload = AgentPayload | VisitorPayload;
-
-function verifyToken(token: string, secret: string): TokenPayload | null {
-  const parts = token.split('.');
-  if (parts.length !== 2) return null;
-  const [encoded, sig] = parts;
-  const expectedSig = crypto.createHmac('sha256', secret).update(encoded).digest('base64url');
-  if (sig !== expectedSig) return null;
-  try {
-    const payload = JSON.parse(Buffer.from(encoded, 'base64url').toString());
-    if (payload.type !== 'agent' && payload.type !== 'visitor') return null;
-    return payload as TokenPayload;
-  } catch { return null }
-}
-
-interface AuthSocket extends Socket { payload?: TokenPayload }
+interface AuthSocket extends Socket { payload?: RealtimeTokenPayload }
 
 const server = http.createServer();
 const io = new Server(server, {
-  // Vercel does NOT strip the /api/realtime prefix — the function receives
-  // the full URL. Set the Socket.IO path to match the client's path.
   path: '/api/realtime',
   addTrailingSlash: false,
   cors: { origin: '*', methods: ['GET', 'POST'] },
@@ -64,7 +49,6 @@ if (redisUrl) {
       await Promise.all([pubClient.connect(), subClient.connect()]);
       io.adapter(createAdapter(pubClient, subClient));
 
-      // Subscribe to the publish channel
       const sub = createClient({ url: redisUrl });
       await sub.connect();
       const channel = process.env.REDIS_CHANNEL || 'sukhan:realtime:publish';
@@ -81,17 +65,45 @@ if (redisUrl) {
   })();
 }
 
-// Auth middleware
+// Auth + authorization middleware.
+// Runs BEFORE the socket is considered connected. If next(new Error(...))
+// is called, the client receives a `connect_error` event and the socket
+// is never connected — no `connect` event, no room joins, no handlers.
 const secret = process.env.NEXTAUTH_SECRET;
 if (!secret) {
   console.error('[rt] FATAL: NEXTAUTH_SECRET is not set. Refusing to start.');
   process.exit(1);
 }
-io.use((socket: AuthSocket, next) => {
+
+io.use(async (socket: AuthSocket, next) => {
   const token = (socket.handshake.auth as { token?: string })?.token;
   if (!token) return next(new Error('no_token'));
-  const payload = verifyToken(token, secret);
+
+  const payload = verifyTokenShared(token, secret);
   if (!payload) return next(new Error('invalid_token'));
+
+  // For agents: revalidate membership against CURRENT DB state.
+  // A removed/inactive membership must NOT retain realtime access,
+  // even if the token is still signed and not yet expired.
+  if (payload.type === 'agent') {
+    const agent = payload as AgentTokenPayload;
+    let membership: { status: string } | null = null;
+    try {
+      membership = await prisma.membership.findFirst({
+        where: { userId: agent.userId, tenantId: agent.tenantId, status: 'active' },
+        select: { id: true, role: true, status: true },
+      });
+    } catch (e) {
+      // Infrastructure failure — do NOT reveal DB errors to clients.
+      console.error('[rt] membership revalidation DB error:', e instanceof Error ? e.message : e);
+      return next(new Error('membership_check_failed'));
+    }
+    if (!membership || membership.status !== 'active') {
+      console.log(`[rt] REJECTED agent — membership not active (user=${agent.userId}, tenant=${agent.tenantId})`);
+      return next(new Error('membership_inactive'));
+    }
+  }
+
   socket.payload = payload;
   next();
 });
@@ -99,20 +111,25 @@ io.use((socket: AuthSocket, next) => {
 io.on('connection', (socket: AuthSocket) => {
   const payload = socket.payload!;
   console.log(`[rt] connect type=${payload.type} id=${socket.id}`);
-  // Only agents join the tenant-wide room (for conversation:new/updated events).
-  // Visitors only receive events for their own conversation.
+
+  // Connection is fully authorized by the middleware.
+  // Agents join tenant-wide + agent rooms immediately.
   if (payload.type === 'agent') {
-    socket.join(`tenant:${payload.tenantId}`);
-    socket.join(`agent:${payload.userId}`);
+    const agent = payload as AgentTokenPayload;
+    socket.join(`tenant:${agent.tenantId}`);
+    socket.join(`agent:${agent.userId}`);
   }
 
   // CRITICAL: verify conversation belongs to the socket's tenant before joining
   socket.on('conversation:join', async (conversationId: string) => {
     try {
-      const where: any = { id: conversationId, tenantId: payload.tenantId };
+      const where: { id: string; tenantId: string; contactId?: string } = {
+        id: conversationId,
+        tenantId: payload.tenantId,
+      };
       // Visitors may only join their OWN conversations (contactId match)
       if (payload.type === 'visitor') {
-        where.contactId = payload.contactId;
+        where.contactId = (payload as VisitorTokenPayload).contactId;
       }
       const conv = await prisma.conversation.findFirst({ where, select: { id: true } });
       if (!conv) {
@@ -134,7 +151,7 @@ io.on('connection', (socket: AuthSocket) => {
     if (!socket.rooms.has(`conversation:${d.conversationId}`)) return;
     socket.to(`conversation:${d.conversationId}`).emit('typing:start', {
       conversationId: d.conversationId, senderType: payload.type,
-      senderId: payload.type === 'agent' ? payload.userId : payload.contactId,
+      senderId: payload.type === 'agent' ? (payload as AgentTokenPayload).userId : (payload as VisitorTokenPayload).contactId,
     });
   });
   socket.on('typing:stop', (d: { conversationId: string }) => {
@@ -147,7 +164,7 @@ io.on('connection', (socket: AuthSocket) => {
     if (!socket.rooms.has(`conversation:${d.conversationId}`)) return;
     socket.to(`conversation:${d.conversationId}`).emit('message:read', {
       conversationId: d.conversationId, readerType: payload.type,
-      readerId: payload.type === 'agent' ? payload.userId : payload.contactId,
+      readerId: payload.type === 'agent' ? (payload as AgentTokenPayload).userId : (payload as VisitorTokenPayload).contactId,
     });
   });
 

@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { getAuthSecret } from '@/lib/env-check'
+import crypto from 'crypto'
 
 /**
  * Internal endpoint for the Docker realtime service to verify
  * conversation ownership before allowing conversation:join.
  *
- * Auth: X-Internal-Secret header must match NEXTAUTH_SECRET.
+ * Auth: X-Internal-Secret header must match NEXTAUTH_SECRET (timing-safe).
  * This endpoint is NOT public — it's for server-to-server use only.
  *
  * Query params:
@@ -26,10 +27,17 @@ import { getAuthSecret } from '@/lib/env-check'
  *   - Agent: conversation must match `tenantId`.
  *   - Anything not found → 403.
  */
+function timingSafeEqualStr(a: string, b: string): boolean {
+  const bufA = Buffer.from(a)
+  const bufB = Buffer.from(b)
+  if (bufA.length !== bufB.length) return false
+  return crypto.timingSafeEqual(bufA, bufB)
+}
+
 export async function GET(req: NextRequest) {
   const secret = getAuthSecret()
-  const authHeader = req.headers.get('x-internal-secret')
-  if (authHeader !== secret) {
+  const authHeader = req.headers.get('x-internal-secret') || ''
+  if (!timingSafeEqualStr(authHeader, secret)) {
     return NextResponse.json({ error: 'forbidden' }, { status: 403 })
   }
 

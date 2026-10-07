@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test'
+import { otpSignupPlaywright } from './helpers/otp-signup'
 
 /**
  * Smoke test — golden path that should have caught the signup-hang bug.
@@ -34,10 +35,8 @@ function creds(testTitle: string) {
 }
 
 async function signupAndLandOnDashboard(page: Page, email: string, workspace: string) {
-  // API-based signup (reliable, no hydration issues — same approach as isolation/module3 tests)
-  await page.request.post(`${BASE}/api/auth/signup`, {
-    data: { email, password: 'password123', name: 'Smoke Tester', workspaceName: workspace },
-  })
+  // 3-step OTP signup (reliable, no hydration issues — same approach as isolation/module3 tests)
+  await otpSignupPlaywright(page.request, BASE, email, workspace)
   const csrfRes = await page.request.get(`${BASE}/api/auth/csrf`)
   const { csrfToken } = await csrfRes.json()
   await page.request.post(`${BASE}/api/auth/callback/credentials`, {

@@ -1,4 +1,5 @@
 import { test, expect, type Page, type BrowserContext } from '@playwright/test'
+import { otpSignupPlaywright } from './helpers/otp-signup'
 
 /**
  * Socket race condition test — verifies that an agent reply sent IMMEDIATELY
@@ -26,11 +27,9 @@ async function signupAndSignin(ctx: BrowserContext, email: string, workspace: st
   await page.waitForLoadState('networkidle')
   await page.waitForTimeout(2000)
 
-  // Signup via API (the page's cookie jar handles session cookies)
-  const signupRes = await page.request.post(`${DASHBOARD}/api/auth/signup`, {
-    data: { email, password: 'password123', name: 'Agent', workspaceName: workspace },
-  })
-  expect(signupRes.ok()).toBe(true)
+  // Signup via 3-step OTP flow (the page's cookie jar handles session cookies)
+  const signupRes = await otpSignupPlaywright(page.request, DASHBOARD, email, workspace)
+  expect(signupRes.ok).toBe(true)
 
   // Get CSRF
   const csrfRes = await page.request.get(`${DASHBOARD}/api/auth/csrf`)

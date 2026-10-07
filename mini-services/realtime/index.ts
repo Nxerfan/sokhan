@@ -1,11 +1,17 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'http'
 import { Server, type Socket } from 'socket.io'
-import crypto from 'crypto'
 import { readFileSync } from 'fs'
 import { resolve } from 'path'
+import crypto from 'crypto'
+import {
+  verifyToken as verifyTokenShared,
+  type AgentTokenPayload,
+  type VisitorTokenPayload,
+  type RealtimeTokenPayload,
+} from '../../src/lib/realtime-token-shared'
 
 /**
- * Sukhan Realtime Service (Module 2 + Module 3 Docker)
+ * Sukhan Realtime Service (Docker mode)
  *
  * Two HTTP servers:
  *   - Port 3003: Socket.IO server (path: '/') — handles realtime connections
@@ -13,30 +19,15 @@ import { resolve } from 'path'
  *   - Port 3004: Internal HTTP server — handles /internal/publish calls from
  *     Next.js API routes. NOT exposed through Caddy; server-to-server only.
  *
- * Redis (optional, enabled when REDIS_URL is set):
- *   - Socket.IO adapter (@socket.io/redis-adapter) for cross-instance
- *     broadcast of socket events (typing, read receipts, etc.). Required
- *     when running multiple realtime replicas behind a load balancer.
- *   - Pub/sub subscription on 'sukhan:realtime:publish' — an alternative
- *     to the HTTP /internal/publish endpoint. Next.js can publish events
- *     via Redis PUBLISH (lower latency, no HTTP overhead). The HTTP
- *     endpoint is kept as a fallback for backwards compatibility.
+ * Token verification uses the shared pure module (`realtime-token-shared.ts`)
+ * which adds expiry (iat/exp) and timing-safe HMAC comparison.
  *
- * IMPORTANT: loads NEXTAUTH_SECRET from the parent project's .env so token
- * signing/verification matches the Next.js app. Without this, the realtime
- * service falls back to 'dev-secret-change-me' and ALL token verification +
- * internal publish auth fails silently.
- *
- * No database access — this service is a pure message broker.
+ * Agent membership is revalidated against the DB (via the Next.js app's
+ * /api/realtime/verify-membership endpoint) before granting tenant-wide
+ * realtime access. A removed or inactive agent loses access immediately.
  */
 
-// Load .env AND .env.local from the parent project (sandbox: the mini-service
-// runs in its own process and doesn't inherit the parent's env, and bun doesn't
-// auto-load .env.local like Next.js does). In production with Docker Compose,
-// the env is passed explicitly and this file load is a no-op.
-//
-// Load order: .env first, then .env.local — .env.local OVERWRITES values from
-// .env (matching Next.js behavior where .env.local takes precedence).
+// Load .env AND .env.local from the parent project.
 function loadEnvFile(filePath: string, overwrite = false) {
   try {
     const envContent = readFileSync(filePath, 'utf-8')
@@ -57,17 +48,11 @@ function loadEnvFile(filePath: string, overwrite = false) {
 
 const parentDir = resolve(process.cwd(), '..', '..')
 loadEnvFile(resolve(parentDir, '.env'))
-loadEnvFile(resolve(parentDir, '.env.local'), true) // overwrite — .env.local takes precedence
+loadEnvFile(resolve(parentDir, '.env.local'), true)
 
 const SOCKET_PORT = 3003
 const INTERNAL_PORT = 3004
 
-// NEXTAUTH_SECRET check — in dev, use a DETERMINISTIC dev secret (not random).
-// This ensures Next.js and the realtime service share the SAME secret even
-// when both start without NEXTAUTH_SECRET set in the environment.
-// A random per-process secret would cause Socket.IO auth to fail silently
-// (tokens signed by one process wouldn't verify in the other), degrading to
-// 8-10s polling. The deterministic dev secret avoids this.
 const DEV_SECRET = 'sukhan-dev-secret-DO-NOT-USE-IN-PRODUCTION-a7f3b2c1'
 if (!process.env.NEXTAUTH_SECRET) {
   if (process.env.NODE_ENV === 'production') {
@@ -76,13 +61,10 @@ if (!process.env.NEXTAUTH_SECRET) {
     console.error('   Generate one with: openssl rand -base64 32\n')
     process.exit(1)
   } else {
-    // Dev mode: use the deterministic dev secret (same as Next.js's env-check.ts)
     process.env.NEXTAUTH_SECRET = DEV_SECRET
     console.warn(
       '\n⚠️  NEXTAUTH_SECRET not set — using deterministic dev secret.\n' +
-      '   This is NOT secure. Set NEXTAUTH_SECRET in production.\n' +
-      '   Both Next.js and this service use the same dev secret\n' +
-      '   so Socket.IO auth works correctly.\n'
+      '   This is NOT secure. Set NEXTAUTH_SECRET in production.\n'
     )
   }
 }
@@ -90,43 +72,18 @@ const SECRET = process.env.NEXTAUTH_SECRET
 const APP_INTERNAL_URL = process.env.APP_INTERNAL_URL || 'http://localhost:3000'
 const REDIS_URL = process.env.REDIS_URL
 
-// NEXTAUTH_SECRET is used for token verification — never log it.
 if (REDIS_URL) {
   console.log('[redis] REDIS_URL set — will enable adapter + pub/sub subscription')
 } else {
   console.log('[redis] REDIS_URL not set — using in-memory adapter (single instance only)')
 }
 
-// ============================================================
-// Token verification (mirrors src/lib/realtime-token.ts)
-// ============================================================
-interface AgentPayload {
-  type: 'agent'
-  userId: string
-  tenantId: string
-  role: string
-}
-interface VisitorPayload {
-  type: 'visitor'
-  contactId: string
-  tenantId: string
-  slug: string
-}
-type TokenPayload = AgentPayload | VisitorPayload
-
-function verifyToken(token: string): TokenPayload | null {
-  const parts = token.split('.')
-  if (parts.length !== 2) return null
-  const [encoded, sig] = parts
-  const expectedSig = crypto.createHmac('sha256', SECRET).update(encoded).digest('base64url')
-  if (sig !== expectedSig) return null
-  try {
-    const payload = JSON.parse(Buffer.from(encoded, 'base64url').toString())
-    if (payload.type !== 'agent' && payload.type !== 'visitor') return null
-    return payload as TokenPayload
-  } catch {
-    return null
-  }
+// Timing-safe string comparison for internal secret checks.
+function timingSafeEqualStr(a: string, b: string): boolean {
+  const bufA = Buffer.from(a)
+  const bufB = Buffer.from(b)
+  if (bufA.length !== bufB.length) return false
+  return crypto.timingSafeEqual(bufA, bufB)
 }
 
 // ============================================================
@@ -141,20 +98,51 @@ const io = new Server(socketServer, {
 })
 
 interface AuthenticatedSocket extends Socket {
-  payload?: TokenPayload
+  payload?: RealtimeTokenPayload
 }
 
-io.use((socket: AuthenticatedSocket, next) => {
+// Auth + authorization middleware.
+// Runs BEFORE the socket is considered connected. If next(new Error(...))
+// is called, the client receives a `connect_error` event and the socket
+// is never connected — no `connect` event, no room joins, no handlers.
+io.use(async (socket: AuthenticatedSocket, next) => {
   const token = socket.handshake.auth?.token as string | undefined
   if (!token) {
     console.log('[auth] no token provided')
     return next(new Error('no_token'))
   }
-  const payload = verifyToken(token)
+  const payload = verifyTokenShared(token, SECRET!)
   if (!payload) {
-    console.log('[auth] invalid token')
+    console.log('[auth] invalid or expired token')
     return next(new Error('invalid_token'))
   }
+
+  // For agents: revalidate membership against CURRENT DB state via the
+  // Next.js app's internal verify-membership endpoint. A removed/inactive
+  // membership must NOT retain realtime access. This runs in MIDDLEWARE
+  // so the connection is REFUSED before `connect` reaches the client.
+  if (payload.type === 'agent') {
+    const agent = payload as AgentTokenPayload
+    try {
+      const params = new URLSearchParams({
+        userId: agent.userId,
+        tenantId: agent.tenantId,
+      })
+      const verifyUrl = `${APP_INTERNAL_URL}/api/realtime/verify-membership?${params}`
+      const res = await fetch(verifyUrl, {
+        headers: { 'X-Internal-Secret': SECRET! },
+      })
+      if (!res.ok) {
+        console.log(`[auth] REJECTED agent — membership not active (user=${agent.userId}, tenant=${agent.tenantId}, status=${res.status})`)
+        return next(new Error('membership_inactive'))
+      }
+    } catch (e) {
+      // Infrastructure failure — do NOT reveal DB errors to clients.
+      console.error('[auth] membership revalidation error:', e instanceof Error ? e.message : e)
+      return next(new Error('membership_check_failed'))
+    }
+  }
+
   socket.payload = payload
   next()
 })
@@ -163,28 +151,27 @@ io.on('connection', (socket: AuthenticatedSocket) => {
   const payload = socket.payload!
   console.log(`[connect] type=${payload.type} id=${socket.id}`)
 
-  // Only agents join the tenant-wide room.
-  // Visitors only receive events for their own conversation.
+  // Connection is fully authorized by the middleware.
+  // Agents join tenant-wide + agent rooms immediately.
   if (payload.type === 'agent') {
-    socket.join(`tenant:${payload.tenantId}`)
-    socket.join(`agent:${payload.userId}`)
+    const agent = payload as AgentTokenPayload
+    socket.join(`tenant:${agent.tenantId}`)
+    socket.join(`agent:${agent.userId}`)
   }
 
+  // CRITICAL: verify conversation belongs to the socket's tenant before joining
   socket.on('conversation:join', async (conversationId: string) => {
-    // Verify conversation ownership via the Next.js app's verify-conversation endpoint.
-    // Agents: must match tenant. Visitors: must match tenant AND contactId.
-    // In Docker Compose, the Next.js service is 'app' (not localhost).
     try {
       const params = new URLSearchParams({
         conversationId,
         tenantId: payload.tenantId,
         type: payload.type,
-        contactId: payload.type === 'visitor' ? payload.contactId : '',
-        userId: payload.type === 'agent' ? payload.userId : '',
+        contactId: payload.type === 'visitor' ? (payload as VisitorTokenPayload).contactId : '',
+        userId: payload.type === 'agent' ? (payload as AgentTokenPayload).userId : '',
       })
       const verifyUrl = `${APP_INTERNAL_URL}/api/realtime/verify-conversation?${params}`
       const res = await fetch(verifyUrl, {
-        headers: { 'X-Internal-Secret': SECRET },
+        headers: { 'X-Internal-Secret': SECRET! },
       })
       if (res.ok) {
         socket.join(`conversation:${conversationId}`)
@@ -206,7 +193,7 @@ io.on('connection', (socket: AuthenticatedSocket) => {
     socket.to(`conversation:${data.conversationId}`).emit('typing:start', {
       conversationId: data.conversationId,
       senderType: payload.type,
-      senderId: payload.type === 'agent' ? payload.userId : payload.contactId,
+      senderId: payload.type === 'agent' ? (payload as AgentTokenPayload).userId : (payload as VisitorTokenPayload).contactId,
     })
   })
 
@@ -223,7 +210,7 @@ io.on('connection', (socket: AuthenticatedSocket) => {
     socket.to(`conversation:${data.conversationId}`).emit('message:read', {
       conversationId: data.conversationId,
       readerType: payload.type,
-      readerId: payload.type === 'agent' ? payload.userId : payload.contactId,
+      readerId: payload.type === 'agent' ? (payload as AgentTokenPayload).userId : (payload as VisitorTokenPayload).contactId,
     })
   })
 
@@ -235,22 +222,6 @@ io.on('connection', (socket: AuthenticatedSocket) => {
 // ============================================================
 // Redis adapter + pub/sub (optional, when REDIS_URL is set)
 // ============================================================
-//
-// The adapter enables cross-instance broadcast of Socket.IO events. With
-// multiple realtime replicas behind a load balancer, a socket event emitted
-// on instance A is delivered to sockets connected to instances B, C, etc.
-//
-// The pub/sub subscription is an alternative to the HTTP /internal/publish
-// endpoint. When REDIS_URL is set, Next.js API routes SHOULD publish via
-// Redis PUBLISH to the 'sukhan:realtime:publish' channel. The HTTP endpoint
-// is kept as a fallback for backwards compatibility.
-//
-// To avoid duplicate delivery when multiple realtime instances each receive
-// the same Redis publish, we use `io.local.to(room).emit(...)` on the Redis
-// subscription path — `local` means "emit only to sockets on THIS instance".
-// Each realtime instance receives the Redis publish and emits to its own
-// local sockets. The HTTP endpoint, by contrast, uses `io.to(room).emit(...)`
-// (with adapter fan-out) so a single HTTP POST reaches all instances' sockets.
 const PUBLISH_CHANNEL = process.env.REDIS_CHANNEL || 'sukhan:realtime:publish'
 let redisEnabled = false
 
@@ -275,17 +246,12 @@ async function setupRedis() {
       publishSubscriber.connect(),
     ])
 
-    // Adapter for cross-instance Socket.IO event broadcast (typing, read receipts, etc.)
     io.adapter(createAdapter(pubClient, subClient))
 
-    // Subscribe to the app-level publish channel (alternative to the HTTP endpoint)
     await publishSubscriber.subscribe(PUBLISH_CHANNEL, (message: string) => {
       try {
         const { room, event, payload } = JSON.parse(message)
         if (room && event) {
-          // io.local = emit only to sockets on THIS instance (no adapter fan-out).
-          // Each realtime instance receives the Redis publish and emits to its
-          // own local sockets — no duplication.
           io.local.to(room).emit(event, payload)
           console.log(`[publish:redis] room=${room} event=${event}`)
         }
@@ -301,9 +267,6 @@ async function setupRedis() {
       '[redis] setup failed — falling back to in-memory adapter:',
       e instanceof Error ? e.message : e
     )
-    console.error(
-      '[redis] multi-instance broadcast will NOT work. Set REDIS_URL correctly or use a single realtime replica.'
-    )
   }
 }
 
@@ -318,27 +281,23 @@ const internalServer = createServer(async (req: IncomingMessage, res: ServerResp
   }
 
   if (req.method === 'GET' && req.url?.startsWith('/internal/verify-conversation')) {
-    // Proxy to the Next.js app for DB-backed verification
-    const authHeader = req.headers['x-internal-secret']
-    if (authHeader !== SECRET) {
+    const authHeader = String(req.headers['x-internal-secret'] || '')
+    if (!timingSafeEqualStr(authHeader, SECRET!)) {
       res.writeHead(403); res.end('forbidden'); return
     }
-    // Forward to Next.js app via APP_INTERNAL_URL (Docker: http://app:3000).
-    // The fallback to localhost:3000 only applies in dev where the Next.js
-    // app and the realtime service share the same host.
     try {
       const nextUrl = `${APP_INTERNAL_URL}/api/realtime/verify-conversation${req.url.replace('/internal/verify-conversation', '')}`
-      const nextRes = await fetch(nextUrl, { headers: { 'X-Internal-Secret': SECRET } })
+      const nextRes = await fetch(nextUrl, { headers: { 'X-Internal-Secret': SECRET! } })
       res.writeHead(nextRes.status); res.end(await nextRes.text())
-    } catch (e) {
+    } catch {
       res.writeHead(500); res.end('error')
     }
     return
   }
 
   if (req.method === 'POST' && req.url === '/internal/publish') {
-    const authHeader = req.headers['x-internal-secret']
-    if (authHeader !== SECRET) {
+    const authHeader = String(req.headers['x-internal-secret'] || '')
+    if (!timingSafeEqualStr(authHeader, SECRET!)) {
       console.log('[publish:http] forbidden — secret mismatch')
       res.writeHead(403)
       res.end('forbidden')
@@ -350,9 +309,6 @@ const internalServer = createServer(async (req: IncomingMessage, res: ServerResp
       try {
         const { room: roomName, event, payload } = JSON.parse(body)
         if (roomName && event) {
-          // When Redis adapter is enabled, io.to() broadcasts across all
-          // instances via the adapter. When it's not, this emits locally.
-          // Either way, the HTTP endpoint works correctly as a fallback.
           io.to(roomName).emit(event, payload)
           console.log(`[publish:http] room=${roomName} event=${event}`)
         }
@@ -371,7 +327,7 @@ const internalServer = createServer(async (req: IncomingMessage, res: ServerResp
 })
 
 // ============================================================
-// Start both servers (Redis is set up async, non-blocking)
+// Start both servers
 // ============================================================
 socketServer.listen(SOCKET_PORT, () => {
   console.log(`Sukhan realtime Socket.IO on port ${SOCKET_PORT}`)
@@ -381,13 +337,10 @@ internalServer.listen(INTERNAL_PORT, () => {
   console.log(`Sukhan realtime internal HTTP on port ${INTERNAL_PORT}`)
 })
 
-// Set up Redis after servers are listening — non-blocking.
-// If Redis is unavailable, the service continues with the in-memory adapter.
 setupRedis().catch((e) => {
   console.error('[redis] setup threw:', e instanceof Error ? e.message : e)
 })
 
-// Graceful shutdown
 function shutdown() {
   console.log('Shutting down...')
   io.close(() => {

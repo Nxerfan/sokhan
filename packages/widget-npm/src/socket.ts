@@ -69,6 +69,8 @@ export class SukhanSocket {
   private token: string
   /** Called when the socket connects — used to join conversation rooms. */
   onConnect?: () => void
+  /** Called when the token needs to be refreshed (expired on reconnect). */
+  onTokenExpired?: () => Promise<string | null>
 
   constructor(token: string) {
     this.token = token
@@ -123,6 +125,36 @@ export class SukhanSocket {
       this.socket.on('disconnect', () => {
         this.connected = false
         this.emit('disconnect', null)
+      })
+      // When the server middleware rejects the connection (invalid/expired
+      // token), Socket.IO does NOT auto-reconnect. We must:
+      //   1. Call onTokenExpired to get a fresh token (re-identifying with
+      //      the SAME visitorId — no new Contact)
+      //   2. Update socket.auth
+      //   3. Manually call socket.connect()
+      // For membership_inactive, do NOT retry — remain disconnected.
+      let membershipRevoked = false
+      this.socket.on('connect_error', async (err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (msg === 'membership_inactive' || msg === 'membership_check_failed') {
+          membershipRevoked = true
+          if (this.socket) {
+            ;(this.socket as SocketIOClient & { io?: { opts?: { reconnection?: boolean } } }).io!.opts!.reconnection = false
+            this.socket.disconnect()
+          }
+          return
+        }
+        if (membershipRevoked) return
+        if (msg === 'invalid_token' || msg === 'no_token') {
+          if (this.onTokenExpired) {
+            const fresh = await this.onTokenExpired()
+            if (fresh && this.socket) {
+              this.token = fresh
+              ;(this.socket as SocketIOClient & { auth?: unknown }).auth = { token: fresh }
+              this.socket.connect()
+            }
+          }
+        }
       })
       this.socket.on('message:new', (payload: unknown) => this.emit('message:new', payload))
       this.socket.on('conversation:updated', (payload: unknown) => this.emit('conversation:updated', payload))

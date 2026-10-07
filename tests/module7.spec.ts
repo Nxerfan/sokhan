@@ -12,7 +12,11 @@ async function signupAndGetSlug(page: Page, email: string, workspace: string): P
   await page.waitForLoadState('networkidle')
   await page.waitForTimeout(2000)
   const slug = await page.evaluate(async ({ email, workspace }) => {
-    await fetch('/api/auth/signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password: 'password123', name: 'Agent', workspaceName: workspace }) })
+    // 3-step OTP signup (start → verify → complete)
+    const startRes = await fetch('/api/auth/signup/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email }) })
+    const { requestId } = await startRes.json()
+    await fetch('/api/auth/signup/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, code: '123456', requestId }) })
+    await fetch('/api/auth/signup/complete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, requestId, password: 'password123', workspaceName: workspace }) })
     const { csrfToken } = await (await fetch('/api/auth/csrf')).json()
     await fetch('/api/auth/callback/credentials', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `email=${email}&password=password123&csrfToken=${csrfToken}&json=true` })
     const { tenant } = await (await fetch('/api/tenants/me')).json()
@@ -125,9 +129,13 @@ test.describe('Module 7 — OTP Authentication', () => {
     await page.goto(DASHBOARD)
     await page.waitForTimeout(2000)
 
-    // Create user via legacy signup
+    // Create user via 3-step OTP signup (the legacy /api/auth/signup endpoint
+    // is now deprecated — it returns 410 Gone and creates nothing).
     await page.evaluate(async (email) => {
-      await fetch('/api/auth/signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password: 'password123', name: 'Test', workspaceName: `Legacy ${Date.now()}` }) })
+      const startRes = await fetch('/api/auth/signup/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email }) })
+      const { requestId } = await startRes.json()
+      await fetch('/api/auth/signup/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, code: '123456', requestId }) })
+      await fetch('/api/auth/signup/complete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, requestId, password: 'password123', workspaceName: `Legacy ${Date.now()}` }) })
     }, email)
 
     // Login via credentials
@@ -149,9 +157,13 @@ test.describe('Module 7 — OTP Authentication', () => {
     await page.goto(DASHBOARD)
     await page.waitForTimeout(2000)
 
-    // Create user first
+    // Create user first via 3-step OTP signup (legacy /api/auth/signup is
+    // deprecated — it returns 410 Gone and creates nothing).
     await page.evaluate(async (email) => {
-      await fetch('/api/auth/signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password: 'password123', name: 'Test', workspaceName: `OTP Login ${Date.now()}` }) })
+      const startRes = await fetch('/api/auth/signup/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email }) })
+      const { requestId } = await startRes.json()
+      await fetch('/api/auth/signup/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, code: '123456', requestId }) })
+      await fetch('/api/auth/signup/complete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, requestId, password: 'password123', workspaceName: `OTP Login ${Date.now()}` }) })
     }, email)
 
     // Start OTP login
@@ -181,9 +193,15 @@ test.describe('Module 7 — OTP Authentication', () => {
     await page.goto(DASHBOARD)
     await page.waitForTimeout(2000)
 
-    // Create user
+    // Create user via 3-step OTP signup (legacy /api/auth/signup is
+    // deprecated — it returns 410 Gone and creates nothing). The reset-
+    // password flow doesn't verify the old password, so the initial
+    // password value is irrelevant — we use 'password123' for consistency.
     await page.evaluate(async (email) => {
-      await fetch('/api/auth/signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password: 'oldpassword', name: 'Test', workspaceName: `Reset ${Date.now()}` }) })
+      const startRes = await fetch('/api/auth/signup/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email }) })
+      const { requestId } = await startRes.json()
+      await fetch('/api/auth/signup/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, code: '123456', requestId }) })
+      await fetch('/api/auth/signup/complete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, requestId, password: 'password123', workspaceName: `Reset ${Date.now()}` }) })
     }, email)
 
     // Step 1: Request reset

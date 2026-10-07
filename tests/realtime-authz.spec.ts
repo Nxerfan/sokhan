@@ -1,4 +1,5 @@
 import { test, expect, type BrowserContext } from '@playwright/test'
+import { otpSignupPlaywright } from './helpers/otp-signup'
 
 /**
  * Realtime conversation:join authz test — CORRECTED.
@@ -64,10 +65,9 @@ async function signupAndSignin(ctx: BrowserContext, email: string, workspace: st
   await page.waitForLoadState('networkidle')
   await page.waitForTimeout(1000)
 
-  // Use page.request so cookies are stored on the page's context
-  await page.request.post(`${SIGNUP_API}/api/auth/signup`, {
-    data: { email, password: 'password123', name: 'Agent', workspaceName: workspace },
-  })
+  // Use page.request so cookies are stored on the page's context.
+  // 3-step OTP signup (start → verify → complete).
+  await otpSignupPlaywright(page.request, SIGNUP_API, email, workspace)
   const csrfRes = await page.request.get(`${SIGNUP_API}/api/auth/csrf`)
   const { csrfToken } = await csrfRes.json()
   await page.request.post(`${SIGNUP_API}/api/auth/callback/credentials`, {

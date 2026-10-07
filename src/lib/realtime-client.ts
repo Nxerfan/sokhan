@@ -1,8 +1,13 @@
 'use client'
 
 import { io, type Socket } from 'socket.io-client'
+import { setupRealtimeHandlers, type RealtimeSocket } from './realtime-handlers'
 
 let socketInstance: Socket | null = null
+
+// Stored cleanup from the active handler set — called on disconnect
+// or before replacing an existing handler set, to clear stale timers.
+let storedCleanup: (() => void) | null = null
 
 /**
  * Resolve the Socket.IO connection URL + path.
@@ -38,11 +43,6 @@ interface SocketConfig {
 }
 
 function resolveSocketConfig(): SocketConfig {
-  // Vercel mode — VERCEL=1 is set by the Vercel runtime.
-  // Use the DEFAULT namespace (no URL) with path /api/realtime.
-  // Vercel routes /api/realtime* to the root-level api/realtime.ts function.
-  // The server's Socket.IO path is /api/realtime (not /api/realtime/socket.io).
-  // Transports: websocket-only on Vercel (no polling fallback).
   const isVercel = process.env.NEXT_PUBLIC_VERCEL === '1' || process.env.VERCEL === '1'
   if (isVercel) {
     return { url: '', path: '/api/realtime', transports: ['websocket'] }
@@ -56,8 +56,6 @@ function resolveSocketConfig(): SocketConfig {
       transports: isApiRealtime ? ['websocket'] : ['websocket', 'polling'],
     }
   }
-  // Default: rely on Caddy's XTransformPort forwarding.
-  // Works in docker + dev; on Vercel this must be overridden via env.
   return {
     url: '/?XTransformPort=3003',
     path: '/',
@@ -66,6 +64,26 @@ function resolveSocketConfig(): SocketConfig {
 }
 
 const { url: SOCKET_URL, path: SOCKET_PATH, transports: SOCKET_TRANSPORTS } = resolveSocketConfig()
+
+// Refresh-in-flight guard — prevents concurrent token refresh storms.
+let refreshPromise: Promise<string | null> | null = null
+
+async function refreshToken(): Promise<string | null> {
+  if (refreshPromise) return refreshPromise
+  refreshPromise = (async () => {
+    try {
+      const res = await fetch('/api/realtime-token')
+      if (!res.ok) return null
+      const { token } = await res.json()
+      return token as string
+    } catch {
+      return null
+    } finally {
+      refreshPromise = null
+    }
+  })()
+  return refreshPromise
+}
 
 export async function connectRealtime(): Promise<Socket> {
   if (socketInstance?.connected) return socketInstance
@@ -83,25 +101,35 @@ export async function connectRealtime(): Promise<Socket> {
     auth: { token },
     transports: SOCKET_TRANSPORTS,
     reconnection: true,
-    reconnectionAttempts: 10,
+    reconnectionAttempts: Infinity,
     reconnectionDelay: 1000,
     timeout: 10000,
   })
 
-  // CRITICAL: after a reconnect, the server has lost all room subscriptions.
-  // We re-emit `conversation:join` for the conversation currently open so we
-  // keep receiving its messages. (The server side is idempotent — re-joining
-  // a room you're already in is a no-op; re-joining after a disconnect is
-  // required because the disconnect cleared the room state.)
+  // Clean up any previous handler set (clears stale timers from a prior socket)
+  if (storedCleanup) {
+    storedCleanup()
+    storedCleanup = null
+  }
+
   const createdSocket = socketInstance
+
+  // Use the extracted handler logic (shared with unit tests).
+  // See src/lib/realtime-handlers.ts for the behavioral test coverage.
+  const handlers = setupRealtimeHandlers(
+    createdSocket as unknown as RealtimeSocket,
+    refreshToken,
+    { backoffMs: 2000 },
+  )
+  // Store cleanup so disconnectRealtime() can clear stale timers
+  storedCleanup = handlers.cleanup
   createdSocket.on('connect', () => {
-    // If the singleton has been swapped out for a new socket, ignore this
-    // event — it belongs to a stale connection that should not write state.
     if (socketInstance !== createdSocket) return
-    const openConv = (createdSocket as Socket & { __lastJoinedConv?: string }).__lastJoinedConv
-    if (openConv) {
-      createdSocket.emit('conversation:join', openConv)
-    }
+    handlers.onConnect()
+  })
+  createdSocket.on('connect_error', async (err: Error) => {
+    if (socketInstance !== createdSocket) return
+    await handlers.onConnectError(err)
   })
 
   return socketInstance
@@ -112,6 +140,12 @@ export function getSocket(): Socket | null {
 }
 
 export function disconnectRealtime() {
+  // Call handler cleanup FIRST — clears any pending retry timers
+  // so they don't reconnect a dead socket after disconnect.
+  if (storedCleanup) {
+    storedCleanup()
+    storedCleanup = null
+  }
   if (socketInstance) {
     socketInstance.disconnect()
     socketInstance = null

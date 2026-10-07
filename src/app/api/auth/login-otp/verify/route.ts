@@ -42,6 +42,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ verified: true, email })
   } catch (e) {
     if (e instanceof NixifyError) return NextResponse.json({ error: e.code }, { status: e.statusCode })
-    return NextResponse.json({ error: 'unknown_error' }, { status: 500 })
+    console.error('[auth:login-otp/verify] internal error', { component: 'auth', route: '/api/auth/login-otp/verify', errorName: e instanceof Error ? e.name : 'unknown' })
+    return NextResponse.json({ error: 'internal_error' }, { status: 500 })
   }
 }

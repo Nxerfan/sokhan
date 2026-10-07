@@ -77,7 +77,6 @@ POSTGRES_PASSWORD=<paste a strong password here>
 
 # For OTP email verification (required for signup)
 NIXIFY_API_KEY=<your-nixify-api-key>
-NIXIFY_BASE_URL=https://your-nixify-domain.com/api/v1
 ```
 
 Optional values (have defaults):
@@ -139,7 +138,6 @@ Set these required values:
 NEXTAUTH_SECRET=<openssl rand -base64 32>
 POSTGRES_PASSWORD=<a-strong-password>
 NIXIFY_API_KEY=<your-nixify-api-key>
-NIXIFY_BASE_URL=https://your-nixify-domain.com/api/v1
 
 # For production with HTTPS
 NEXTAUTH_URL=https://chat.example.com

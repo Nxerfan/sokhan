@@ -26,37 +26,39 @@ export async function POST(req: NextRequest) {
     const purpose: OtpPurpose = 'signup'
     const result = await sendOtp(email, purpose)
 
-    // Create PendingSignup
-    await db.pendingSignup.upsert({
-      where: { email },
-      create: {
-        email,
-        nixifyRequestId: result.requestId,
-        expiresAt: new Date(result.expiresAt),
-      },
-      update: {
-        nixifyRequestId: result.requestId,
-        expiresAt: new Date(result.expiresAt),
-        otpVerified: false,
-      },
-    })
+    // Persist local OTP correlation state atomically — both writes must
+    // succeed or fail together (no partial PendingSignup without OtpRequest).
+    await db.$transaction([
+      db.pendingSignup.upsert({
+        where: { email },
+        create: {
+          email,
+          nixifyRequestId: result.otpRequestId,
+          expiresAt: new Date(result.expiresAt),
+        },
+        update: {
+          nixifyRequestId: result.otpRequestId,
+          expiresAt: new Date(result.expiresAt),
+          otpVerified: false,
+        },
+      }),
+      db.otpRequest.create({
+        data: {
+          email,
+          purpose,
+          requestId: result.otpRequestId,
+          expiresAt: new Date(result.expiresAt),
+          ipAddress: req.headers.get('x-forwarded-for')?.split(',')[0] || null,
+        },
+      }),
+    ])
 
-    // Create OtpRequest
-    await db.otpRequest.create({
-      data: {
-        email,
-        purpose,
-        requestId: result.requestId,
-        expiresAt: new Date(result.expiresAt),
-        ipAddress: req.headers.get('x-forwarded-for')?.split(',')[0] || null,
-      },
-    })
-
-    return NextResponse.json({ requestId: result.requestId, expiresAt: result.expiresAt })
+    return NextResponse.json({ requestId: result.otpRequestId, expiresAt: result.expiresAt })
   } catch (e) {
     if (e instanceof NixifyError) {
       return NextResponse.json({ error: e.code }, { status: e.statusCode })
     }
-    return NextResponse.json({ error: 'unknown_error' }, { status: 500 })
+    console.error('[auth:signup/start] internal error', { component: 'auth', route: '/api/auth/signup/start', errorName: e instanceof Error ? e.name : 'unknown' })
+    return NextResponse.json({ error: 'internal_error' }, { status: 500 })
   }
 }

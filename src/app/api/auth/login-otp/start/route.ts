@@ -15,13 +15,14 @@ export async function POST(req: NextRequest) {
     await db.otpRequest.create({
       data: {
         userId: user.id, email, purpose: 'login',
-        requestId: result.requestId, expiresAt: new Date(result.expiresAt),
+        requestId: result.otpRequestId, expiresAt: new Date(result.expiresAt),
         ipAddress: req.headers.get('x-forwarded-for')?.split(',')[0] || null,
       },
     })
-    return NextResponse.json({ requestId: result.requestId, expiresAt: result.expiresAt })
+    return NextResponse.json({ requestId: result.otpRequestId, expiresAt: result.expiresAt })
   } catch (e) {
     if (e instanceof NixifyError) return NextResponse.json({ error: e.code }, { status: e.statusCode })
-    return NextResponse.json({ error: 'unknown_error' }, { status: 500 })
+    console.error('[auth:login-otp/start] internal error', { component: 'auth', route: '/api/auth/login-otp/start', errorName: e instanceof Error ? e.name : 'unknown' })
+    return NextResponse.json({ error: 'internal_error' }, { status: 500 })
   }
 }

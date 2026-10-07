@@ -12,7 +12,11 @@ async function signupAndGetSlug(page: Page, email: string, workspace: string): P
   await page.waitForTimeout(2000)
 
   const slug = await page.evaluate(async ({ email, workspace }) => {
-    await fetch('/api/auth/signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password: 'password123', name: 'Agent', workspaceName: workspace }) })
+    // 3-step OTP signup (start → verify → complete)
+    const startRes = await fetch('/api/auth/signup/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email }) })
+    const { requestId } = await startRes.json()
+    await fetch('/api/auth/signup/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, code: '123456', requestId }) })
+    await fetch('/api/auth/signup/complete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, requestId, password: 'password123', workspaceName: workspace }) })
     const { csrfToken } = await (await fetch('/api/auth/csrf')).json()
     await fetch('/api/auth/callback/credentials', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `email=${email}&password=password123&csrfToken=${csrfToken}&json=true` })
     const { tenant } = await (await fetch('/api/tenants/me')).json()
@@ -114,7 +118,11 @@ test.describe('Module 5 — Widget API Security', () => {
 
     // Step 1: Signup Tenant A + get slug (single evaluate, no args — matches working pattern)
     const slugA = await pageA.evaluate(async () => {
-      await fetch('/api/auth/signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'm5-iso-a@test.com', password: 'password123', name: 'TA', workspaceName: 'M5 IsoA WS' }) })
+      // 3-step OTP signup
+      const startRes = await fetch('/api/auth/signup/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'm5-iso-a@test.com' }) })
+      const { requestId } = await startRes.json()
+      await fetch('/api/auth/signup/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'm5-iso-a@test.com', code: '123456', requestId }) })
+      await fetch('/api/auth/signup/complete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'm5-iso-a@test.com', requestId, password: 'password123', workspaceName: 'M5 IsoA WS' }) })
       const { csrfToken } = await (await fetch('/api/auth/csrf')).json()
       await fetch('/api/auth/callback/credentials', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `email=m5-iso-a@test.com&password=password123&csrfToken=${csrfToken}&json=true` })
       const { tenant } = await (await fetch('/api/tenants/me')).json()
@@ -139,7 +147,11 @@ test.describe('Module 5 — Widget API Security', () => {
     await pageB.waitForLoadState('networkidle')
 
     const slugB = await pageB.evaluate(async () => {
-      await fetch('/api/auth/signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'm5-iso-b@test.com', password: 'password123', name: 'TB', workspaceName: 'M5 IsoB WS' }) })
+      // 3-step OTP signup for Tenant B
+      const startRes = await fetch('/api/auth/signup/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'm5-iso-b@test.com' }) })
+      const { requestId } = await startRes.json()
+      await fetch('/api/auth/signup/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'm5-iso-b@test.com', code: '123456', requestId }) })
+      await fetch('/api/auth/signup/complete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'm5-iso-b@test.com', requestId, password: 'password123', workspaceName: 'M5 IsoB WS' }) })
       const { csrfToken } = await (await fetch('/api/auth/csrf')).json()
       await fetch('/api/auth/callback/credentials', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `email=m5-iso-b@test.com&password=password123&csrfToken=${csrfToken}&json=true` })
       const { tenant } = await (await fetch('/api/tenants/me')).json()

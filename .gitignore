@@ -85,3 +85,4 @@ scripts/apply-final.sh
 /.agents/skills/upstash-*/
 /agent/skills/upstash-*/
 /skills-lock.json
+.zscripts/dev.pid

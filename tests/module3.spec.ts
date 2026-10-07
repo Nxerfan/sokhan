@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test'
+import { otpSignupPlaywright } from './helpers/otp-signup'
 
 /**
  * Module 3 tests — Contacts panel, Billing flow, CSAT submission.
@@ -10,9 +11,7 @@ const DASHBOARD = 'http://127.0.0.1:3000'
 const WIDGET = 'http://127.0.0.1:81'
 
 async function signupAndSignin(page: Page, email: string, workspace: string): Promise<string> {
-  await page.request.post(`${DASHBOARD}/api/auth/signup`, {
-    data: { email, password: 'password123', name: 'Agent', workspaceName: workspace },
-  })
+  await otpSignupPlaywright(page.request, DASHBOARD, email, workspace)
   const csrfRes = await page.request.get(`${DASHBOARD}/api/auth/csrf`)
   const { csrfToken } = await csrfRes.json()
   await page.request.post(`${DASHBOARD}/api/auth/callback/credentials`, {
