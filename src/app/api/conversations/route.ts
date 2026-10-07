@@ -45,7 +45,7 @@ export async function POST(req: NextRequest) {
     const body = await req.json()
     const contactId = String(body.contactId ?? '').trim()
     if (!contactId) return { error: 'contact_not_found' as const }
-    const contact = await db.contact.findUnique({ where: { id: contactId, tenantId: session.user.workspaceId! } })
+    const contact = await db.contact.findFirst({ where: { id: contactId, tenantId: session.user.workspaceId! } })
     if (!contact) return { error: 'contact_not_found' as const }
     const conversation = await db.conversation.create({
       data: {
