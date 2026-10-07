@@ -93,7 +93,7 @@ jobs:
         run: bun test tests/db-boundary/
       - name: Run Full regression tests
         run: |
-          bunx playwright test             tests/module2.spec.ts             tests/socketio-verify.spec.ts             tests/socket-race.spec.ts             tests/realtime-authz.spec.ts             tests/widget-external-origin.spec.ts tests/reconnect-regression.spec.ts tests/tenant-security.spec.ts
+          bunx playwright test             tests/module2.spec.ts             tests/socketio-verify.spec.ts             tests/socket-race.spec.ts             tests/realtime-authz.spec.ts             tests/widget-external-origin.spec.ts tests/reconnect-regression.spec.ts tests/tenant-security.spec.ts tests/inbox-reply-echo-dedup.spec.ts tests/inbox-stale-selection.spec.ts tests/widget-npm-external-origin.spec.ts
       - name: Print Full container logs on failure
         if: failure()
         run: |
@@ -126,7 +126,7 @@ jobs:
         run: bun test tests/db-boundary/
       - name: Run Lite regression tests
         run: |
-          bunx playwright test             tests/module2.spec.ts             tests/socketio-verify.spec.ts             tests/socket-race.spec.ts             tests/realtime-authz.spec.ts             tests/widget-external-origin.spec.ts tests/reconnect-regression.spec.ts tests/tenant-security.spec.ts
+          bunx playwright test             tests/module2.spec.ts             tests/socketio-verify.spec.ts             tests/socket-race.spec.ts             tests/realtime-authz.spec.ts             tests/widget-external-origin.spec.ts tests/reconnect-regression.spec.ts tests/tenant-security.spec.ts tests/inbox-reply-echo-dedup.spec.ts tests/inbox-stale-selection.spec.ts tests/widget-npm-external-origin.spec.ts
       - name: Print Lite container logs on failure
         if: failure()
         run: |
