@@ -273,7 +273,7 @@ export function InboxView() {
         typingTimeoutRef.current = null
       }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+
   }, [sessionStatus])
 
   // Reload when filter changes
@@ -368,7 +368,7 @@ export function InboxView() {
         leaveConversation(socket, selectedId)
       }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+
   }, [selectedId, socket])
 
   // Auto-scroll to bottom on new messages
