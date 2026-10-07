@@ -56,7 +56,7 @@ export async function PATCH(
       } else {
         // Validate the target user has an active Membership in this tenant
         const membership = await db.membership.findFirst({
-          where: { userId: body.assignedUserId, status: 'active' },
+          where: { userId: body.assignedUserId, status: 'active', tenantId: session.user.workspaceId! },
           select: { id: true },
         })
         if (!membership) return { error: 'invalid_assignee' as const }
@@ -68,7 +68,7 @@ export async function PATCH(
         data.departmentId = null
       } else {
         // Validate the department belongs to this tenant
-        const dept = await db.department.findUnique({ where: { id: body.departmentId } })
+        const dept = await db.department.findUnique({ where: { id: body.departmentId, tenantId: session.user.workspaceId! } })
         if (!dept) return { error: 'invalid_department' as const }
         data.departmentId = body.departmentId
       }

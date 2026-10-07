@@ -42,7 +42,7 @@ async function validateRuleAction(action: any): Promise<{ ok: true } | { ok: fal
     if (!action.userId || typeof action.userId !== 'string') return { ok: false, error: 'invalid_user_id' }
     // Tenant-scoped lookup — foreign userId (no Membership in this tenant)
     // returns null.
-    const member = await db.membership.findFirst({
+    const member = await db.membership.findFirst({ where: { userId: action.userId, status: 'active', tenantId: tid },
       where: { userId: action.userId, status: 'active' },
       select: { id: true },
     })
