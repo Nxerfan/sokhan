@@ -25,6 +25,7 @@ import type {
   VerifyPaymentInput,
   VerifyPaymentResult,
   GatewayName,
+  CallbackResult,
 } from './types'
 
 export interface ZarinlinkOptions {
@@ -105,6 +106,24 @@ export class ZarinlinkAdapter implements PaymentGateway {
       success: false,
       message: json?.errors?.message || `ZarinLink verify failed (code ${data?.code ?? 'n/a'})`,
     }
+  }
+
+  /**
+   * Parse the ZarinLink callback query string.
+   *   status=fail | status=cancel -> user cancelled.
+   *   pid/authority present         -> success_candidate (must verify).
+   *   Otherwise                     -> invalid.
+   */
+  parseCallback(query: URLSearchParams): CallbackResult {
+    const status = query.get('status')
+    if (status && ['fail', 'cancel'].includes(status)) {
+      return { kind: 'canceled' }
+    }
+    const authority = query.get('authority') ?? query.get('pid')
+    if (!status && !authority) {
+      return { kind: 'invalid', reasonCode: 'missing_status_and_pid' }
+    }
+    return { kind: 'success_candidate', authority: authority ?? undefined }
   }
 }
 

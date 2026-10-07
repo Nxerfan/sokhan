@@ -1,45 +1,45 @@
 import { NextResponse } from 'next/server'
 import { withSessionTenant, getCurrentTenantId } from '@/lib/auth'
-import { db } from '@/lib/db'
-import { getTenantUsage } from '@/lib/payments/gating'
+import { getBillingState, createProductionBillingDeps } from '@/lib/payments/billing-service'
 import { getPlan } from '@/lib/payments/plans'
+import { getTenantUsage } from '@/lib/payments/gating'
 
 /**
- * Returns the current tenant's subscription status + usage stats.
+ * Returns the current tenant's billing state.
+ *
+ * The ACTIVE subscription is the effective entitlement. A PENDING
+ * subscription (if any) is a checkout in flight and does NOT affect the
+ * current entitlement until its payment succeeds — the UI must distinguish
+ * the two.
  *
  * Response shape:
  *   {
- *     plan: { slug, name, priceToman, limits, ... },
+ *     plan: { slug, name, priceToman, interval, contactSales, limits } | null,
  *     subscription: { id, status, gateway, currentPeriodStart, currentPeriodEnd } | null,
+ *       // ^ the ACTIVE (effective) subscription — null if on free with no
+ *       //   active row.
+ *     pendingSubscription: { id, status, gateway, currentPeriodEnd, createdAt } | null,
+ *       // ^ a pending checkout, if any. Does NOT represent current service.
  *     invoices: [{ id, amountToman, gateway, status, refId, createdAt, paidAt }],
- *     usage: { agents: {current, limit}, conversations: {...}, departments: {...} }
+ *     usage: { ... }
  *   }
  */
 export async function GET() {
   const result = await withSessionTenant(async () => {
     const tid = getCurrentTenantId()!
-
-    const [usage, subscription, invoices] = await Promise.all([
+    const deps = createProductionBillingDeps()
+    const [state, usage] = await Promise.all([
+      getBillingState({ tenantId: tid, deps }),
       getTenantUsage(tid),
-      db.subscription.findFirst({
-        where: { tenantId: tid, status: { in: ['active', 'pending'] } },
-        orderBy: { createdAt: 'desc' },
-      }),
-      db.invoice.findMany({
-        where: { tenantId: tid },
-        orderBy: { createdAt: 'desc' },
-        take: 20,
-      }),
     ])
-
-    const plan = getPlan(usage.planSlug)
-
-    return { usage, subscription, invoices, plan } as const
+    return { state, usage } as const
   })
 
   if (!result) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
 
-  const { usage, subscription, invoices, plan } = result.result
+  const { state, usage } = result.result
+  const plan = getPlan(state.planSlug)
+
   return NextResponse.json({
     plan: plan
       ? {
@@ -51,16 +51,28 @@ export async function GET() {
           limits: plan.limits,
         }
       : null,
-    subscription: subscription
+    // The effective (active) subscription.
+    subscription: state.activeSubscription
       ? {
-          id: subscription.id,
-          status: subscription.status,
-          gateway: subscription.gateway,
-          currentPeriodStart: subscription.currentPeriodStart,
-          currentPeriodEnd: subscription.currentPeriodEnd,
+          id: state.activeSubscription.id,
+          status: state.activeSubscription.status,
+          gateway: state.activeSubscription.gateway,
+          currentPeriodStart: state.activeSubscription.currentPeriodStart,
+          currentPeriodEnd: state.activeSubscription.currentPeriodEnd,
         }
       : null,
-    invoices: invoices.map((i) => ({
+    // A pending checkout, if any — the UI shows this distinctly (NOT as the
+    // current plan).
+    pendingSubscription: state.pendingSubscription
+      ? {
+          id: state.pendingSubscription.id,
+          status: state.pendingSubscription.status,
+          gateway: state.pendingSubscription.gateway,
+          currentPeriodEnd: state.pendingSubscription.currentPeriodEnd,
+          createdAt: state.pendingSubscription.createdAt,
+        }
+      : null,
+    invoices: state.invoices.map((i) => ({
       id: i.id,
       amountToman: i.amountToman,
       gateway: i.gateway,

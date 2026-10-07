@@ -22,6 +22,7 @@ import type {
   VerifyPaymentInput,
   VerifyPaymentResult,
   GatewayName,
+  CallbackResult,
 } from './types'
 
 const API_BASE = 'https://api.idpay.ir/v1.4'
@@ -124,5 +125,23 @@ export class IdpayAdapter implements PaymentGateway {
       success: false,
       message: json?.error_message || `IDPay verify failed (status ${json?.status ?? 'n/a'})`,
     }
+  }
+
+  /**
+   * Parse the IDPay callback query string.
+   *   status=10 -> user cancelled.
+   *   id (authority) present -> success_candidate (must verify).
+   *   Otherwise -> invalid.
+   */
+  parseCallback(query: URLSearchParams): CallbackResult {
+    const status = query.get('status')
+    if (status === '10') {
+      return { kind: 'canceled' }
+    }
+    const id = query.get('id') ?? query.get('track_id')
+    if (!id && !status) {
+      return { kind: 'invalid', reasonCode: 'missing_id_and_status' }
+    }
+    return { kind: 'success_candidate', authority: id ?? undefined }
   }
 }

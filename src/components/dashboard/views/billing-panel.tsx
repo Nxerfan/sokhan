@@ -38,6 +38,15 @@ type SubscriptionInfo = {
   currentPeriodEnd: string | null
 } | null
 
+/** A checkout in flight — does NOT represent current entitlement. */
+type PendingSubscriptionInfo = {
+  id: string
+  status: string
+  gateway: string | null
+  currentPeriodEnd: string | null
+  createdAt: string
+} | null
+
 type InvoiceInfo = {
   id: string
   amountToman: number
@@ -50,7 +59,10 @@ type InvoiceInfo = {
 
 type BillingData = {
   plan: PlanInfo | null
+  /** The effective (active) subscription. */
   subscription: SubscriptionInfo
+  /** A pending checkout, if any — shown distinctly, NOT as the current plan. */
+  pendingSubscription?: PendingSubscriptionInfo
   invoices: InvoiceInfo[]
   usage: UsageInfo['usage'] | null
   planSlug?: string
@@ -255,6 +267,22 @@ export function BillingPanel() {
                   </span>
                 )}
               </div>
+            </div>
+          )}
+          {/* A pending checkout is NOT the current plan — show it distinctly so
+              the UI never implies a pending upgrade is already active. */}
+          {data?.pendingSubscription && (
+            <div className="mt-3 rounded-lg border border-saffron/30 bg-saffron/5 p-3 text-xs text-muted-foreground">
+              <p>
+                <span className="font-medium text-foreground/80">
+                  {t(`status.${data.pendingSubscription.status}` as any)}
+                </span>
+                {' — '}
+                {data.pendingSubscription.gateway
+                  ? `${data.pendingSubscription.gateway} · `
+                  : ''}
+                {new Date(data.pendingSubscription.createdAt).toLocaleString('fa-IR')}
+              </p>
             </div>
           )}
         </CardContent>

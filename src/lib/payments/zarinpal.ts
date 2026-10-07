@@ -26,6 +26,7 @@ import type {
   VerifyPaymentInput,
   VerifyPaymentResult,
   GatewayName,
+  CallbackResult,
 } from './types'
 
 const SANDBOX_MERCHANT_ID = '00000000-0000-0000-0000-000000000000'
@@ -138,5 +139,28 @@ export class ZarinpalAdapter implements PaymentGateway {
       success: false,
       message: json?.errors?.message || `ZarinPal verify failed (code ${data?.code ?? 'n/a'})`,
     }
+  }
+
+  /**
+   * Parse the ZarinPal callback query string.
+   *   Status=NOK  -> user cancelled.
+   *   Status=OK (or absent) + Authority -> success_candidate (must verify).
+   *   Otherwise -> invalid.
+   */
+  parseCallback(query: URLSearchParams): CallbackResult {
+    const status = query.get('Status')
+    if (status && status.toUpperCase() === 'NOK') {
+      return { kind: 'canceled' }
+    }
+    const authority = query.get('Authority')
+    if (status && status.toUpperCase() === 'OK' && authority) {
+      return { kind: 'success_candidate', authority }
+    }
+    // Some ZarinPal flows return Status=OK without Authority on verify-only
+    // callbacks — treat as invalid (we cannot verify without authority).
+    if (!status && !authority) {
+      return { kind: 'invalid', reasonCode: 'missing_status_and_authority' }
+    }
+    return { kind: 'success_candidate', authority: authority ?? undefined }
   }
 }
