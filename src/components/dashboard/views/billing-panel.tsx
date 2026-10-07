@@ -298,32 +298,43 @@ export function BillingPanel() {
               const Icon = PLAN_ICONS[plan.slug] ?? CreditCard
               const isCurrent = plan.slug === currentPlanSlug
               const isSelected = selectedPlan === plan.slug
+              const isComingSoon = !isCurrent && plan.priceToman === 0
               return (
                 <Card
                   key={plan.slug}
                   className={cn(
-                    'relative cursor-pointer transition-all hover:border-saffron/50',
+                    'relative transition-all',
+                    !isComingSoon && 'cursor-pointer hover:border-saffron/50',
                     isSelected && 'border-saffron ring-2 ring-saffron/20',
                     isCurrent && 'opacity-70',
+                    isComingSoon && 'opacity-60',
                   )}
-                  onClick={() => !isCurrent && setSelectedPlan(plan.slug)}
+                  onClick={() => !isCurrent && !isComingSoon && setSelectedPlan(plan.slug)}
                 >
                   <CardHeader>
                     <div className="flex items-center justify-between">
                       <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-saffron/15 text-saffron">
                         <Icon className="h-5 w-5" />
                       </div>
-                      {isCurrent && (
+                      {isCurrent ? (
                         <Badge variant="secondary" className="text-xs">
                           {t('current')}
                         </Badge>
-                      )}
+                      ) : isComingSoon ? (
+                        <Badge variant="outline" className="text-xs text-muted-foreground">
+                          {t('comingSoon')}
+                        </Badge>
+                      ) : null}
                     </div>
                     <CardTitle className="font-display text-base">{plan.name}</CardTitle>
                     <CardDescription>
-                      {plan.priceToman === 0 ? (
+                      {plan.slug === 'free' && plan.priceToman === 0 ? (
                         <span className="text-lg font-semibold text-foreground">
                           {t('free')}
+                        </span>
+                      ) : plan.priceToman === 0 ? (
+                        <span className="text-sm font-medium text-muted-foreground">
+                          {t('comingSoon')}
                         </span>
                       ) : (
                         <span className="text-lg font-semibold text-foreground">

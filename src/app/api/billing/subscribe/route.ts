@@ -1,6 +1,5 @@
 import { NextResponse, NextRequest } from 'next/server'
 import { withSessionTenant, hasRole, getCurrentTenantId } from '@/lib/auth'
-import { isPaidPlan } from '@/lib/payments/plans'
 import {
   createCheckout,
   transitionToFreePlan,
@@ -48,8 +47,11 @@ export async function POST(req: NextRequest) {
     const origin = new URL(req.url).origin
     const deps = createProductionBillingDeps()
 
-    // Free / zero-price plan: internal transition (no provider).
-    if (!isPaidPlan(planSlug)) {
+    // ONLY the explicit 'free' plan slug may use the internal free transition
+    // (no provider). A non-free plan with priceToman <= 0 (e.g. Coming-Soon
+    // pro/max) is rejected by createCheckout with 'plan_unavailable' — it
+    // must NOT silently activate the free plan.
+    if (planSlug === 'free') {
       try {
         const { subscriptionId } = await transitionToFreePlan({ tenantId: tid, deps })
         return { free: true as const, subscriptionId, gatewayUrl: null }
@@ -58,7 +60,7 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Paid plan: checkout flow.
+    // Non-free plan: paid checkout flow (createCheckout rejects price <= 0).
     try {
       const checkout = await createCheckout({
         tenantId: tid,
