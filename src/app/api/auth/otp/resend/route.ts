@@ -36,22 +36,34 @@ export async function POST(req: NextRequest) {
   try {
     const result = await resendOtp(email, purpose)
 
-    // Update OtpRequest with new requestId and increment resendCount
-    await db.otpRequest.update({
-      where: { id: otpReq.id },
-      data: {
-        requestId: result.otpRequestId,
-        expiresAt: new Date(result.expiresAt),
-        resendCount: { increment: 1 },
-        verified: false,
-      },
-    })
-
-    // Update PendingSignup if exists
+    // Update local OTP correlation state. For signup, both the OtpRequest
+    // and PendingSignup must commit together (one logical resend operation).
     if (purpose === 'signup') {
-      await db.pendingSignup.updateMany({
-        where: { email },
-        data: { nixifyRequestId: result.otpRequestId, expiresAt: new Date(result.expiresAt), otpVerified: false },
+      await db.$transaction([
+        db.otpRequest.update({
+          where: { id: otpReq.id },
+          data: {
+            requestId: result.otpRequestId,
+            expiresAt: new Date(result.expiresAt),
+            resendCount: { increment: 1 },
+            verified: false,
+          },
+        }),
+        db.pendingSignup.updateMany({
+          where: { email },
+          data: { nixifyRequestId: result.otpRequestId, expiresAt: new Date(result.expiresAt), otpVerified: false },
+        }),
+      ])
+    } else {
+      // login / reset: only OtpRequest needs updating
+      await db.otpRequest.update({
+        where: { id: otpReq.id },
+        data: {
+          requestId: result.otpRequestId,
+          expiresAt: new Date(result.expiresAt),
+          resendCount: { increment: 1 },
+          verified: false,
+        },
       })
     }
 

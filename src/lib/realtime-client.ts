@@ -5,6 +5,10 @@ import { setupRealtimeHandlers, type RealtimeSocket } from './realtime-handlers'
 
 let socketInstance: Socket | null = null
 
+// Stored cleanup from the active handler set — called on disconnect
+// or before replacing an existing handler set, to clear stale timers.
+let storedCleanup: (() => void) | null = null
+
 /**
  * Resolve the Socket.IO connection URL + path.
  *
@@ -102,6 +106,12 @@ export async function connectRealtime(): Promise<Socket> {
     timeout: 10000,
   })
 
+  // Clean up any previous handler set (clears stale timers from a prior socket)
+  if (storedCleanup) {
+    storedCleanup()
+    storedCleanup = null
+  }
+
   const createdSocket = socketInstance
 
   // Use the extracted handler logic (shared with unit tests).
@@ -111,6 +121,8 @@ export async function connectRealtime(): Promise<Socket> {
     refreshToken,
     { backoffMs: 2000 },
   )
+  // Store cleanup so disconnectRealtime() can clear stale timers
+  storedCleanup = handlers.cleanup
   createdSocket.on('connect', () => {
     if (socketInstance !== createdSocket) return
     handlers.onConnect()
@@ -128,6 +140,12 @@ export function getSocket(): Socket | null {
 }
 
 export function disconnectRealtime() {
+  // Call handler cleanup FIRST — clears any pending retry timers
+  // so they don't reconnect a dead socket after disconnect.
+  if (storedCleanup) {
+    storedCleanup()
+    storedCleanup = null
+  }
   if (socketInstance) {
     socketInstance.disconnect()
     socketInstance = null

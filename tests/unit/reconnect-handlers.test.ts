@@ -157,3 +157,18 @@ test('#5F successful connect cancels stale membership_check_failed retry', async
   // (it was cancelled by the successful connect's cleanup)
   expect(socket.connectCount).toBe(0)
 })
+
+test('#5G stale timer cancelled on cleanup (disconnect lifecycle)', async () => {
+  // Trigger a membership_check_failed → schedules a retry timer
+  socket.triggerError('membership_check_failed')
+  expect(refreshCalls).toBe(0)
+
+  // Call cleanup BEFORE the timer fires (simulates disconnectRealtime)
+  handlers.cleanup()
+
+  // Wait past the original timer deadline
+  await new Promise(r => setTimeout(r, 50))
+
+  // socket.connect() should NOT have been called — the timer was cleared
+  expect(socket.connectCount).toBe(0)
+})
