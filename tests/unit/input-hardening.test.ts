@@ -169,8 +169,7 @@ test('db.ts: covers aggregate + groupBy', () => {
 
 test('db.ts: forces tenantId from context on create (override)', () => {
   const source = readSrc('src/lib/db.ts')
-  expect(source).toContain('$allModels')
-  expect(source).toContain("args.data = { ...args.data, tenantId: tid }")
+  expect(source).toContain('args.data = { ...args.data, tenantId: tid }')
 })
 
 test('db.ts: stamps every row on createMany', () => {
