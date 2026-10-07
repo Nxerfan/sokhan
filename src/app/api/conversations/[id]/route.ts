@@ -44,18 +44,43 @@ export async function PATCH(
       return { forbidden: true as const }
     }
     const body = await req.json()
+    const convId = body.id ?? id
     const data: any = {}
-    if (body.status) data.status = body.status
-    if (body.assignedUserId !== undefined) data.assignedUserId = body.assignedUserId || null
-    if (body.departmentId !== undefined) data.departmentId = body.departmentId || null
-    if (body.priority) data.priority = body.priority
+    const VALID_STATUSES = ['open', 'pending', 'closed', 'resolved']
+    const VALID_PRIORITIES = ['low', 'normal', 'high', 'urgent']
+    if (body.status && VALID_STATUSES.includes(body.status)) data.status = body.status
+    if (body.priority && VALID_PRIORITIES.includes(body.priority)) data.priority = body.priority
+    if (body.assignedUserId !== undefined) {
+      if (body.assignedUserId === null || body.assignedUserId === '') {
+        data.assignedUserId = null
+      } else {
+        // Validate the target user has an active Membership in this tenant
+        const membership = await db.membership.findFirst({
+          where: { userId: body.assignedUserId, status: 'active' },
+          select: { id: true },
+        })
+        if (!membership) return { error: 'invalid_assignee' as const }
+        data.assignedUserId = body.assignedUserId
+      }
+    }
+    if (body.departmentId !== undefined) {
+      if (body.departmentId === null || body.departmentId === '') {
+        data.departmentId = null
+      } else {
+        // Validate the department belongs to this tenant
+        const dept = await db.department.findUnique({ where: { id: body.departmentId } })
+        if (!dept) return { error: 'invalid_department' as const }
+        data.departmentId = body.departmentId
+      }
+    }
 
-    // updateMany with tenantId — defense-in-depth (Module 2 convention)
-    await db.conversation.updateMany({
-      where: { id, tenantId: session.user.workspaceId! },
+    // updateMany with tenantId — defense-in-depth
+    const updated = await db.conversation.updateMany({
+      where: { id: convId, tenantId: session.user.workspaceId! },
       data,
     })
-    const conversation = await db.conversation.findFirst({ where: { id, tenantId: getCurrentTenantId()! } })
+    if (updated.count === 0) return { error: 'not_found' as const }
+    const conversation = await db.conversation.findFirst({ where: { id: convId, tenantId: getCurrentTenantId()! } })
 
     // If assigned to a user, add them as participant — tenantId explicit
     if (body.assignedUserId) {

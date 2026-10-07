@@ -1,4 +1,4 @@
-import { db } from '@/lib/db'
+import { db, withTenant } from '@/lib/db'
 import { publishToRealtime, room, EVENTS } from '@/lib/realtime-publish'
 
 /**
@@ -95,6 +95,12 @@ async function executeAction(
   switch (action.type) {
     case 'assign_department': {
       if (action.departmentId) {
+        // Revalidate department belongs to tenant at execution time
+        const dept = await db.department.findUnique({ where: { id: action.departmentId } })
+        if (!dept) {
+          console.error('[routing] stale departmentId in rule — skipping')
+          break
+        }
         await db.conversation.updateMany({
           where: { id: conversationId, tenantId },
           data: { departmentId: action.departmentId },
@@ -104,6 +110,15 @@ async function executeAction(
     }
     case 'assign_user': {
       if (action.userId) {
+        // Revalidate user has active Membership at execution time
+        const member = await db.membership.findFirst({
+          where: { userId: action.userId, status: 'active' },
+          select: { id: true },
+        })
+        if (!member) {
+          console.error('[routing] stale userId in rule — skipping')
+          break
+        }
         await db.conversation.updateMany({
           where: { id: conversationId, tenantId },
           data: { assignedUserId: action.userId },

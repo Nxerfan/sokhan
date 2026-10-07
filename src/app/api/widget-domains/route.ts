@@ -33,7 +33,7 @@ export async function POST(req: NextRequest) {
     // Check plan limit
     const limit = await getWebsiteLimit(tid)
     const count = await db.widgetDomain.count({ where: { tenantId: tid } })
-    if (count >= limit) {
+    if (limit >= 0 && count >= limit) {
       return { error: 'limit_reached' as const }
     }
 

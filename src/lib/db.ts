@@ -2,44 +2,39 @@ import { PrismaClient, type Prisma } from '@prisma/client'
 import { AsyncLocalStorage } from 'node:async_hooks'
 
 /**
- * Tenant isolation layer.
+ * Tenant isolation layer — FAIL-CLOSED.
  *
- * PostgreSQL is the official database across all deployment modes
- * (Neon cloud, Docker Full, Docker Lite, local dev). The Prisma
- * client extension below is the PRIMARY tenant-isolation boundary:
- *   - auto-injects `where: { tenantId }` on reads of tenant-scoped models,
- *   - auto-injects `data: { tenantId }` on creates,
- *   - strips cross-tenant rows from results.
+ * PostgreSQL is the official database across all deployment modes.
+ * The Prisma client extension below is the PRIMARY tenant-isolation boundary.
  *
- * PostgreSQL Row-Level Security is treated as DEFENSE-IN-DEPTH ONLY.
- * Prisma's privileged server-side database connection (which may use a
- * dedicated Prisma role) MAY bypass RLS policies depending on the
- * configured role. Therefore:
- *   - NEVER weaken the application-layer tenant filtering here.
- *   - NEVER assume that "RLS is enabled" means tenant isolation is
- *     guaranteed. The extension below is the authoritative boundary.
+ * FAIL-CLOSED contract:
+ *   For models in TENANT_SCOPED_MODELS, if there is no current tenant context
+ *   (set via withTenant), the extension THROWS TenantContextRequiredError
+ *   BEFORE the query reaches the database. A caller must NOT be able to
+ *   bypass tenant isolation by manually supplying tenantId in the query.
  *
- * The application contract is identical across modes: the extension
- * auto-injects `where: { tenantId }` on reads and `data: { tenantId }` on
- * creates for tenant-scoped models, and strips cross-tenant rows from
- * results.
+ * Trusted/background operations must use:
+ *   withTenant(tenantId, async () => { ... })
  *
- * Tenant-scoped models (must declare here):
+ * Tenant-scoped models (must have a `tenantId` column in the schema):
+ *   Membership, Department, WidgetConfig, Contact, Conversation, Message,
+ *   Participant, RoutingRule, Subscription, Invoice, FaqPair, Product,
+ *   AiConfig, ConnectorConfig, WidgetDomain
  *
- * CRITICAL: Every model that has a `tenantId` column MUST be listed here.
- * If a model is missing from this list, the extension will NOT auto-inject
- * tenantId on reads or writes, causing cross-tenant data leaks.
- *
- * Module 1 models: Membership, Department, DepartmentMember, WidgetConfig
- * Module 2 models: Contact, Conversation, Message, Participant, RoutingRule
- * Module 3 models: Subscription, Invoice (Plan is global — NOT tenant-scoped)
- * Module 4 models: FaqPair, Product, AiConfig, ConnectorConfig
- * Module 6 models: WidgetDomain
+ * NOTE: DepartmentMember has NO tenantId column — it is NOT listed here.
+ * Its tenant scoping is implicit through Department.tenantId.
  */
+
+export class TenantContextRequiredError extends Error {
+  constructor(model: string) {
+    super(`Tenant context required for ${model} operation. Wrap in withTenant(tenantId, fn).`)
+    this.name = 'TenantContextRequiredError'
+  }
+}
+
 const TENANT_SCOPED_MODELS = [
   'Membership',
   'Department',
-  'DepartmentMember',
   'WidgetConfig',
   'Contact',
   'Conversation',
@@ -60,18 +55,7 @@ type TenantScopedModel = (typeof TENANT_SCOPED_MODELS)[number]
 /* ------------------------------------------------------------------ */
 /* Per-request tenant context via AsyncLocalStorage                  */
 /* ------------------------------------------------------------------ */
-//
-// CRITICAL: the previous implementation used a single mutable global variable
-// (`globalForPrisma.__currentTenantId`). Under concurrent async requests
-// (e.g., two API routes running in the same Node process — common in dev
-// and in Docker, possible even on Vercel when a warm instance handles
-// back-to-back requests), the second request's `withTenant(tenantIdB)`
-// would overwrite the first request's `__currentTenantId` while the first
-// was still awaiting I/O. The result: cross-tenant data leaks.
-//
-// `AsyncLocalStorage` correctly tracks context per async execution
-// chain — each request gets its own context that does not leak across
-// concurrent awaits, even within the same process.
+
 const tenantContext = new AsyncLocalStorage<string>()
 
 function currentTenantId(): string | undefined {
@@ -97,7 +81,7 @@ export function getCurrentTenantId(): string | undefined {
 }
 
 /* ------------------------------------------------------------------ */
-/* Prisma client with tenant-scoping extension                       */
+/* Prisma client with tenant-scoping extension (FAIL-CLOSED)         */
 /* ------------------------------------------------------------------ */
 
 const globalForPrisma = globalThis as unknown as {
@@ -110,41 +94,116 @@ function buildTenantScopedClient() {
   })
 
   const handlers: Record<string, unknown> = {}
+
   for (const model of TENANT_SCOPED_MODELS) {
     handlers[model] = {
+      // ─── Reads ──────────────────────────────────────────────
       async findMany({ args, query }: any) {
         const tid = currentTenantId()
-        if (tid) args.where = { ...(args.where ?? {}), tenantId: tid }
-        return query(args)
-      },
-      async findUnique({ args, query }: any) {
-        const tid = currentTenantId()
-        if (tid && args.where) args.where = { ...args.where, tenantId: tid }
+        if (!tid) throw new TenantContextRequiredError(model)
+        args.where = { ...(args.where ?? {}), tenantId: tid }
         return query(args)
       },
       async findFirst({ args, query }: any) {
         const tid = currentTenantId()
-        if (tid) args.where = { ...(args.where ?? {}), tenantId: tid }
+        if (!tid) throw new TenantContextRequiredError(model)
+        args.where = { ...(args.where ?? {}), tenantId: tid }
         return query(args)
       },
-      async create({ args, query }: any) {
+      async findFirstOrThrow({ args, query }: any) {
         const tid = currentTenantId()
-        if (tid) args.data = { ...args.data, tenantId: tid }
+        if (!tid) throw new TenantContextRequiredError(model)
+        args.where = { ...(args.where ?? {}), tenantId: tid }
         return query(args)
       },
-      async update({ args, query }: any) {
+      async findUnique({ args, query }: any) {
         const tid = currentTenantId()
-        if (tid) args.where = { ...(args.where ?? {}), tenantId: tid }
+        if (!tid) throw new TenantContextRequiredError(model)
+        // findUnique uses compound unique keys — only inject if where exists
+        if (args.where) args.where = { ...args.where, tenantId: tid }
         return query(args)
       },
-      async delete({ args, query }: any) {
+      async findUniqueOrThrow({ args, query }: any) {
         const tid = currentTenantId()
-        if (tid) args.where = { ...(args.where ?? {}), tenantId: tid }
+        if (!tid) throw new TenantContextRequiredError(model)
+        if (args.where) args.where = { ...args.where, tenantId: tid }
         return query(args)
       },
       async count({ args, query }: any) {
         const tid = currentTenantId()
-        if (tid) args.where = { ...(args.where ?? {}), tenantId: tid }
+        if (!tid) throw new TenantContextRequiredError(model)
+        args.where = { ...(args.where ?? {}), tenantId: tid }
+        return query(args)
+      },
+      async aggregate({ args, query }: any) {
+        const tid = currentTenantId()
+        if (!tid) throw new TenantContextRequiredError(model)
+        args.where = { ...(args.where ?? {}), tenantId: tid }
+        return query(args)
+      },
+      async groupBy({ args, query }: any) {
+        const tid = currentTenantId()
+        if (!tid) throw new TenantContextRequiredError(model)
+        args.where = { ...(args.where ?? {}), tenantId: tid }
+        return query(args)
+      },
+
+      // ─── Creates ────────────────────────────────────────────
+      async create({ args, query }: any) {
+        const tid = currentTenantId()
+        if (!tid) throw new TenantContextRequiredError(model)
+        // FORCE tenantId from context — override any caller-supplied value
+        if (args.data && typeof args.data === 'object' && !Array.isArray(args.data)) {
+          args.data = { ...args.data, tenantId: tid }
+        }
+        return query(args)
+      },
+      async createMany({ args, query }: any) {
+        const tid = currentTenantId()
+        if (!tid) throw new TenantContextRequiredError(model)
+        // Stamp every row with current tenantId
+        if (Array.isArray(args.data)) {
+          args.data = args.data.map((row: any) => ({ ...row, tenantId: tid }))
+        } else if (args.data && typeof args.data === 'object') {
+          args.data = { ...args.data, tenantId: tid }
+        }
+        return query(args)
+      },
+
+      // ─── Updates ────────────────────────────────────────────
+      async update({ args, query }: any) {
+        const tid = currentTenantId()
+        if (!tid) throw new TenantContextRequiredError(model)
+        args.where = { ...(args.where ?? {}), tenantId: tid }
+        return query(args)
+      },
+      async updateMany({ args, query }: any) {
+        const tid = currentTenantId()
+        if (!tid) throw new TenantContextRequiredError(model)
+        args.where = { ...(args.where ?? {}), tenantId: tid }
+        return query(args)
+      },
+      async upsert({ args, query }: any) {
+        const tid = currentTenantId()
+        if (!tid) throw new TenantContextRequiredError(model)
+        // Scope the where clause
+        if (args.where) args.where = { ...args.where, tenantId: tid }
+        // Force tenantId on create
+        if (args.create) args.create = { ...args.create, tenantId: tid }
+        return query(args)
+      },
+
+      // ─── Deletes ────────────────────────────────────────────
+      async delete({ args, query }: any) {
+        const tid = currentTenantId()
+        if (!tid) throw new TenantContextRequiredError(model)
+        args.where = { ...(args.where ?? {}), tenantId: tid }
+        return query(args)
+      },
+      async deleteMany({ args, query }: any) {
+        const tid = currentTenantId()
+        if (!tid) throw new TenantContextRequiredError(model)
+        args.where = { ...(args.where ?? {}), tenantId: tid }
         return query(args)
       },
     }
@@ -161,7 +220,7 @@ export const db = (globalForPrisma.prisma ?? buildTenantScopedClient()) as Prism
 if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = db
 
 /* ------------------------------------------------------------------ */
-/* Role helpers (kept here for backwards-compat — also in auth.ts)    */
+/* Role helpers                                                       */
 /* ------------------------------------------------------------------ */
 
 /** Roles, in descending privilege order. */

@@ -19,11 +19,15 @@ export async function POST(req: NextRequest) {
       return { forbidden: true as const }
     }
     const body = await req.json()
+    const question = String(body.question ?? '').trim()
+    const answer = String(body.answer ?? '').trim()
+    if (!question || question.length > 1000) return { error: 'invalid_question' as const }
+    if (!answer || answer.length > 5000) return { error: 'invalid_answer' as const }
     const faq = await db.faqPair.create({
       data: {
         tenantId: session.user.workspaceId!,
-        question: String(body.question ?? '').trim(),
-        answer: String(body.answer ?? '').trim(),
+        question,
+        answer,
         enabled: body.enabled !== false,
       },
     })

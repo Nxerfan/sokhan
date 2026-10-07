@@ -26,7 +26,8 @@
  * the store's `currency` field and convert IRR → Toman (÷10) when appropriate.
  */
 
-import { db } from '@/lib/db'
+import { db, withTenant } from '@/lib/db'
+import { safeFetch, assertPublicUrl, SsrfError, validateOutboundUrl } from '@/lib/security/ssrf-guard'
 
 export interface WooCommerceConfig {
   /** Store root URL, e.g. `https://shop.example.com`. No trailing slash. */
@@ -201,7 +202,20 @@ async function fetchProductPage(
   let nextUrl: string | null = null
   if (linkHeader) {
     const match = linkHeader.match(/<([^>]+)>;\s*rel="next"/i)
-    if (match) nextUrl = match[1]
+    if (match) {
+      // Validate Link header URL before following
+      try {
+        await assertPublicUrl(match[1])
+        nextUrl = match[1]
+      } catch (e) {
+        if (e instanceof SsrfError) {
+          nextUrl = null
+        } else {
+          throw e
+        }
+      }
+    }
+
   }
 
   // Fallback: if no Link header, check X-WP-TotalPages.
@@ -302,6 +316,7 @@ export async function syncWooCommerceProducts(
   tenantId: string,
   config: WooCommerceConfig,
 ): Promise<ProductSyncResult> {
+  return withTenant(tenantId, async () => {
   const storeUrl = normalizeStoreUrl(config.storeUrl)
   if (!storeUrl) {
     return { synced: 0, created: 0, updated: 0, errors: ['storeUrl is required'] }
@@ -313,6 +328,13 @@ export async function syncWooCommerceProducts(
       updated: 0,
       errors: ['consumerKey and consumerSecret are required'],
     }
+  }
+
+  // Revalidate store URL on every sync (DNS can change)
+  try {
+    await validateOutboundUrl(storeUrl)
+  } catch (e: any) {
+    return { synced: 0, created: 0, updated: 0, errors: [`Store URL validation failed: ${e?.message ?? e}`] }
   }
 
   const endpoint = `${storeUrl}/wp-json/wc/v3/products`
@@ -372,6 +394,7 @@ export async function syncWooCommerceProducts(
   }
 
   return { synced, created, updated, errors }
+  })
 }
 
 /** Convenience helper: mask the consumer secret for display in the dashboard. */

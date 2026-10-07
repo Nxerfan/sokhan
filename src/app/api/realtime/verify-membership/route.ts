@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { getAuthSecret } from '@/lib/env-check'
+import { withTenant } from '@/lib/db'
 import crypto from 'crypto'
 
 /**
@@ -40,9 +41,11 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'missing_params' }, { status: 400 })
   }
 
-  const membership = await db.membership.findFirst({
-    where: { userId, tenantId },
-    select: { id: true, role: true, status: true },
+  const membership = await withTenant(tenantId, async () => {
+    return db.membership.findFirst({
+      where: { userId, tenantId },
+      select: { id: true, role: true, status: true },
+    })
   })
 
   if (!membership) {

@@ -20,14 +20,24 @@ export async function POST(req: NextRequest) {
       return { forbidden: true as const }
     }
     const body = await req.json()
+    const name = String(body.name ?? '').trim()
+    const description = String(body.description ?? '').trim()
+    const price = Number(body.price ?? 0)
+    const availability = String(body.availability ?? 'in_stock')
+    const sku = body.sku ? String(body.sku).trim() : null
+    if (!name || name.length > 500) return { error: 'invalid_name' as const }
+    if (description.length > 5000) return { error: 'invalid_description' as const }
+    if (!Number.isFinite(price) || price < 0 || !Number.isInteger(price)) return { error: 'invalid_price' as const }
+    if (!['in_stock', 'out_of_stock', 'limited'].includes(availability)) return { error: 'invalid_availability' as const }
+    if (sku !== null && sku.length > 100) return { error: 'invalid_sku' as const }
     const product = await db.product.create({
       data: {
         tenantId: session.user.workspaceId!,
-        name: String(body.name ?? '').trim(),
-        description: String(body.description ?? '').trim(),
-        price: Number(body.price ?? 0),
-        availability: String(body.availability ?? 'in_stock'),
-        sku: body.sku || null,
+        name,
+        description,
+        price,
+        availability,
+        sku,
         externalSource: 'manual',
         metadata: {},
       },
