@@ -170,10 +170,18 @@ test.describe('Inbox reply-echo dedup (Scenario C)', () => {
     //   {msg.content.text && <p>{msg.content.text}</p>}
     // So counting <p> elements with the reply text inside the thread
     // view counts the message bubbles for that text.
+    // Scope to the thread's message-list container (div.space-y-3 inside the
+    // thread ScrollArea). This excludes the conversation-list preview <p>
+    // (which also shows the reply text after loadConversations) and any
+    // dashboard-shell wrapper. Each MessageBubble renders text in ONE
+    // <p>{msg.content.text}</p>, so count = message bubbles for the reply.
     const threadView = dashboardPage
       .locator('div.flex.flex-1.flex-col.overflow-hidden')
       .first()
-    const replyBubbles = threadView.locator('p').filter({ hasText: replyText })
+    const replyBubbles = threadView
+      .locator('div.space-y-3')
+      .locator('p')
+      .filter({ hasText: replyText })
 
     // Wait for the Socket.IO echo to arrive too (the dedup logic is
     // the thing under test - if we asserted immediately after the

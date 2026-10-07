@@ -173,30 +173,26 @@ test.describe('Widget NPM external origin (Scenario F)', () => {
     //    response). This is the Socket.IO client library that the NPM
     //    widget's script URL points at. The Sukhan realtime service
     //    (or Caddy) serves this on the Sukhan origin.
-    const scriptResult = await page.evaluate(async (sukhanOrigin) => {
-      try {
-        const res = await fetch(`${sukhanOrigin}/socket.io.min.js`)
-        const text = res.ok ? await res.text() : ''
-        return {
-          ok: res.ok,
-          status: res.status,
-          contentType: res.headers.get('content-type') ?? '',
-          bodyHead: text.slice(0, 200),
-          bodyLength: text.length,
-        }
-      } catch (e) {
-        return { ok: false, status: 0, error: e instanceof Error ? e.message : String(e) }
-      }
-    }, SUKHAN_ORIGIN)
+    // /socket.io.min.js is a static file (public/socket.io.min.js). Cross-origin
+    // FETCH of a static file is CORS-blocked, but the NPM widget loads it via a
+    // <script> tag (not subject to CORS for execution). Verify it loads from the
+    // Sukhan origin via a script tag.
+    const scriptLoaded = await page.evaluate(async (sukhanOrigin) => {
+      return await new Promise<boolean>((resolve) => {
+        const s = document.createElement('script')
+        s.src = `${sukhanOrigin}/socket.io.min.js`
+        s.async = true
+        s.onload = () => resolve(true)
+        s.onerror = () => resolve(false)
+        document.head.appendChild(s)
+        setTimeout(() => resolve(false), 8000)
+      })
+    }, SUKHAN_ORIGIN).catch(() => false)
 
     expect(
-      scriptResult.ok,
-      `${SUKHAN_ORIGIN}/socket.io.min.js should be served by the Sukhan backend (status=${scriptResult.status}, error=${(scriptResult as { error?: string }).error ?? 'none'})`,
+      scriptLoaded,
+      `${SUKHAN_ORIGIN}/socket.io.min.js should load via a <script> tag from the Sukhan backend (the NPM widget loads it this way)`,
     ).toBe(true)
-    expect(
-      scriptResult.bodyLength,
-      `socket.io.min.js body should not be empty (got length=${scriptResult.bodyLength})`,
-    ).toBeGreaterThan(0)
 
     // 6. ASSERT: the customer origin does NOT proxy `/socket.io.min.js`
     //    to the Sukhan backend. A request to the customer origin for
