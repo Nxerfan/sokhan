@@ -47,6 +47,7 @@ import {
   createCheckout,
   handleCallback,
   transitionToFreePlan,
+  BillingError,
   type BillingDeps,
 } from '@/lib/payments/billing-service'
 import { createMockProvider, type MockPaymentProvider } from '@/lib/payments/mock-provider'
@@ -137,6 +138,21 @@ beforeAll(async () => {
     },
     select: { id: true },
   })
+})
+
+/** Remove all subscriptions + invoices for the shared test tenants, reset plan.
+ * Prevents cross-test interference (duplicate-pending reuse, leftover paid rows). */
+async function cleanTenantState(): Promise<void> {
+  for (const tid of [tenantA.id, tenantB.id]) {
+    await globalDb.invoice.deleteMany({ where: { tenantId: tid } }).catch(() => {})
+    await globalDb.subscription.deleteMany({ where: { tenantId: tid } }).catch(() => {})
+    await globalDb.tenant.update({ where: { id: tid }, data: { plan: 'free' } }).catch(() => {})
+  }
+}
+
+// Runs before EVERY test — isolates DB state across the shared tenants.
+beforeEach(async () => {
+  await cleanTenantState()
 })
 
 afterAll(async () => {
@@ -236,15 +252,20 @@ describe('§ Checkout creation', () => {
     mock.setCreateScenario('create_failure')
     const deps = makeDeps(mock)
 
-    await expect(
-      createCheckout({
+    let thrown: unknown = null
+    try {
+      await createCheckout({
         tenantId: tenantA.id,
         planSlug: TEST_PAID_PLAN.slug,
         gatewayName: 'mock',
         origin: 'https://app.test',
         deps,
-      }),
-    ).rejects.toThrow(/create_payment_failed/)
+      })
+    } catch (e) {
+      thrown = e
+    }
+    expect(thrown).toBeInstanceOf(BillingError)
+    expect((thrown as BillingError).code).toBe('create_payment_failed')
 
     // The orphaned pending rows must be canceled; active preserved.
     await withTenant(tenantA.id, async () => {
@@ -260,15 +281,20 @@ describe('§ Checkout creation', () => {
 
   test('zero amount never calls the provider (createCheckout rejects a zero-price plan)', async () => {
     const deps = makeDeps(mock)
-    await expect(
-      createCheckout({
+    let thrown2: unknown = null
+    try {
+      await createCheckout({
         tenantId: tenantA.id,
         planSlug: 'free', // priceToman 0
         gatewayName: 'mock',
         origin: 'https://app.test',
         deps,
-      }),
-    ).rejects.toThrow(/invalid_plan/)
+      })
+    } catch (e) {
+      thrown2 = e
+    }
+    expect(thrown2).toBeInstanceOf(BillingError)
+    expect((thrown2 as BillingError).code).toBe('invalid_plan')
     expect(mock.callCount('createPayment')).toBe(0)
   })
 })
