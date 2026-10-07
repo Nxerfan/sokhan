@@ -68,7 +68,7 @@ test('faqs: validates answer non-empty + bounded', () => {
 test('conversations POST: validates contactId belongs to tenant', () => {
   const source = readSrc('src/app/api/conversations/route.ts')
   expect(source).toContain('contact_not_found')
-  expect(source).toContain('db.contact.findUnique')
+  expect(source).toContain('db.contact.findFirst')
 })
 
 test('conversations PATCH: validates assignedUserId has active Membership', () => {
