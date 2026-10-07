@@ -35,15 +35,15 @@ async function validateRuleAction(action: any): Promise<{ ok: true } | { ok: fal
   if (action.type === 'assign_department') {
     if (!action.departmentId || typeof action.departmentId !== 'string') return { ok: false, error: 'invalid_department_id' }
     // Tenant-scoped lookup — foreign departmentId returns null.
-    const dept = await db.department.findUnique({ where: { id: action.departmentId } })
+    const dept = await db.department.findUnique({ where: { id: action.departmentId, tenantId: tid } })
     if (!dept) return { ok: false, error: 'invalid_department_id' }
   }
   if (action.type === 'assign_user') {
     if (!action.userId || typeof action.userId !== 'string') return { ok: false, error: 'invalid_user_id' }
     // Tenant-scoped lookup — foreign userId (no Membership in this tenant)
     // returns null.
-    const member = await db.membership.findFirst({ where: { userId: action.userId, status: 'active', tenantId: tid },
-      where: { userId: action.userId, status: 'active' },
+    const member = await db.membership.findFirst({
+      where: { userId: action.userId, status: 'active', tenantId: tid },
       select: { id: true },
     })
     if (!member) return { ok: false, error: 'invalid_user_id' }
