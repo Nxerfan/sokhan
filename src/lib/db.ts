@@ -156,7 +156,7 @@ function buildTenantScopedClient() {
 
   return client.$extends({
     name: 'tenantScope',
-    query: handlers,
+    query: handlers as any,
   })
 }
 
