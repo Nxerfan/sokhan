@@ -2,19 +2,35 @@
  * Sukhan Widget — UI rendering.
  *
  * Self-contained widget rendered with vanilla DOM (no framework dependency).
- * Reuses the visual logic from `src/app/api/widget/[slug]/script/route.ts`
- * but structured as a class that can be initialized programmatically or
- * via auto-init on import.
  *
- * Plan-gated styling:
- *  - Free plan: widget shows a small "Powered by Sukhan" footer badge and the
- *    launcher uses a neutral ink color (no full white-label).
- *  - Pro/Business/Enterprise: full white-label — accent color drives all
- *    branding, no visible Sukhan attribution in the widget.
+ * Reliability contract:
+ *   - Realtime config comes from the BACKEND `config.realtime` field
+ *     (with optional `SukhanOptions.realtime` override taking priority).
+ *     The widget passes the resolved config EXPLICITLY to `SukhanSocket`
+ *     — no `window.__sukhan_api_url` global coupling.
+ *   - ONE central message-merge function (`mergeMessages` / `ingestMessage`)
+ *     keyed by `Message.id` is used for ALL ingestion paths: POST response,
+ *     socket `message:new`, polling, history reload. Same id appears once.
+ *   - Polling is a REAL fallback (only when socket disconnected; stops on
+ *     reconnect + one immediate history reconcile).
+ *   - Reconnect gap recovery: re-join current conversation + reconcile
+ *     history once.
+ *   - `destroy()` is idempotent + clears polling/typing/socket/DOM. Every
+ *     async callback checks `this.destroyed` before touching state.
  */
 
 import { ApiClient } from './api'
 import { SukhanSocket } from './socket'
+import type { SukhanSocketOptions } from './types'
+import type { SukhanSocketDeps } from './socket'
+import { mergeMessages, mergeMessage } from './merge'
+import {
+  HOSTED_API_URL,
+  HOSTED_REALTIME_CONFIG,
+  resolveRealtimeFromConfig,
+  buildSocketIoScriptUrl,
+  type RealtimeEndpointConfig,
+} from './realtime-resolve'
 import type {
   WidgetConfig,
   SukhanOptions,
@@ -23,7 +39,6 @@ import type {
   SenderType,
 } from './types'
 
-/** Free-plan badge text (bilingual) — shown at the bottom of the widget panel. */
 const POWERED_BY: Record<'fa' | 'en', string> = {
   fa: 'نیرو گرفته از سُخن',
   en: 'Powered by Sukhan',
@@ -46,31 +61,12 @@ function el<K extends keyof HTMLElementTagNameMap>(
 
 function css(node: HTMLElement, props: StyleProps): void {
   for (const k in props) {
-    // `as keyof CSSStyleDeclaration` — style keys are strings at runtime.
     ;(node.style as unknown as Record<string, string>)[k] = String(
       (props as unknown as Record<string, unknown>)[k],
     )
   }
 }
 
-function esc(s: unknown): string {
-  return String(s).replace(/[&<>"]/g, (c) => {
-    switch (c) {
-      case '&':
-        return '&amp;'
-      case '<':
-        return '&lt;'
-      case '>':
-        return '&gt;'
-      case '"':
-        return '&quot;'
-      default:
-        return c
-    }
-  })
-}
-
-/** Convert a hex color (#RRGGBB) to an rgba() string with the given alpha. */
 function hexA(hex: string, a: number): string {
   const h = (hex || '#E09A2B').replace('#', '')
   const padded = h.length === 3 ? h.split('').map((c) => c + c).join('') : h
@@ -89,26 +85,22 @@ function fmt(ts: string): string {
   }
 }
 
-/** Convert launcher shape name to CSS class. */
 function shapeClass(s: string): string {
   if (s === 'pill') return 'sk-pill'
   if (s === 'rounded') return 'sk-rounded'
   return 'sk-tab'
 }
 
-/** Storage key for the visitorId (per-widget-slug). */
 function storageKey(slug: string): string {
   return 'sukhan_visitor_' + slug
 }
 
-/** Get-or-create a persistent visitor ID (localStorage). Uses crypto.randomUUID(). */
 function getVisitorId(slug: string, override?: string): string {
   if (override) return override
   try {
     const key = storageKey(slug)
     const v = localStorage.getItem(key)
     if (v) return v
-    // Cryptographically strong visitor ID — prefer crypto.randomUUID().
     const fresh = generateVisitorId()
     localStorage.setItem(key, fresh)
     return fresh
@@ -117,7 +109,6 @@ function getVisitorId(slug: string, override?: string): string {
   }
 }
 
-/** Generate a cryptographically strong visitor ID. */
 function generateVisitorId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return 'vis_' + crypto.randomUUID()
@@ -145,23 +136,36 @@ interface WidgetInternalState {
   typingTimer?: ReturnType<typeof setTimeout>
 }
 
-/**
- * Sukhan chat widget. Mounts a launcher button + chat panel onto the page,
- * connects to the realtime service, and handles all visitor interactions.
- *
- * Construct via `new SukhanWidget(options)` then call `.init()`.
- * Usually instantiated through the `initSukhan()` helper exported from
- * `index.ts`.
- */
+/** Injected dependencies — production leaves undefined (uses real impls). */
+export interface SukhanWidgetDeps {
+  /** Custom ApiClient (for tests). */
+  apiClient?: ApiClient
+  /** Custom SukhanSocket constructor (for tests). */
+  socketCtor?: new (opts: SukhanSocketOptions, deps?: SukhanSocketDeps) => SukhanSocket
+}
+
 export class SukhanWidget implements SukhanInstance {
   config: WidgetConfig | null = null
   private api: ApiClient
   private socket: SukhanSocket | null = null
+  private readonly SocketCtor: new (opts: SukhanSocketOptions, deps?: SukhanSocketDeps) => SukhanSocket
   private container: HTMLElement
   private locale: 'fa' | 'en' | undefined
   private direction: 'rtl' | 'ltr' | undefined
   private disablePolling: boolean
   private visitorOverride?: { name?: string; email?: string; visitorId?: string }
+  private options: SukhanOptions
+
+  /**
+   * Realtime config resolved from the backend `config.realtime` field
+   * (with `SukhanOptions.realtime` override taking priority). Computed
+   * in `init()` after `fetchConfig()` returns.
+   */
+  private clientScriptUrl: string = HOSTED_API_URL + '/socket.io.min.js'
+  private realtimeConfig: RealtimeEndpointConfig = HOSTED_REALTIME_CONFIG
+
+  /** Set by destroy() — every async callback checks this before touching state. */
+  private destroyed = false
 
   private state: WidgetInternalState = {
     open: false,
@@ -188,7 +192,7 @@ export class SukhanWidget implements SukhanInstance {
   private csatShown = false
   private rootEl: HTMLElement | null = null
 
-  constructor(options: SukhanOptions) {
+  constructor(options: SukhanOptions, __deps?: SukhanWidgetDeps) {
     const apiKey =
       options.apiKey ||
       (typeof window !== 'undefined'
@@ -200,11 +204,12 @@ export class SukhanWidget implements SukhanInstance {
         'sukhan: apiKey is required. Pass it to initSukhan({ apiKey }) or set SUKHAN_API_KEY.',
       )
     }
-    this.api = new ApiClient(apiKey, options.apiUrl)
-    // Expose the apiUrl for the Socket.IO script loader.
-    if (typeof window !== 'undefined') {
-      ;(window as unknown as { __sukhan_api_url?: string }).__sukhan_api_url = this.api.apiUrl
-    }
+    this.options = options
+    this.api = __deps?.apiClient ?? new ApiClient(apiKey, options.apiUrl)
+    this.SocketCtor = (__deps?.socketCtor ?? SukhanSocket) as typeof SukhanSocket
+    // NOTE: NO window.__sukhan_api_url write — the socket receives its
+    // config explicitly via SukhanSocketOptions (clientScriptUrl +
+    // realtimeUrl + realtimePath + transports + addTrailingSlash).
     this.container = options.container || (typeof document !== 'undefined' ? document.body : ({} as HTMLElement))
     this.locale = options.locale
     this.direction = options.direction
@@ -214,6 +219,7 @@ export class SukhanWidget implements SukhanInstance {
 
   /** Fetch config + mount the widget. Idempotent (guarded by `__sukhan_mounted`). */
   async init(): Promise<void> {
+    if (this.destroyed) return
     if (typeof document === 'undefined') return
     if ((window as unknown as { __sukhan_mounted?: boolean }).__sukhan_mounted) return
     ;(window as unknown as { __sukhan_mounted?: boolean }).__sukhan_mounted = true
@@ -225,6 +231,16 @@ export class SukhanWidget implements SukhanInstance {
       console.error('[sukhan] config fetch failed', e)
       return
     }
+    if (this.destroyed) return // guard: destroy during async fetch
+    // Compute the realtime endpoint config from the backend response,
+    // with the optional SukhanOptions.realtime override taking priority.
+    this.realtimeConfig = resolveRealtimeFromConfig(
+      this.api.apiUrl,
+      this.config?.realtime ?? null,
+      this.options.realtime ?? null,
+    )
+    this.clientScriptUrl = buildSocketIoScriptUrl(this.api.apiUrl)
+    if (this.destroyed) return
     this.mount(this.config)
   }
 
@@ -249,7 +265,6 @@ export class SukhanWidget implements SukhanInstance {
     this.root = root
     this.rootEl = root
 
-    // Launcher button
     const launcher = el('button', 'sk-launcher ' + shapeClass(config.launcherShape)) as HTMLButtonElement
     launcher.setAttribute('aria-label', this.state.locale === 'fa' ? 'گفت‌وگو' : 'Open chat')
     css(launcher, {
@@ -285,7 +300,6 @@ export class SukhanWidget implements SukhanInstance {
     launcher.appendChild(pulseDot)
     this.pulseDot = pulseDot
 
-    // Panel
     const panel = el('div', 'sk-panel')
     css(panel, {
       position: 'absolute',
@@ -309,7 +323,6 @@ export class SukhanWidget implements SukhanInstance {
     panel.style[side] = '0'
     this.panel = panel
 
-    // Header
     const header = el('div', 'sk-header')
     css(header, {
       display: 'flex',
@@ -352,7 +365,6 @@ export class SukhanWidget implements SukhanInstance {
     header.appendChild(titleText)
     header.appendChild(closeBtn)
 
-    // Messages area
     const bodyEl = el('div', 'sk-body')
     css(bodyEl, {
       flex: '1',
@@ -365,7 +377,6 @@ export class SukhanWidget implements SukhanInstance {
     })
     this.bodyEl = bodyEl
 
-    // Greeting
     const greeting = config.greetingTexts && config.greetingTexts[this.state.locale]
     if (greeting) {
       this.state.messages.push({
@@ -378,7 +389,6 @@ export class SukhanWidget implements SukhanInstance {
       })
     }
 
-    // Typing indicator
     const typingEl = el('div', 'sk-typing')
     css(typingEl, {
       display: 'none',
@@ -392,7 +402,6 @@ export class SukhanWidget implements SukhanInstance {
     this.typingEl = typingEl
     bodyEl.appendChild(typingEl)
 
-    // Input bar
     const inputBar = el('div', 'sk-input')
     css(inputBar, {
       display: 'flex',
@@ -458,7 +467,6 @@ export class SukhanWidget implements SukhanInstance {
     panel.appendChild(header)
     panel.appendChild(bodyEl)
 
-    // Free-plan "Powered by" badge (locked styling)
     if (this.isFreePlan()) {
       const badge = el('a', 'sk-powered')
       badge.href = 'https://sukhan.chat'
@@ -488,7 +496,6 @@ export class SukhanWidget implements SukhanInstance {
     this.identifyVisitor()
   }
 
-  /** True when the tenant is on the free plan (locked styling). */
   private isFreePlan(): boolean {
     return !this.config?.plan || this.config.plan === 'free'
   }
@@ -518,6 +525,7 @@ export class SukhanWidget implements SukhanInstance {
 
   // ---------- Visitor identification ----------
   private identifyVisitor(): void {
+    if (this.destroyed) return
     const visitorId = getVisitorId(this.api.slug, this.visitorOverride?.visitorId)
     this.api
       .identifyVisitor({
@@ -526,11 +534,10 @@ export class SukhanWidget implements SukhanInstance {
         name: this.visitorOverride?.name,
       })
       .then((data) => {
+        if (this.destroyed) return // guard: destroy during async identify
         this.state.contactId = data.contactId
         this.state.conversationId = data.conversationId
         this.state.token = data.realtimeToken
-        // Warm up the socket connection IMMEDIATELY so we don't miss
-        // rapid agent replies once the visitor sends their first message.
         this.connectSocket()
         if (data.conversationId) this.loadMessages()
       })
@@ -541,26 +548,76 @@ export class SukhanWidget implements SukhanInstance {
   }
 
   private loadMessages(): void {
+    if (this.destroyed) return
     if (!this.state.conversationId || !this.state.token) return
     this.api.loadMessages(this.state.token, this.state.conversationId).then((messages) => {
-      this.state.messages = messages
+      if (this.destroyed) return // guard: destroy during async load
+      // Central merge: dedup by id, stable chronological order.
+      this.state.messages = mergeMessages(this.state.messages, messages)
       this.renderMessages()
     })
   }
 
+  /**
+   * Central message ingestion — used by ALL ingestion paths (POST
+   * response, socket `message:new`, polling). Dedup by id; server-updated
+   * copy replaces stale local; stable chronological order.
+   */
+  private ingestMessage(m: Message): void {
+    if (this.destroyed) return
+    if (!m || !m.id) return
+    this.state.messages = mergeMessage(this.state.messages, m)
+    this.renderMessages()
+    if (!this.state.open && this.pulseDot) {
+      this.pulseDot.style.display = 'block'
+    }
+    if (
+      m.senderType === 'system' &&
+      m.content &&
+      m.content.text &&
+      (m.content.text.indexOf('closed') >= 0 ||
+        m.content.text.indexOf('بسته') >= 0 ||
+        m.content.text.indexOf('resolved') >= 0 ||
+        m.content.text.indexOf('حل') >= 0)
+    ) {
+      this.showCsatSurvey()
+    }
+  }
+
   // ---------- Socket ----------
   private connectSocket(): void {
+    if (this.destroyed) return
     if (!this.state.token) return
     if (this.socket) return
-    this.socket = new SukhanSocket(this.state.token)
+    this.socket = new this.SocketCtor({
+      token: this.state.token,
+      clientScriptUrl: this.clientScriptUrl,
+      realtimeUrl: this.realtimeConfig.url,
+      realtimePath: this.realtimeConfig.path,
+      transports: this.realtimeConfig.transports,
+      addTrailingSlash: this.realtimeConfig.addTrailingSlash,
+    })
     this.socket.onConnect = () => {
+      if (this.destroyed) return
+      this.state.connected = true
+      this.stopPolling() // socket connected → no polling
       if (this.state.conversationId) {
         this.socket?.send('conversation:join', this.state.conversationId)
       }
     }
-    // On token expiry, re-identify using the SAME visitorId (no new Contact)
-    // and return the fresh realtime token.
+    this.socket.onReconnect = () => {
+      if (this.destroyed) return
+      this.state.connected = true
+      this.stopPolling() // socket reconnected → stop polling
+      // Reconnect gap recovery: (1) re-join current conversation room,
+      // (2) fetch/reconcile history once (dedup by id).
+      if (this.state.conversationId) {
+        this.socket?.send('conversation:join', this.state.conversationId)
+      }
+      this.reconcileHistory()
+    }
     this.socket.onTokenExpired = async () => {
+      if (this.destroyed) return null
       try {
         const visitorId = getVisitorId(this.api.slug, this.visitorOverride?.visitorId)
         const data = await this.api.identifyVisitor({
@@ -568,6 +625,7 @@ export class SukhanWidget implements SukhanInstance {
           email: this.visitorOverride?.email,
           name: this.visitorOverride?.name,
         })
+        if (this.destroyed) return null
         this.state.token = data.realtimeToken
         if (data.conversationId && !this.state.conversationId) {
           this.state.conversationId = data.conversationId
@@ -577,30 +635,23 @@ export class SukhanWidget implements SukhanInstance {
         return null
       }
     }
+    this.socket.on('disconnect', () => {
+      if (this.destroyed) return
+      this.state.connected = false
+      this.maybeStartPolling() // socket disconnected → enable fallback
+    })
     this.socket.on('message:new', (msg) => {
-      this.state.messages.push(msg as Message)
-      this.renderMessages()
-      if (!this.state.open) this.pulseDot.style.display = 'block'
-      const m = msg as Message
-      if (
-        m.senderType === 'system' &&
-        m.content &&
-        m.content.text &&
-        (m.content.text.indexOf('closed') >= 0 ||
-          m.content.text.indexOf('بسته') >= 0 ||
-          m.content.text.indexOf('resolved') >= 0 ||
-          m.content.text.indexOf('حل') >= 0)
-      ) {
-        this.showCsatSurvey()
-      }
+      this.ingestMessage(msg as Message)
     })
     this.socket.on('conversation:updated', (data) => {
+      if (this.destroyed) return
       const d = data as { changes?: { status?: string } }
       if (d && d.changes && d.changes.status === 'closed') {
         this.showCsatSurvey()
       }
     })
     this.socket.on('typing:start', (data) => {
+      if (this.destroyed) return
       const d = data as { senderType?: string }
       if (d && d.senderType === 'agent') {
         this.typingEl.style.display = 'block'
@@ -608,27 +659,52 @@ export class SukhanWidget implements SukhanInstance {
       }
     })
     this.socket.on('typing:stop', () => {
+      if (this.destroyed) return
       this.typingEl.style.display = 'none'
     })
     this.socket.connect()
   }
 
+  /**
+   * Reconnect gap recovery: fetch the current conversation history once
+   * and dedup with the local state (server-updated copies replace stale
+   * local copies). Best-effort — silent on failure.
+   */
+  private reconcileHistory(): void {
+    if (this.destroyed) return
+    if (!this.state.conversationId || !this.state.token) return
+    this.api
+      .loadMessages(this.state.token, this.state.conversationId)
+      .then((messages) => {
+        if (this.destroyed) return
+        this.state.messages = mergeMessages(this.state.messages, messages)
+        this.renderMessages()
+      })
+      .catch(() => {
+        // silent — best-effort reconcile
+      })
+  }
+
   // ---------- Send ----------
   send(text: string): Promise<void> {
-    this.inputEl.value = text
+    if (this.inputEl) this.inputEl.value = text
     return this.sendMessage()
   }
 
   private sendMessage(): Promise<void> {
+    if (this.destroyed) return Promise.resolve()
+    if (!this.inputEl) return Promise.resolve()
     const text = this.inputEl.value.trim()
     if (!text || !this.state.token) return Promise.resolve()
     this.inputEl.value = ''
     return this.api
       .sendMessage(this.state.token, text)
       .then((data) => {
+        if (this.destroyed) return // guard: destroy during async send
         if (data.message) {
-          this.state.messages.push(data.message)
-          this.renderMessages()
+          // Central merge — POST response dedups against any socket
+          // delivery of the same message id.
+          this.ingestMessage(data.message)
         }
         if (data.conversationId && data.conversationId !== this.state.conversationId) {
           this.state.conversationId = data.conversationId
@@ -636,7 +712,9 @@ export class SukhanWidget implements SukhanInstance {
             this.socket.send('conversation:join', this.state.conversationId)
           }
         }
-        this.startPolling()
+        if (!this.state.connected) {
+          this.maybeStartPolling()
+        }
       })
       .catch((e) => {
         // eslint-disable-next-line no-console
@@ -645,35 +723,57 @@ export class SukhanWidget implements SukhanInstance {
   }
 
   // ---------- Polling fallback ----------
-  private startPolling(): void {
+  /**
+   * Single-flight polling starter. Only starts if: not destroyed, polling
+   * not disabled, no pollTimer already running, socket NOT connected,
+   * and we have a conversationId + token. NEVER creates multiple
+   * intervals (the `if (this.pollTimer) return` guard is the
+   * single-flight check).
+   */
+  private maybeStartPolling(): void {
+    if (this.destroyed) return
     if (this.disablePolling) return
-    if (this.pollTimer) return
-    this.pollTimer = setInterval(() => {
-      if (!this.state.conversationId || !this.state.token) return
-      this.api
-        .loadMessages(this.state.token, this.state.conversationId)
-        .then((messages) => {
-          if (messages.length !== this.state.messages.length) {
-            const newMsgs = messages.slice(this.state.messages.length)
-            for (const m of newMsgs) {
-              const exists = this.state.messages.some((x) => x.id === m.id)
-              if (!exists) this.state.messages.push(m)
-            }
-            this.renderMessages()
-            if (!this.state.open) this.pulseDot.style.display = 'block'
-          }
-        })
-        .catch(() => {
-          // polling is a safety net — silent failure
-        })
-    }, 10_000)
+    if (this.pollTimer) return // single-flight
+    if (this.state.connected) return // socket connected → no polling
+    if (!this.state.conversationId || !this.state.token) return
+    this.pollTimer = setInterval(() => this.pollOnce(), 10_000)
+  }
+
+  private stopPolling(): void {
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer)
+      this.pollTimer = null
+    }
+  }
+
+  /**
+   * One poll cycle. Only fetches if the socket is currently disconnected
+   * (socket connected → no polling). Uses the central merge function for
+   * dedup against any socket/POST delivery of the same message id.
+   */
+  private pollOnce(): void {
+    if (this.destroyed) return
+    if (this.state.connected) return // socket connected → no polling
+    if (!this.state.conversationId || !this.state.token) return
+    this.api
+      .loadMessages(this.state.token, this.state.conversationId)
+      .then((messages) => {
+        if (this.destroyed) return
+        this.state.messages = mergeMessages(this.state.messages, messages)
+        this.renderMessages()
+        if (!this.state.open && this.pulseDot) {
+          this.pulseDot.style.display = 'block'
+        }
+      })
+      .catch(() => {
+        // polling is a safety net — silent failure
+      })
   }
 
   // ---------- Rendering ----------
   private renderMessages(): void {
     const body = this.bodyEl
     if (!body) return
-    // Clear body except typing indicator
     const children = body.children
     for (let i = children.length - 1; i >= 0; i--) {
       if (children[i] !== this.typingEl) body.removeChild(children[i])
@@ -690,7 +790,7 @@ export class SukhanWidget implements SukhanInstance {
           fontSize: '11px',
           padding: '4px 0',
         })
-        bubble.textContent = msg.content.text || ''
+        bubble.textContent = (msg.content && msg.content.text) || ''
       } else {
         const align = isVisitor ? 'flex-end' : 'flex-start'
         const bg = isVisitor ? '#0E1116' : '#fff'
@@ -708,14 +808,13 @@ export class SukhanWidget implements SukhanInstance {
           wordBreak: 'break-word',
         })
         bubble.setAttribute('dir', 'auto')
-        if (msg.content.text) {
+        if (msg.content && msg.content.text) {
           const p = el('p', '')
-          // SECURITY: msg.content.text is user-controlled — use textContent.
           p.textContent = msg.content.text
           css(p, { margin: '0' })
           bubble.appendChild(p)
         }
-        if (msg.content.attachments) {
+        if (msg.content && msg.content.attachments) {
           for (const att of msg.content.attachments) {
             if (att.type === 'image') {
               const img = el('img')
@@ -725,7 +824,6 @@ export class SukhanWidget implements SukhanInstance {
               bubble.appendChild(img)
             } else {
               const a = el('a', '') as HTMLAnchorElement
-              // SECURITY: att.name is user-controlled — use textContent.
               a.textContent = att.name
               a.href = att.url
               a.setAttribute('download', att.name)
@@ -755,6 +853,7 @@ export class SukhanWidget implements SukhanInstance {
 
   // ---------- CSAT ----------
   private showCsatSurvey(): void {
+    if (this.destroyed) return
     if (this.csatShown || !this.state.conversationId || !this.state.token) return
     this.csatShown = true
     const accent = (this.config && this.config.accentColor) || '#E09A2B'
@@ -855,6 +954,7 @@ export class SukhanWidget implements SukhanInstance {
   }
 
   private submitCsat(rating: number, comment: string | null): void {
+    if (this.destroyed) return
     if (!this.state.token || !this.state.conversationId) return
     this.api
       .submitCsat(this.state.token, this.state.conversationId, rating, comment)
@@ -888,18 +988,63 @@ export class SukhanWidget implements SukhanInstance {
   }
 
   // ---------- Teardown ----------
+  /**
+   * Idempotent teardown. Disconnects socket, clears polling interval,
+   * clears typing timer, removes DOM root. Safe to call multiple times.
+   *
+   * The `destroyed` flag is checked at the start of every async
+   * callback (init's fetchConfig.then, identifyVisitor.then,
+   * loadMessages.then, sendMessage.then, pollOnce.then,
+   * reconcileHistory.then, onTokenExpired) so a delayed async callback
+   * after destroy() does NOT remount/update a destroyed widget.
+   */
   destroy(): void {
-    if (this.pollTimer) {
-      clearInterval(this.pollTimer)
-      this.pollTimer = null
+    if (this.destroyed) return // idempotent: calling twice is a no-op
+    this.destroyed = true
+    // 1. Clear polling interval
+    this.stopPolling()
+    // 2. Clear typing timer
+    if (this.state.typingTimer) {
+      clearTimeout(this.state.typingTimer)
+      this.state.typingTimer = undefined
     }
+    // 3. Disconnect socket (idempotent internally)
     if (this.socket) {
-      this.socket.disconnect()
+      try {
+        this.socket.disconnect()
+      } catch {
+        // ignore
+      }
       this.socket = null
     }
+    // 4. Remove DOM root
     if (this.rootEl && this.rootEl.parentNode) {
       this.rootEl.parentNode.removeChild(this.rootEl)
     }
-    ;(window as unknown as { __sukhan_mounted?: boolean }).__sukhan_mounted = false
+    this.rootEl = null
+    // 5. Reset mounted flag (allows a new initSukhan to mount)
+    if (typeof window !== 'undefined') {
+      ;(window as unknown as { __sukhan_mounted?: boolean }).__sukhan_mounted = false
+    }
   }
+
+  // ---------- Test-only helpers (internal) ----------
+  /** @internal — current messages (for assertions in tests). */
+  __getMessages(): Message[] { return this.state.messages }
+  /** @internal — current socket (for triggering events in tests). */
+  __getSocket(): SukhanSocket | null { return this.socket }
+  /** @internal — set conversationId (for reconnect tests). */
+  __setConversationId(id: string | null): void { this.state.conversationId = id }
+  /** @internal — set connected flag (for polling tests). */
+  __setConnected(connected: boolean): void { this.state.connected = connected }
+  /** @internal — simulate message ingestion from any path. */
+  __ingestMessage(m: Message): void { this.ingestMessage(m) }
+  /** @internal — trigger one poll cycle (bypasses interval). */
+  __pollOnce(): void { this.pollOnce() }
+  /** @internal — has destroy() been called? */
+  __isDestroyed(): boolean { return this.destroyed }
+  /** @internal — current realtimeConfig (for assertions). */
+  __getRealtimeConfig(): RealtimeEndpointConfig { return this.realtimeConfig }
+  /** @internal — current clientScriptUrl (for assertions). */
+  __getClientScriptUrl(): string { return this.clientScriptUrl }
 }
