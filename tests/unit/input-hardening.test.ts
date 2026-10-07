@@ -167,23 +167,28 @@ test('db.ts: covers aggregate + groupBy', () => {
   expect(source).toContain('groupBy')
 })
 
-test('db.ts: forces tenantId from context on create (override)', () => {
+test('db.ts: extension captures tenantId in closure + forces it on create (override)', () => {
   const source = readSrc('src/lib/db.ts')
-  expect(source).toContain('makeHandlers')
-  expect(source).toContain('args.data = { ...args.data, tenantId: tid }')
+  // The query handlers are built by a function that takes tenantId as a
+  // parameter — it is CAPTURED IN THE CLOSURE, never read from
+  // AsyncLocalStorage inside the handler (the documented Prisma 6 ALS bug).
+  expect(source).toContain('makeTenantQueryHandlers(tenantId)')
+  // create always stamps the closure tenantId (override any caller value).
+  expect(source).toContain('args.data = { ...args.data, tenantId }')
 })
 
 test('db.ts: stamps every row on createMany', () => {
   const source = readSrc('src/lib/db.ts')
   expect(source).toContain('createMany')
-  expect(source).toContain('map((row')
+  expect(source).toContain('map((row: any) => ({ ...row, tenantId }))')
 })
 
 test('db.ts: tenant-scoped where on upsert + force on create', () => {
   const source = readSrc('src/lib/db.ts')
   expect(source).toContain('upsert')
   expect(source).toContain('args.create')
-  expect(source).toContain('tenantId: tid')
+  // upsert forces the closure tenantId on create.
+  expect(source).toContain('args.create = { ...args.create, tenantId }')
 })
 
 test('verify-membership: wrapped in withTenant', () => {

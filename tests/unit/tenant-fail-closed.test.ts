@@ -1,109 +1,131 @@
 /// <reference types="bun-types" />
 /**
- * Prisma tenant fail-closed behavioral tests.
+ * Prisma fail-closed ARCHITECTURE tests (no database required).
  *
- * Verifies that tenant-scoped operations throw TenantContextRequiredError
- * when no tenant context is set, and that create operations force the
- * context tenantId (overriding any caller-supplied value).
+ * These verify the FAIL-CLOSED property of the exported `db` Proxy at the
+ * access boundary — BEFORE any query reaches the database. They do NOT
+ * connect to PostgreSQL and do NOT use the `if (!dbAvailable) return` skip
+ * anti-pattern. The full DB-level override/isolation behaviors are covered
+ * by `tests/db-boundary/tenant-isolation.test.ts` (executed against Docker
+ * PostgreSQL in the docker-regression CI job).
+ *
+ * Mandatory property under test: NO tenantId → NO tenant-scoped
+ * client/query. Accessing a tenant-scoped model delegate on the exported
+ * `db` outside `withTenant(...)` throws `TenantContextRequiredError`
+ * synchronously — the query never reaches the database.
  */
 
-import { test, expect, describe, beforeAll, afterAll } from 'bun:test'
+import { test, expect, describe } from 'bun:test'
 import { db, withTenant, getCurrentTenantId, TenantContextRequiredError } from '@/lib/db'
 
-const TEST_TENANT_A = 'tenant-a-test-id'
-const TEST_TENANT_B = 'tenant-b-test-id'
+/** A representative sample of tenant-scoped delegate names. */
+const TENANT_SCOPED_DELEGATES = [
+  'contact',
+  'conversation',
+  'message',
+  'product',
+  'membership',
+  'department',
+  'participant',
+  'routingRule',
+  'widgetDomain',
+  'faqPair',
+  'widgetConfig',
+  'aiConfig',
+  'connectorConfig',
+  'subscription',
+  'invoice',
+]
 
-// These tests hit the real database — skip if DB is unavailable
-let dbAvailable = true
+/** Global models — must NOT throw without a tenant context. */
+const GLOBAL_DELEGATES = ['tenant', 'user', 'plan', 'otpRequest', 'pendingSignup']
 
-beforeAll(async () => {
-  try {
-    await db.tenant.count()
-  } catch {
-    dbAvailable = false
+describe('Fail-closed: no tenant context', () => {
+  test('getCurrentTenantId() is undefined outside withTenant', () => {
+    expect(getCurrentTenantId()).toBeUndefined()
+  })
+
+  for (const delegate of TENANT_SCOPED_DELEGATES) {
+    test(`db.${delegate} throws TenantContextRequiredError without context`, () => {
+      // Accessing the delegate itself (not even calling a query method) must
+      // throw — there is no path to silently execute an unscoped query.
+      expect(() => {
+        void (db as any)[delegate]
+      }).toThrow(TenantContextRequiredError)
+    })
+  }
+
+  test('db.contact.findMany() never reaches the DB without context (throws on delegate access)', () => {
+    // The throw happens at the Proxy `get` trap when `db.contact` is read —
+    // findMany() is never called. This is the fail-closed guarantee.
+    let findManyCalled = false
+    expect(() => {
+      // Reading `.contact` throws before `.findMany` can be reached.
+      void (db as any).contact.findMany
+      findManyCalled = true
+    }).toThrow(TenantContextRequiredError)
+    expect(findManyCalled).toBe(false)
+  })
+
+  for (const delegate of GLOBAL_DELEGATES) {
+    test(`db.${delegate} does NOT throw without context (global model)`, () => {
+      // Global models route to the shared base client — no tenant context
+      // needed. Accessing the delegate must not throw.
+      expect(() => {
+        const d = (db as any)[delegate]
+        // The delegate object must be truthy.
+        expect(d).toBeTruthy()
+      }).not.toThrow()
+    })
   }
 })
 
-afterAll(async () => {
-  if (dbAvailable) await db.$disconnect()
-})
-
-describe('Prisma fail-closed: no tenant context', () => {
-  test('findMany without tenant context throws TenantContextRequiredError', async () => {
-    if (!dbAvailable) return
+describe('Fail-closed: withTenant activates context', () => {
+  test('withTenant sets getCurrentTenantId() within its callback', async () => {
     expect(getCurrentTenantId()).toBeUndefined()
-    await expect(db.contact.findMany()).rejects.toThrow(TenantContextRequiredError)
+    const seen = await withTenant('tenant-A-test', async () => getCurrentTenantId())
+    expect(seen).toBe('tenant-A-test')
+    // Context is restored after the callback exits.
+    expect(getCurrentTenantId()).toBeUndefined()
   })
 
-  test('create without tenant context throws TenantContextRequiredError', async () => {
-    if (!dbAvailable) return
-    await expect(db.product.create({ data: { name: 'test' } as any })).rejects.toThrow(TenantContextRequiredError)
-  })
-
-  test('updateMany without tenant context throws', async () => {
-    if (!dbAvailable) return
-    await expect(db.conversation.updateMany({ where: { id: 'x' }, data: { status: 'closed' } })).rejects.toThrow(TenantContextRequiredError)
-  })
-
-  test('deleteMany without tenant context throws', async () => {
-    if (!dbAvailable) return
-    await expect(db.widgetDomain.deleteMany({ where: { id: 'x' } })).rejects.toThrow(TenantContextRequiredError)
-  })
-
-  test('upsert without tenant context throws', async () => {
-    if (!dbAvailable) return
-    await expect(db.product.upsert({ where: { id: 'x' }, create: { name: 't' } as any, update: {} })).rejects.toThrow(TenantContextRequiredError)
-  })
-
-  test('count without tenant context throws', async () => {
-    if (!dbAvailable) return
-    await expect(db.product.count()).rejects.toThrow(TenantContextRequiredError)
-  })
-})
-
-describe('Prisma fail-closed: create tenantId override', () => {
-  test('withTenant(A) + create with data.tenantId=B → row has tenantId=A', async () => {
-    if (!dbAvailable) return
-    // This test requires a real Contact row — skip if DB doesn't have test data
-    // The key behavior: the extension FORCES tenantId from context
-    await withTenant(TEST_TENANT_A, async () => {
-      // Attempting to create with tenantId=B should stamp tenantId=A
-      // We can't actually create (no valid FK), but we can verify the
-      // extension logic by checking that it doesn't throw about tenantId
-      try {
-        await db.contact.create({
-          data: {
-            tenantId: TEST_TENANT_B, // attempting to override
-            identifier: 'test-override',
-            identifierType: 'visitorId',
-            name: 'Test',
-            metadata: {},
-          } as any,
-        })
-      } catch (e: any) {
-        // Prisma will reject due to FK constraint, but the tenantId
-        // should have been overridden to TEST_TENANT_A by the extension
-        // The error should be a Prisma FK error, not a TenantContextRequiredError
-        expect(e).not.toBeInstanceOf(TenantContextRequiredError)
-      }
+  test('db.contact does NOT throw inside withTenant', async () => {
+    // Inside withTenant the Proxy routes to the per-tenant extended client
+    // — accessing the delegate must succeed (no throw).
+    await withTenant('tenant-A-test', async () => {
+      expect(() => {
+        const d = (db as any).contact
+        expect(d).toBeTruthy()
+      }).not.toThrow()
     })
   })
 })
 
-describe('Prisma: concurrent AsyncLocalStorage isolation', () => {
+describe('AsyncLocalStorage isolation', () => {
   test('concurrent withTenant A/B calls do not leak tenant context', async () => {
-    if (!dbAvailable) return
     const [a, b] = await Promise.all([
-      withTenant(TEST_TENANT_A, async () => {
-        await new Promise(r => setTimeout(r, 10))
+      withTenant('tenant-A-test', async () => {
+        await new Promise((r) => setTimeout(r, 10))
         return getCurrentTenantId()
       }),
-      withTenant(TEST_TENANT_B, async () => {
-        await new Promise(r => setTimeout(r, 10))
+      withTenant('tenant-B-test', async () => {
+        await new Promise((r) => setTimeout(r, 10))
         return getCurrentTenantId()
       }),
     ])
-    expect(a).toBe(TEST_TENANT_A)
-    expect(b).toBe(TEST_TENANT_B)
+    expect(a).toBe('tenant-A-test')
+    expect(b).toBe('tenant-B-test')
+    expect(getCurrentTenantId()).toBeUndefined()
+  })
+
+  test('nested withTenant overrides the outer context', async () => {
+    const result = await withTenant('outer', async () => {
+      const inner = await withTenant('inner', async () => getCurrentTenantId())
+      const after = getCurrentTenantId()
+      return { inner, after }
+    })
+    expect(result.inner).toBe('inner')
+    // After the inner withTenant returns, ALS restores the outer context.
+    expect(result.after).toBe('outer')
   })
 })
