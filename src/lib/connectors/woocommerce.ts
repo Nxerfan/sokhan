@@ -132,12 +132,34 @@ interface WooProduct {
  *
  * Throws an Error with a structured message on auth/rate-limit/network failure
  * so the caller can record it in the `errors` array and continue (or abort).
+ *
+ * Dependency injection: the optional `__deps.safeFetch` parameter is used ONLY
+ * by behavioral tests to inject a mocked fetch (so tests can exercise the
+ * Link-header parsing + cross-origin rejection code path WITHOUT real HTTP).
+ * Production callers omit `__deps`, in which case `safeFetch` from
+ * `@/lib/security/ssrf-guard` is used — production behavior is unchanged.
  */
-async function fetchProductPage(
+export type SafeFetchFn = (
+  urlStr: string,
+  options?: RequestInit & {
+    timeoutMs?: number
+    maxRedirects?: number
+    allowedOrigin?: string
+  },
+) => Promise<Response>
+
+export interface FetchProductPageDeps {
+  /** Injectable safeFetch — tests only. Defaults to the production safeFetch. */
+  safeFetch?: SafeFetchFn
+}
+
+export async function fetchProductPage(
   url: string,
   config: WooCommerceConfig,
   page: number,
+  __deps?: FetchProductPageDeps,
 ): Promise<{ products: WooProduct[]; nextUrl: string | null }> {
+  const fetchFn: SafeFetchFn = __deps?.safeFetch ?? safeFetch
   const auth = Buffer.from(`${config.consumerKey}:${config.consumerSecret}`).toString('base64')
   const urlObj = new URL(url)
   // Ensure per_page + page are set / overridden on this request.
@@ -147,7 +169,7 @@ async function fetchProductPage(
   const storeOrigin = new URL(normalizeStoreUrl(config.storeUrl)).origin
   let res: Response
   try {
-    res = await safeFetch(urlObj.toString(), {
+    res = await fetchFn(urlObj.toString(), {
       method: 'GET',
       headers: {
         Authorization: `Basic ${auth}`,

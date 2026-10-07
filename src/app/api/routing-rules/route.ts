@@ -1,6 +1,7 @@
 import { NextResponse, NextRequest } from 'next/server'
 import { withSessionTenant, hasRole } from '@/lib/auth'
 import { db, getCurrentTenantId } from '@/lib/db'
+import { validateRuleTrigger } from '@/lib/routing-rules-validation'
 
 /** GET: list routing rules for the tenant */
 export async function GET() {
@@ -14,7 +15,6 @@ export async function GET() {
 /** POST: create a routing rule — tenantId explicit */
 
 const VALID_ACTIONS = ['assign_department', 'assign_user', 'add_tag', 'send_message']
-const VALID_EVENTS = ['conversation_created', 'message_received']
 
 /**
  * Validate a routing rule action AND verify that any user/department it
@@ -57,21 +57,6 @@ async function validateRuleAction(action: any): Promise<{ ok: true } | { ok: fal
   return { ok: true }
 }
 
-function validateRuleTrigger(trigger: any): { ok: true } | { ok: false; error: string } {
-  if (!trigger || typeof trigger !== 'object') return { ok: false, error: 'invalid_trigger' }
-  if (trigger.event && !VALID_EVENTS.includes(trigger.event)) return { ok: false, error: 'invalid_event' }
-  if (trigger.conditions) {
-    if (typeof trigger.conditions !== 'object') return { ok: false, error: 'invalid_conditions' }
-    if (trigger.conditions.keyword && typeof trigger.conditions.keyword !== 'string') return { ok: false, error: 'invalid_keyword' }
-    if (trigger.conditions.businessHours) {
-      const bh = trigger.conditions.businessHours
-      if (typeof bh.start !== 'number' || typeof bh.end !== 'number') return { ok: false, error: 'invalid_business_hours' }
-      if (bh.start < 0 || bh.start > 23 || bh.end < 0 || bh.end > 23) return { ok: false, error: 'invalid_business_hours' }
-    }
-  }
-  return { ok: true }
-}
-
 export async function POST(req: NextRequest) {
   const result = await withSessionTenant(async ({ session }) => {
     if (!hasRole(session.user.role, 'admin')) {
@@ -87,13 +72,23 @@ export async function POST(req: NextRequest) {
       if (!av.ok) return { error: av.error }
     }
 
+    // Validate the trigger BEFORE creating the rule (PR #3 §3). The hardened
+    // validator rejects: missing/null/array/non-object trigger, missing event,
+    // non-string event, unknown event, malformed conditions (array/non-object),
+    // invalid keyword (non-string / empty / whitespace / >200 chars), and
+    // invalid businessHours (missing start/end, NaN, Infinity, fractional,
+    // out-of-24h-range). A missing trigger is rejected with `invalid_trigger`
+    // — POST no longer silently defaults to `{event:'conversation_created'}`.
+    const tv = validateRuleTrigger(body.trigger)
+    if (!tv.ok) return { error: tv.error }
+
     const rule = await db.routingRule.create({
       data: {
         tenantId: session.user.workspaceId!,
         name: String(body.name ?? 'Untitled rule'),
         enabled: body.enabled !== false,
         priority: Number(body.priority ?? 0),
-        trigger: body.trigger ?? { event: 'conversation_created', conditions: {} },
+        trigger: body.trigger,
         action: body.action ?? { type: 'assign_department' },
       },
     })
