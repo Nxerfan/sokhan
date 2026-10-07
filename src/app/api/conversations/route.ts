@@ -60,5 +60,6 @@ export async function POST(req: NextRequest) {
   })
   if (!result) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
   if ('forbidden' in result.result) return NextResponse.json({ error: 'forbidden' }, { status: 403 })
+  if ('error' in result.result) return NextResponse.json({ error: result.result.error }, { status: 400 })
   return NextResponse.json({ conversation: result.result.conversation })
 }
