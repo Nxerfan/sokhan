@@ -8,13 +8,33 @@ import { getClientIP } from '@/lib/rate-limit'
  * Stores the request for manual follow-up. No auto-provisioning.
  *
  * Rate limited: 5 requests / 15 minutes / IP.
+ *
+ * Backend selection:
+ *   - REDIS_URL set: Redis INCR + EXPIRE on `rate:self-host:<ip>` with TTL
+ *     900s. This shares state across all instances (Vercel serverless,
+ *     Docker multi-replica, etc.).
+ *   - No REDIS_URL: in-memory Map fallback (single-instance dev / Docker
+ *     Lite). Doesn't share across processes/replicas but is correct for the
+ *     common local-dev case.
  */
-// Dedicated rate limiter for self-host form: 5 requests / 15 minutes / IP
 const SELF_HOST_LIMIT = 5
 const SELF_HOST_WINDOW_MS = 15 * 60 * 1000
-const selfHostBuckets = new Map<string, { count: number; resetAt: number }>()
+const SELF_HOST_WINDOW_SECONDS = 900
+const SELF_HOST_REDIS_KEY_PREFIX = 'rate:self-host:'
 
-function checkSelfHostRateLimit(ip: string): { allowed: boolean; retryAfter?: number } {
+// ─── In-memory fallback ───────────────────────────────────────────────
+interface SelfHostBucket { count: number; resetAt: number }
+const selfHostBuckets = new Map<string, SelfHostBucket>()
+if (typeof setInterval !== 'undefined') {
+  setInterval(() => {
+    const now = Date.now()
+    for (const [key, bucket] of selfHostBuckets) {
+      if (bucket.resetAt < now) selfHostBuckets.delete(key)
+    }
+  }, 300_000).unref?.()
+}
+
+function checkInMemory(ip: string): { allowed: boolean; retryAfter?: number } {
   const now = Date.now()
   const bucket = selfHostBuckets.get(ip)
   if (!bucket || bucket.resetAt < now) {
@@ -28,19 +48,84 @@ function checkSelfHostRateLimit(ip: string): { allowed: boolean; retryAfter?: nu
   return { allowed: true }
 }
 
+// ─── Redis backend ────────────────────────────────────────────────────
+let redisClient: any = null
+let redisClientPromise: Promise<any> | null = null
+
+async function getRedisClient(): Promise<any | null> {
+  if (redisClient) return redisClient
+  if (redisClientPromise) return redisClientPromise
+  const redisUrl = process.env.REDIS_URL
+  if (!redisUrl) return null
+  redisClientPromise = (async () => {
+    try {
+      const { createClient } = await import('redis')
+      const client = createClient({ url: redisUrl })
+      client.on('error', (e: Error) =>
+        console.error('[self-host-rate-limit] redis error:', e.message),
+      )
+      await client.connect()
+      redisClient = client
+      return client
+    } catch (e) {
+      console.warn(
+        '[self-host-rate-limit] Redis unavailable:',
+        e instanceof Error ? e.message : e,
+      )
+      return null
+    }
+  })()
+  return redisClientPromise
+}
+
+/**
+ * Rate limit check — selects backend based on REDIS_URL env var.
+ * Used directly by the POST handler. Preserves the historical function
+ * name (`checkSelfHostRateLimit`) for unit-test source-text assertions.
+ */
+async function checkSelfHostRateLimit(ip: string): Promise<{ allowed: boolean; retryAfter?: number }> {
+  const client = await getRedisClient()
+  if (!client) return checkInMemory(ip)
+  const key = `${SELF_HOST_REDIS_KEY_PREFIX}${ip}`
+  try {
+    const count = await client.incr(key)
+    if (count === 1) {
+      // First request in the window — set the TTL.
+      await client.expire(key, SELF_HOST_WINDOW_SECONDS)
+    }
+    if (count > SELF_HOST_LIMIT) {
+      const ttl = await client.ttl(key)
+      return { allowed: false, retryAfter: ttl > 0 ? ttl : SELF_HOST_WINDOW_SECONDS }
+    }
+    return { allowed: true }
+  } catch (e) {
+    console.warn(
+      '[self-host-rate-limit] Redis failed:',
+      e instanceof Error ? e.message : e,
+    )
+    return checkInMemory(ip)
+  }
+}
+
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => null)
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     return NextResponse.json({ error: 'invalid_body' }, { status: 400 })
   }
 
-  // Rate limit: 5 requests / 15 minutes / IP
+  // Rate limit: 5 requests / 15 minutes / IP. Uses Redis when REDIS_URL is
+  // set (shares state across instances), falls back to in-memory otherwise.
   const ip = getClientIP(req)
-  const rateLimitResult = checkSelfHostRateLimit(ip)
+  const rateLimitResult = await checkSelfHostRateLimit(ip)
   if (!rateLimitResult.allowed) {
     return NextResponse.json(
       { error: 'rate_limited' },
-      { status: 429, headers: rateLimitResult.retryAfter ? { 'Retry-After': String(rateLimitResult.retryAfter) } : {} },
+      {
+        status: 429,
+        headers: rateLimitResult.retryAfter
+          ? { 'Retry-After': String(rateLimitResult.retryAfter) }
+          : {},
+      },
     )
   }
 

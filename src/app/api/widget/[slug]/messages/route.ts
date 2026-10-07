@@ -118,69 +118,98 @@ export async function POST(
     return widgetHeaders(NextResponse.json({ error: 'token_tenant_mismatch' }, { status: 403 }))
   }
 
-  // Free plan checks: domain validation + message limit + trial expiry
-  const domain = getRequestDomain(req)
-  const domainAllowed = await isDomainAllowed(tenantId, domain)
-  if (!domainAllowed) {
-    return widgetHeaders(NextResponse.json({ error: 'domain_not_allowed' }, { status: 403 }))
-  }
-
-  const messageCheck = await checkMessageLimit(tenantId)
-  if (!messageCheck.allowed) {
-    return widgetHeaders(NextResponse.json({ error: messageCheck.reason ?? 'message_limit' }, { status: 403 }))
-  }
-
   const body = await req.json()
   const text = String(body.text ?? '').trim().slice(0, MAX_MESSAGE_LENGTH)
   if (!text) {
     return widgetHeaders(NextResponse.json({ error: 'empty_message' }, { status: 400 }))
   }
 
-  // Find or create the conversation — tenantId explicit on every write
-  let conversation = await db.conversation.findFirst({
-    where: { tenantId, contactId, status: 'open' },
-    orderBy: { createdAt: 'desc' },
-  })
+  // Wrap ALL tenant-scoped DB work in withTenant. The fail-closed Prisma
+  // extension requires a current tenant context for any read/write against
+  // tenant-scoped models (WidgetDomain, Message, Conversation, AiConfig,
+  // FaqPair, Product, etc.). Without this, the queries throw
+  // `TenantContextRequiredError` and the widget POST breaks.
+  const result = await withTenant(tenantId, async () => {
+    // Free plan checks: domain validation + message limit + trial expiry.
+    // These internally query tenant-scoped models (WidgetDomain, Message)
+    // so they MUST run inside the tenant context.
+    const domain = getRequestDomain(req)
+    const domainAllowed = await isDomainAllowed(tenantId, domain)
+    if (!domainAllowed) {
+      return { kind: 'domain_not_allowed' as const }
+    }
 
-  const isNew = !conversation
-  if (!conversation) {
-    conversation = await db.conversation.create({
+    const messageCheck = await checkMessageLimit(tenantId)
+    if (!messageCheck.allowed) {
+      return { kind: 'message_limit' as const, reason: messageCheck.reason ?? 'message_limit' }
+    }
+
+    // Find or create the conversation. tenantId is auto-injected by the
+    // fail-closed extension; passing it explicitly is defense-in-depth.
+    let conversation = await db.conversation.findFirst({
+      where: { contactId, status: 'open' },
+      orderBy: { createdAt: 'desc' },
+    })
+
+    const isNew = !conversation
+    if (!conversation) {
+      conversation = await db.conversation.create({
+        data: {
+          tenantId,
+          contactId,
+          status: 'open',
+          channel: 'widget',
+          tags: [],
+        },
+      })
+      // Evaluate routing rules for the new conversation.
+      // evaluateRoutingRules wraps itself in withTenant — nesting the same
+      // tenantId is a no-op (the inner context simply shadows the outer
+      // with the same value).
+      await evaluateRoutingRules(conversation.id, tenantId, text)
+    }
+
+    // Persist the visitor message. tenantId auto-injected by extension.
+    const message = await db.message.create({
       data: {
+        conversationId: conversation.id,
         tenantId,
-        contactId,
-        status: 'open',
-        channel: 'widget',
-        tags: [],
+        senderType: 'contact',
+        senderUserId: null,
+        contentType: 'text',
+        content: { text },
+        status: 'sent',
       },
     })
-    // Evaluate routing rules for the new conversation
-    await evaluateRoutingRules(conversation.id, tenantId, text)
+
+    // Update conversation metadata. tenantId auto-injected in where.
+    await db.conversation.updateMany({
+      where: { id: conversation.id },
+      data: {
+        lastMessageAt: new Date(),
+        lastMessagePreview: text.slice(0, 120),
+        unreadCount: { increment: 1 },
+      },
+    })
+
+    return { kind: 'ok' as const, message, conversation, isNew }
+  })
+
+  if (result.kind === 'domain_not_allowed') {
+    return widgetHeaders(NextResponse.json({ error: 'domain_not_allowed' }, { status: 403 }))
+  }
+  if (result.kind === 'message_limit') {
+    return widgetHeaders(NextResponse.json({ error: result.reason }, { status: 403 }))
+  }
+  if (result.kind !== 'ok') {
+    // Unreachable — exhaustiveness guard
+    return widgetHeaders(NextResponse.json({ error: 'internal_error' }, { status: 500 }))
   }
 
-  // Persist the message — tenantId explicit
-  const message = await db.message.create({
-    data: {
-      conversationId: conversation.id,
-      tenantId,
-      senderType: 'contact',
-      senderUserId: null,
-      contentType: 'text',
-      content: { text },
-      status: 'sent',
-    },
-  })
+  const { message, conversation, isNew } = result
 
-  // Update conversation metadata — tenantId explicit in where (defense-in-depth)
-  await db.conversation.updateMany({
-    where: { id: conversation.id, tenantId },
-    data: {
-      lastMessageAt: new Date(),
-      lastMessagePreview: text.slice(0, 120),
-      unreadCount: { increment: 1 },
-    },
-  })
-
-  // Publish to realtime — fan out to agents in the conversation room + tenant room
+  // Publish to realtime — fan out to agents in the conversation room + tenant room.
+  // Not a DB call — outside the withTenant wrap is fine.
   await publishToRealtime({
     room: room.conversation(conversation.id),
     event: EVENTS.MESSAGE_NEW,
@@ -198,41 +227,44 @@ export async function POST(
   // === AI features (Module 4) — fire AFTER the visitor message is persisted ===
   // Both features are opt-in (default OFF) and respect the AI usage cap.
   // If the cap is hit, they gracefully stop firing (fall through to human routing).
+  // Runs in a fresh withTenant context — tryAiResponse queries tenant-scoped
+  // models (AiConfig, FaqPair, Product, Message, Conversation).
   let aiResponse: { text: string; source: 'faq' | 'product' } | null = null
   try {
-    aiResponse = await tryAiResponse(text, tenantId, conversation.id)
+    aiResponse = await withTenant(tenantId, () => tryAiResponse(text, tenantId, conversation.id))
   } catch (e) {
     console.error('[widget:messages] AI error:', e instanceof Error ? e.message : e)
   }
 
   if (aiResponse) {
-    // Persist the AI message — senderType='ai', visibly distinguishable
-    const aiMessage = await db.message.create({
-      data: {
-        conversationId: conversation.id,
-        tenantId,
-        senderType: 'ai',
-        senderUserId: null,
-        contentType: 'text',
-        content: { text: aiResponse.text, source: aiResponse.source },
-        status: 'sent',
-      },
+    // Persist the AI message inside the tenant context
+    const aiMessage = await withTenant(tenantId, async () => {
+      const m = await db.message.create({
+        data: {
+          conversationId: conversation.id,
+          tenantId,
+          senderType: 'ai',
+          senderUserId: null,
+          contentType: 'text',
+          content: { text: aiResponse!.text, source: aiResponse!.source },
+          status: 'sent',
+        },
+      })
+      await db.conversation.updateMany({
+        where: { id: conversation.id },
+        data: {
+          lastMessageAt: new Date(),
+          lastMessagePreview: `[AI] ${aiResponse!.text.slice(0, 116)}`,
+        },
+      })
+      return m
     })
 
-    // Publish the AI response to realtime
+    // Publish the AI response to realtime (not a DB call — outside context)
     await publishToRealtime({
       room: room.conversation(conversation.id),
       event: EVENTS.MESSAGE_NEW,
       payload: { ...aiMessage, isNewConversation: false },
-    })
-
-    // Update conversation preview with the AI response
-    await db.conversation.updateMany({
-      where: { id: conversation.id, tenantId },
-      data: {
-        lastMessageAt: new Date(),
-        lastMessagePreview: `[AI] ${aiResponse.text.slice(0, 116)}`,
-      },
     })
   }
 

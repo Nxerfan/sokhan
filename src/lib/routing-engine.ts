@@ -16,6 +16,12 @@ import { publishToRealtime, room, EVENTS } from '@/lib/realtime-publish'
  *
  * Rules are evaluated in priority order. The first matching rule's action is
  * executed. Multiple rules can match if they have different action types.
+ *
+ * Tenant context: the entire evaluation runs inside `withTenant(tenantId)`.
+ * The fail-closed Prisma extension auto-injects `tenantId` on every read and
+ * write, so a routing rule that references a foreign user/department is
+ * silently rejected (the lookup simply returns null because the foreign row
+ * is outside the tenant scope).
  */
 
 interface RoutingCondition {
@@ -47,24 +53,26 @@ export async function evaluateRoutingRules(
   firstMessageText: string,
 ): Promise<void> {
   try {
-    const rules = await db.routingRule.findMany({
-      where: { tenantId, enabled: true },
-      orderBy: { priority: 'asc' },
+    await withTenant(tenantId, async () => {
+      const rules = await db.routingRule.findMany({
+        where: { enabled: true },
+        orderBy: { priority: 'asc' },
+      })
+
+      if (rules.length === 0) return
+
+      const hour = new Date().getHours()
+
+      for (const rule of rules) {
+        const config = rule.trigger as unknown as RoutingRule['trigger']
+        const conditions = config.conditions || {}
+        const matches = matchConditions(conditions, firstMessageText, hour)
+        if (!matches) continue
+
+        const action = rule.action as unknown as RoutingAction
+        await executeAction(action, conversationId, tenantId, firstMessageText)
+      }
     })
-
-    if (rules.length === 0) return
-
-    const hour = new Date().getHours()
-
-    for (const rule of rules) {
-      const config = rule.trigger as unknown as RoutingRule['trigger']
-      const conditions = config.conditions || {}
-      const matches = matchConditions(conditions, firstMessageText, hour)
-      if (!matches) continue
-
-      const action = rule.action as unknown as RoutingAction
-      await executeAction(action, conversationId, tenantId, firstMessageText)
-    }
   } catch (e) {
     console.error('[routing] rule evaluation failed:', e instanceof Error ? e.message : e)
   }
@@ -95,14 +103,16 @@ async function executeAction(
   switch (action.type) {
     case 'assign_department': {
       if (action.departmentId) {
-        // Revalidate department belongs to tenant at execution time
+        // Revalidate department belongs to tenant at execution time.
+        // The fail-closed extension auto-injects tenantId into the lookup, so
+        // a foreign departmentId simply returns null → stale → skip.
         const dept = await db.department.findUnique({ where: { id: action.departmentId } })
         if (!dept) {
           console.error('[routing] stale departmentId in rule — skipping')
           break
         }
         await db.conversation.updateMany({
-          where: { id: conversationId, tenantId },
+          where: { id: conversationId },
           data: { departmentId: action.departmentId },
         })
       }
@@ -110,7 +120,9 @@ async function executeAction(
     }
     case 'assign_user': {
       if (action.userId) {
-        // Revalidate user has active Membership at execution time
+        // Revalidate user has an active Membership in THIS tenant at execution
+        // time. The fail-closed extension scopes the lookup to the current
+        // tenant, so a foreign userId returns null → stale → skip.
         const member = await db.membership.findFirst({
           where: { userId: action.userId, status: 'active' },
           select: { id: true },
@@ -119,28 +131,33 @@ async function executeAction(
           console.error('[routing] stale userId in rule — skipping')
           break
         }
-        await db.conversation.updateMany({
-          where: { id: conversationId, tenantId },
-          data: { assignedUserId: action.userId },
-        })
-        // Auto-add as participant — tenantId explicit
-        await db.participant.upsert({
-          where: { conversationId_userId: { conversationId, userId: action.userId } },
-          create: { conversationId, userId: action.userId, tenantId },
-          update: {},
-        })
+        // Atomic: Conversation assignment + Participant upsert must succeed
+        // together. If either fails, neither lands (the transaction rolls
+        // back) — preventing a state where a conversation is assigned to a
+        // user who is not a participant (and would never see the thread).
+        await db.$transaction([
+          db.conversation.updateMany({
+            where: { id: conversationId },
+            data: { assignedUserId: action.userId },
+          }),
+          db.participant.upsert({
+            where: { conversationId_userId: { conversationId, userId: action.userId } },
+            create: { conversationId, userId: action.userId, tenantId },
+            update: {},
+          }),
+        ])
       }
       break
     }
     case 'add_tag': {
       if (action.tag) {
-        const conv = await db.conversation.findFirst({ where: { id: conversationId, tenantId } })
+        const conv = await db.conversation.findFirst({ where: { id: conversationId } })
         if (conv) {
           const tags = (conv.tags as string[]) || []
           if (!tags.includes(action.tag)) {
             tags.push(action.tag)
             await db.conversation.updateMany({
-              where: { id: conversationId, tenantId },
+              where: { id: conversationId },
               data: { tags },
             })
           }
@@ -150,7 +167,7 @@ async function executeAction(
     }
     case 'send_message': {
       if (action.text) {
-        // System message — tenantId explicit
+        // System message — tenantId injected by extension
         const message = await db.message.create({
           data: {
             conversationId,

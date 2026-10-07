@@ -1152,3 +1152,85 @@ Stage Summary:
 - Redis: NOT CONFIGURED (message delivery E2E blocked)
 - DIRECT_URL Preview: NOT CONFIGURED
 - my-project: deleted (need to verify on new commit)
+
+---
+Task ID: FINAL-FIXES
+Agent: final-fixes-subagent
+Task: Fix all remaining call sites and create Docker security spec
+
+Work Log:
+- src/lib/routing-engine.ts: Wrapped evaluateRoutingRules body in withTenant(tenantId). Removed explicit tenantId from where/data clauses where redundant (the fail-closed Prisma extension auto-injects it). For assign_user, replaced the two separate updateMany+upsert calls with a single db.$transaction([...).$transaction([updateMany, upsert]) so the Conversation assignment + Participant upsert land atomically — prevents the state where a conversation is assigned but the participant row is missing (the agent would never see the thread). The non-throwing contract is preserved (try/catch around the whole wrapped block, errors logged).
+- src/app/api/widget/[slug]/messages/route.ts POST: Wrapped the entire tenant-scoped DB work (domain check, message-limit check, conversation find/create, message create, conversation updateMany) in withTenant(tenantId). Realtime publishes (publishToRealtime) stay outside the wrap — they're not DB calls. The AI response path (tryAiResponse) runs in a fresh withTenant wrap so its tenant-scoped queries (AiConfig, FaqPair, Product, Message) inherit the context. The AI message persist + conversation update run in another withTenant wrap.
+- src/lib/payments/domain-validation.ts:
+  - isDomainAllowed: wrapped db.widgetDomain.findMany in withTenant(tenantId). Without this, the fail-closed extension throws TenantContextRequiredError on the WidgetDomain model.
+  - getWebsiteLimit: verified as global Tenant model — no withTenant needed (Tenant is not in TENANT_SCOPED_MODELS).
+  - NEW validateDomain(input) function — strict domain validator that rejects: empty/whitespace, scheme-only ("http://"), path-only ("/foo"), URL credentials (user:pass@host), control characters (CR/LF/tab/NUL), malformed hostnames (empty labels "example..com", leading/trailing dots, hyphens at label edges), query string, fragment. Returns the canonicalized hostname (lowercase, no www., no port, no path).
+  - Updated src/app/api/widget-domains/route.ts POST to use validateDomain(body.domain) instead of the lax normalizeDomain — invalid domains are rejected at save time.
+- src/lib/payments/free-plan.ts:
+  - checkMessageLimit: wrapped db.message.count in withTenant(tenantId). (Tenant lookup before it is a global model, no wrap needed.)
+  - isFreeTrialExpired / hasUsedFreeTrial / markFreeTrialUsed: verified as global Tenant/User models — no withTenant needed.
+  - getEffectiveWidgetConfig: db.tenant.findUnique with include: { widgetConfig: true } — Tenant is global, nested include is scoped by Tenant's unique tenantId. No wrap needed.
+- src/lib/payments/gating.ts:
+  - resolveTenantPlanSlug: wrapped db.subscription.findFirst in withTenant. Subscription is tenant-scoped. (db.tenant.findUnique fallback is global — no wrap.)
+  - countUsage: wrapped all tenant-scoped count calls (Membership, Conversation, Department, Message, WidgetDomain) in a single withTenant block.
+  - checkPlanLimit, enforcePlanLimit, enforceCurrentTenantPlanLimit, getTenantUsage: derive their tenant context from the wrapped sub-calls above. No additional wrapping needed — but the underlying countUsage + resolveTenantPlanSlug are now tenant-safe.
+- src/app/api/products/import/route.ts: Full rewrite. Two-phase validate-then-write:
+  - Phase 1: validate ALL items, collect into validated[] array. On any failure, return 400 with { error: 'invalid_product', index: N, field: 'name'|'description'|'price'|'availability'|'sku' } — writes nothing.
+  - Phase 2: only after all items pass, persist them. Hard cap 500 items (returns 413 too_many_products above that). Per-item validation: name (string, trim, non-empty, max 500); description (string if supplied, max 5000, defaults to empty); price (number, finite, integer, >= 0, <= 2147483647); availability (enum: in_stock, out_of_stock, limited); sku (null/undefined or string, max 100).
+- src/app/api/products/route.ts POST: Reject non-string types when the field IS provided. availability: default 'in_stock' only when genuinely absent (undefined or null); non-string when provided → 400 invalid_availability. sku: default null only when genuinely absent; non-string when provided → 400 invalid_sku. Also tightened price validation: reject non-number at the type level before coercion (previously `Number(body.price ?? 0)` would silently accept string "100" as 100).
+- src/app/api/faqs/route.ts:
+  - POST: enabled defaults to true; when supplied, MUST be a boolean — rejects strings like "false" that previously silently coerced to true (via `body.enabled !== false`).
+  - PATCH: require id (non-empty string). Validate question/answer/enabled types when supplied. Require at least one mutable field (no_fields error otherwise). Return 404 (not_found) if updateMany.count === 0 — covers both "row doesn't exist" and "row belongs to another tenant" (the fail-closed extension scopes the where, so a foreign id simply matches 0 rows).
+- src/app/api/self-host-request/route.ts: Added Redis backend. When REDIS_URL is set, uses INCR + EXPIRE on key `rate:self-host:<ip>` with TTL 900s — state shared across all instances (Vercel serverless, Docker multi-replica). When REDIS_URL is not set, falls back to the existing in-memory Map. The historical function name `checkSelfHostRateLimit` is preserved (a unit test asserts on source-text presence of that name).
+- src/lib/connectors/woocommerce.ts:
+  - validateWooCommerceConfig: added strict storeUrl checks — rejects embedded credentials (u.username || u.password), missing/empty hostname (scheme-only "https://"), pathname (!= "/"), search string, hash fragment. Each rejection is a separate descriptive error string.
+  - fetchProductPage 404 error: removed urlObj.toString() from the message — now surfaces only hostname + page + status. Prevents a malformed path or query (which the attacker may have crafted) from being echoed back in the error.
+  - fetchProductPage Link header: replaced silent nextUrl=null on cross-origin / unsafe Link with explicit throws of SsrfError. Two new bounded error codes: 'ssrf_link_malformed' (URL parse failure) and 'ssrf_cross_origin_link' (origin mismatch). Same-origin Link still goes through assertPublicUrl (which throws its own SsrfError on private-IP etc.). The semantic difference: "no more pages" = nextUrl=null, no error; "pagination blocked by SSRF guard" = throw. The X-WP-TotalPages fallback only fires when there's NO Link header at all (so a thrown SsrfError properly aborts the sync instead of falling through to the fallback).
+- src/app/api/routing-rules/route.ts:
+  - Made validateRuleAction async. For 'assign_department', looks up db.department.findUnique (tenant-scoped — foreign departmentId returns null → 'invalid_department_id'). For 'assign_user', looks up db.membership.findFirst({ userId, status: 'active' }) (tenant-scoped — foreign userId OR inactive membership returns null → 'invalid_user_id').
+  - POST now calls validateRuleAction(body.action) BEFORE creating the rule. This is the save-time guard — a rule referencing a foreign user/department is rejected before persistence, not just at execution time.
+  - PATCH: same validation for body.action when supplied. Also added 404 not_found when updateMany.count === 0 (defense-in-depth — was silently returning ok: true before).
+- tests/tenant-security.spec.ts (NEW): Playwright spec covering all 7 security properties against the Docker DB-backed stack:
+  - Setup: signs up two tenants (A and B) via the otp-signup helper, signs in via NextAuth credentials callback (page.request.post with form-encoded body, json=true). Resolves ownerId via GET /api/members.
+  - Test A: Tenant B POST /api/conversations with Tenant A's contactId → 400 contact_not_found (db.contact.findUnique is tenant-scoped).
+  - Test B: Tenant A PATCH /api/conversations/[id] with assignedUserId=Tenant B owner → 400 invalid_assignee (membership.findFirst filters status=active + tenant-scoped).
+  - Test C: Tenant A invites a user (status='invited'), then tries to assign them → 400 invalid_assignee (membership.findFirst requires status='active').
+  - Test D: Tenant A PATCH /api/conversations/[id] with departmentId=Tenant B's department → 400 invalid_department (db.department.findUnique is tenant-scoped).
+  - Test E: Self-contained — attempt cross-tenant assignment, verify rejected (400), then GET /api/conversations/[id] and assert assignedUserId is still null (no Participant row landed — the early-return guard ran before the participant upsert).
+  - Test F: Tenant A POST /api/routing-rules with action.type='assign_user', action.userId=Tenant B owner → 400 invalid_user_id (save-time validateRuleAction runs tenant-scoped membership lookup). Same for action.type='assign_department' with Tenant B's department → 400 invalid_department_id.
+  - Test G: CONTROL — same calls with Tenant A's own ids succeed. Proves the guards aren't false-positives.
+  - All API calls use page.request.post/patch/get (Playwright APIRequestContext — shares the BrowserContext cookie jar).
+- .github/workflows/ci.yml: Added `tests/tenant-security.spec.ts` to BOTH the Full and Lite regression test lists. Space-separated, on the same line as the other test files.
+
+Verification:
+- bunx tsc --noEmit: 0 errors in app code (2 pre-existing errors in skills/ sample code, unrelated).
+- bun run lint: 0 errors, 1 pre-existing warning (unused eslint-disable in inbox-view.tsx, unrelated).
+- bun test tests/unit/: 262/262 PASS (added 2 new tests for the validateDomain strict validator + the SSRF Link header cross-origin throw).
+- bun test tests/unit/tenant-fail-closed.test.ts: 8/8 PASS — fail-closed Prisma extension still works (withTenant-wrapped queries succeed, unwrapped queries throw TenantContextRequiredError).
+- bun test tests/unit/security-regressions.test.ts + input-hardening.test.ts: 106/106 PASS — no regressions in the security/input-hardening test suites.
+
+Stage Summary:
+- All 14 tasks completed. The fail-closed Prisma tenant-scoping extension is now correctly used at every call site that was missing withTenant:
+  - Routing engine (evaluateRoutingRules) — was importing withTenant but never calling it.
+  - Widget POST messages route — was partially wrapped (GET only); POST is now fully wrapped.
+  - isDomainAllowed (WidgetDomain lookup) — was unwrapped, would have thrown.
+  - checkMessageLimit (Message.count) — was unwrapped, would have thrown.
+  - resolveTenantPlanSlug (Subscription.findFirst) + countUsage (all tenant-scoped count queries) — were unwrapped, would have thrown.
+- Input validation hardened across the public API surface:
+  - Bulk product import: two-phase validate-then-write, max 500 items, per-item field validation with index + field in error.
+  - Single product POST: rejects non-string availability/sku when provided (was silently coercing to defaults).
+  - FAQ POST: enabled must be a boolean (was accepting truthy values).
+  - FAQ PATCH: requires id, validates field types, requires ≥1 mutable field, 404 when no row updated.
+  - Widget domain: strict validateDomain replaces the lax normalizeDomain (rejects scheme-only, path-only, credentials, control chars, malformed labels, query, fragment).
+- SSRF hardening in the WooCommerce connector:
+  - storeUrl validation rejects credentials, missing hostname, path, query, fragment.
+  - Error messages no longer echo raw URLs (only hostname + page + status).
+  - Cross-origin / unsafe Link header throws an explicit SsrfError instead of silently setting nextUrl=null (which would mask a security failure as benign end-of-pagination).
+- Self-host rate limiter now uses Redis (key `rate:self-host:<ip>`, TTL 900s) when REDIS_URL is set — state shared across all instances. In-memory Map fallback unchanged.
+- New tests/tenant-security.spec.ts covers all 7 security properties (A-G) against the Docker DB-backed stack. Added to both Full and Lite CI regression lists.
+- Routing rules now validate at SAVE time that the target user/department belongs to the current tenant (was previously only validated at execution time by the routing engine, which silently skipped stale rules — the save-time guard makes the failure explicit and immediate).
+
+Remaining issues:
+- None in app code. The 2 pre-existing TypeScript errors in skills/ sample code are unrelated (sample skills that ship with the repo, not production code).
+- The dev.log file is not present in the sandbox — the dev server hasn't been started. All verification was done via tsc + lint + bun test.
+- The new tests/tenant-security.spec.ts has not been run end-to-end against a Docker stack in this sandbox (no Docker available). The spec is structurally correct (TypeScript compiles, Playwright fixture signatures match) and the API call patterns match the existing tenant-isolation.spec.ts. It will run in CI on the next PR.

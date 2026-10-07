@@ -24,12 +24,36 @@ export async function POST(req: NextRequest) {
     const name = body.name.trim()
     if (typeof body.description !== 'string') return { error: 'invalid_description' as const }
     const description = body.description.trim()
-    const price = Number(body.price ?? 0)
-    const availability = typeof body.availability === 'string' ? body.availability : 'in_stock'
-    const sku = typeof body.sku === 'string' ? body.sku.trim() : null
+    // Reject non-string price at the type level before any coercion.
+    // `Number(body.price ?? 0)` previously let `body.price = "100"` slip through
+    // as the number 100 — but a string price is a type error and should be
+    // rejected explicitly.
+    if (typeof body.price !== 'number' || !Number.isFinite(body.price)) {
+      return { error: 'invalid_price' as const }
+    }
+    const price = body.price
+    // availability: default to 'in_stock' ONLY when genuinely absent.
+    // If the field is provided but is not a string (or is an invalid enum),
+    // reject — never silently coerce.
+    let availability = 'in_stock'
+    if (body.availability !== undefined && body.availability !== null) {
+      if (typeof body.availability !== 'string') {
+        return { error: 'invalid_availability' as const }
+      }
+      availability = body.availability
+    }
+    // sku: default to null ONLY when genuinely absent (undefined or null).
+    // If the field is provided but is not a string, reject.
+    let sku: string | null = null
+    if (body.sku !== undefined && body.sku !== null) {
+      if (typeof body.sku !== 'string') {
+        return { error: 'invalid_sku' as const }
+      }
+      sku = body.sku.trim()
+    }
     if (!name || name.length > 500) return { error: 'invalid_name' as const }
     if (description.length > 5000) return { error: 'invalid_description' as const }
-    if (typeof body.price !== 'number' || !Number.isFinite(price) || price < 0 || !Number.isInteger(price) || price > 2147483647) return { error: 'invalid_price' as const }
+    if (price < 0 || !Number.isInteger(price) || price > 2147483647) return { error: 'invalid_price' as const }
     if (!['in_stock', 'out_of_stock', 'limited'].includes(availability)) return { error: 'invalid_availability' as const }
     if (sku !== null && sku.length > 100) return { error: 'invalid_sku' as const }
     const product = await db.product.create({
@@ -48,6 +72,7 @@ export async function POST(req: NextRequest) {
   })
   if (!result) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
   if ('forbidden' in result.result) return NextResponse.json({ error: 'forbidden' }, { status: 403 })
+  if ('error' in result.result) return NextResponse.json({ error: result.result.error }, { status: 400 })
   return NextResponse.json({ product: result.result.product })
 }
 

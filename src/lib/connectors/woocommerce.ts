@@ -169,8 +169,11 @@ async function fetchProductPage(
     throw new Error('WooCommerce authentication failed — check consumer key/secret (401/403)')
   }
   if (res.status === 404) {
+    // SECURITY: never include the full URL in error messages — it may
+    // contain a malformed-but-accepted path or query that was used as an
+    // attack vector. Surface only the hostname + page + status.
     throw new Error(
-      `WooCommerce endpoint not found (404) — verify storeUrl and that WC REST API is enabled: ${urlObj.toString()}`,
+      `WooCommerce endpoint not found (404) — verify storeUrl and that WC REST API is enabled (host: ${urlObj.hostname}, page: ${page})`,
     )
   }
   if (res.status === 429) {
@@ -201,28 +204,43 @@ async function fetchProductPage(
   // Determine next page from the Link header. WooCommerce emits:
   //   Link: <https://shop.example.com/wp-json/wc/v3/products?page=2>; rel="next"
   // We follow it but also cap by X-WP-TotalPages as a sanity check.
+  //
+  // SECURITY: a cross-origin or otherwise unsafe Link header URL is NOT
+  // silently treated as "end of pagination" (nextUrl=null). Doing so would
+  // mask a security failure as a benign end-of-data, leaving the operator
+  // with no signal that pagination was truncated by a guard rather than
+  // exhausted. Instead we throw a bounded SsrfError so the caller can
+  // distinguish "no more pages" (nextUrl=null, no error) from
+  // "pagination blocked by SSRF guard" (throw). The X-WP-TotalPages
+  // fallback only fires when there's NO Link header at all.
   const linkHeader = res.headers.get('Link') ?? res.headers.get('link') ?? ''
   let nextUrl: string | null = null
   if (linkHeader) {
     const match = linkHeader.match(/<([^>]+)>;\s*rel="next"/i)
     if (match) {
-      // Validate Link header URL: SSRF + same-origin enforcement
+      // Validate Link header URL: SSRF + same-origin enforcement.
+      // Both checks throw bounded SsrfError on failure — propagated up
+      // as an explicit security failure (not a silent end-of-pagination).
+      let linkUrl: URL
       try {
-        const linkUrl = new URL(match[1])
-        if (linkUrl.origin !== storeOrigin) {
-          // Cross-origin Link — reject, never forward credentials
-          nextUrl = null
-        } else {
-          await assertPublicUrl(match[1])
-          nextUrl = match[1]
-        }
-      } catch (e) {
-        if (e instanceof SsrfError) {
-          nextUrl = null
-        } else {
-          nextUrl = null
-        }
+        linkUrl = new URL(match[1])
+      } catch {
+        throw new SsrfError('Link header URL is malformed', 'ssrf_link_malformed')
       }
+      if (linkUrl.origin !== storeOrigin) {
+        // Cross-origin Link header — never forward credentials. Throw so
+        // the sync aborts with a clear security signal rather than silently
+        // truncating pagination (which would look like normal end-of-data).
+        throw new SsrfError(
+          'Cross-origin Link header forbidden',
+          'ssrf_cross_origin_link',
+        )
+      }
+      // Same-origin — but still validate it's not a private IP / SSRF
+      // attempt (the host could have been repointed to internal infra
+      // between syncs). Throws SsrfError on failure.
+      await assertPublicUrl(match[1])
+      nextUrl = match[1]
     }
   }
 
@@ -412,7 +430,15 @@ export function maskConsumerSecret(secret: string | undefined | null): string {
   return `${secret.slice(0, 4)}••••••${secret.slice(-4)}`
 }
 
-/** Validate a WooCommerce config shape before persisting. */
+/**
+ * Validate a WooCommerce config shape before persisting.
+ *
+ * storeUrl strict checks (in addition to http(s) scheme):
+ *   - reject embedded credentials (user:pass@) — these would be sent
+ *     as Basic Auth headers by `new URL()` and could leak via logs
+ *   - reject missing/empty hostname (scheme-only strings like "https://")
+ *   - reject query string and fragment — storeUrl must be the bare origin
+ */
 export function validateWooCommerceConfig(
   cfg: Partial<WooCommerceConfig> | null | undefined,
 ): string[] {
@@ -426,7 +452,29 @@ export function validateWooCommerceConfig(
   } else {
     try {
       const u = new URL(cfg.storeUrl)
-      if (!['http:', 'https:'].includes(u.protocol)) errs.push('storeUrl must be http(s)')
+      if (!['http:', 'https:'].includes(u.protocol)) {
+        errs.push('storeUrl must be http(s)')
+      }
+      // Reject embedded credentials — these would be silently sent as
+      // HTTP Basic Auth headers by `fetch` and could leak via logs.
+      if (u.username || u.password) {
+        errs.push('storeUrl must not contain credentials')
+      }
+      // Reject missing/empty hostname (scheme-only strings like "https://").
+      if (!u.hostname || u.hostname.trim() === '') {
+        errs.push('storeUrl must have a hostname')
+      }
+      // storeUrl must be the bare origin — a path/query/fragment is not
+      // supported (the sync builds paths off the origin).
+      if (u.pathname && u.pathname !== '/') {
+        errs.push('storeUrl must not contain a path')
+      }
+      if (u.search) {
+        errs.push('storeUrl must not contain a query string')
+      }
+      if (u.hash) {
+        errs.push('storeUrl must not contain a fragment')
+      }
     } catch {
       errs.push('storeUrl is not a valid URL')
     }

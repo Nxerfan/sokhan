@@ -169,17 +169,21 @@ test('db.ts: covers aggregate + groupBy', () => {
 
 test('db.ts: forces tenantId from context on create (override)', () => {
   const source = readSrc('src/lib/db.ts')
-  expect(source).toContain('FORCE tenantId from context')
+  expect(source).toContain('$allModels')
+  expect(source).toContain("args.data = { ...args.data, tenantId: tid }")
 })
 
 test('db.ts: stamps every row on createMany', () => {
   const source = readSrc('src/lib/db.ts')
-  expect(source).toContain('Stamp every row')
+  expect(source).toContain('createMany')
+  expect(source).toContain('map((row')
 })
 
 test('db.ts: tenant-scoped where on upsert + force on create', () => {
   const source = readSrc('src/lib/db.ts')
-  expect(source).toContain('Force tenantId on create')
+  expect(source).toContain('upsert')
+  expect(source).toContain('args.create')
+  expect(source).toContain('tenantId: tid')
 })
 
 test('verify-membership: wrapped in withTenant', () => {
