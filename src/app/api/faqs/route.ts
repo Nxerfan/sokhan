@@ -19,8 +19,10 @@ export async function POST(req: NextRequest) {
       return { forbidden: true as const }
     }
     const body = await req.json()
-    const question = String(body.question ?? '').trim()
-    const answer = String(body.answer ?? '').trim()
+    if (typeof body.question !== 'string') return { error: 'invalid_question' as const }
+    const question = body.question.trim()
+    if (typeof body.answer !== 'string') return { error: 'invalid_answer' as const }
+    const answer = body.answer.trim()
     if (!question || question.length > 1000) return { error: 'invalid_question' as const }
     if (!answer || answer.length > 5000) return { error: 'invalid_answer' as const }
     const faq = await db.faqPair.create({

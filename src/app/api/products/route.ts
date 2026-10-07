@@ -20,14 +20,16 @@ export async function POST(req: NextRequest) {
       return { forbidden: true as const }
     }
     const body = await req.json()
-    const name = String(body.name ?? '').trim()
-    const description = String(body.description ?? '').trim()
+    if (typeof body.name !== 'string') return { error: 'invalid_name' as const }
+    const name = body.name.trim()
+    if (typeof body.description !== 'string') return { error: 'invalid_description' as const }
+    const description = body.description.trim()
     const price = Number(body.price ?? 0)
-    const availability = String(body.availability ?? 'in_stock')
-    const sku = body.sku ? String(body.sku).trim() : null
+    const availability = typeof body.availability === 'string' ? body.availability : 'in_stock'
+    const sku = typeof body.sku === 'string' ? body.sku.trim() : null
     if (!name || name.length > 500) return { error: 'invalid_name' as const }
     if (description.length > 5000) return { error: 'invalid_description' as const }
-    if (!Number.isFinite(price) || price < 0 || !Number.isInteger(price)) return { error: 'invalid_price' as const }
+    if (typeof body.price !== 'number' || !Number.isFinite(price) || price < 0 || !Number.isInteger(price) || price > 2147483647) return { error: 'invalid_price' as const }
     if (!['in_stock', 'out_of_stock', 'limited'].includes(availability)) return { error: 'invalid_availability' as const }
     if (sku !== null && sku.length > 100) return { error: 'invalid_sku' as const }
     const product = await db.product.create({

@@ -44,7 +44,7 @@ export async function PATCH(
       return { forbidden: true as const }
     }
     const body = await req.json()
-    const convId = body.id ?? id
+    const convId = id  // route parameter is authoritative
     const data: any = {}
     const VALID_STATUSES = ['open', 'pending', 'closed', 'resolved']
     const VALID_PRIORITIES = ['low', 'normal', 'high', 'urgent']
@@ -107,5 +107,12 @@ export async function PATCH(
   })
   if (!result) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
   if ('forbidden' in result.result) return NextResponse.json({ error: 'forbidden' }, { status: 403 })
+  if ('error' in result.result) {
+    const err = result.result.error
+    if (err === 'invalid_assignee') return NextResponse.json({ error: 'invalid_assignee' }, { status: 400 })
+    if (err === 'invalid_department') return NextResponse.json({ error: 'invalid_department' }, { status: 400 })
+    if (err === 'not_found') return NextResponse.json({ error: 'not_found' }, { status: 404 })
+    return NextResponse.json({ error: err }, { status: 400 })
+  }
   return NextResponse.json({ conversation: result.result.conversation })
 }

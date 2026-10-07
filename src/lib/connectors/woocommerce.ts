@@ -144,22 +144,25 @@ async function fetchProductPage(
   urlObj.searchParams.set('per_page', String(PER_PAGE))
   urlObj.searchParams.set('page', String(page))
 
+  const storeOrigin = new URL(normalizeStoreUrl(config.storeUrl)).origin
   let res: Response
   try {
-    res = await fetch(urlObj.toString(), {
+    res = await safeFetch(urlObj.toString(), {
       method: 'GET',
       headers: {
         Authorization: `Basic ${auth}`,
         Accept: 'application/json',
         'User-Agent': 'Sukhan-Connector/1.0',
       },
-      // We don't want Next.js to cache sync responses.
       cache: 'no-store',
+      timeoutMs: 15000,
+      maxRedirects: 3,
+      allowedOrigin: storeOrigin,
     })
   } catch (err: any) {
-    throw new Error(
-      `Network error fetching WooCommerce products (page ${page}): ${err?.message ?? String(err)}`,
-    )
+    // Safe error — no credentials, no raw URLs
+    if (err instanceof SsrfError) throw err
+    throw new Error(`WooCommerce request failed (page ${page}): ${err?.code ?? 'network_error'}`)
   }
 
   if (res.status === 401 || res.status === 403) {
@@ -203,19 +206,24 @@ async function fetchProductPage(
   if (linkHeader) {
     const match = linkHeader.match(/<([^>]+)>;\s*rel="next"/i)
     if (match) {
-      // Validate Link header URL before following
+      // Validate Link header URL: SSRF + same-origin enforcement
       try {
-        await assertPublicUrl(match[1])
-        nextUrl = match[1]
+        const linkUrl = new URL(match[1])
+        if (linkUrl.origin !== storeOrigin) {
+          // Cross-origin Link — reject, never forward credentials
+          nextUrl = null
+        } else {
+          await assertPublicUrl(match[1])
+          nextUrl = match[1]
+        }
       } catch (e) {
         if (e instanceof SsrfError) {
           nextUrl = null
         } else {
-          throw e
+          nextUrl = null
         }
       }
     }
-
   }
 
   // Fallback: if no Link header, check X-WP-TotalPages.

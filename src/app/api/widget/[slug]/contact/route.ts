@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { signToken, type VisitorTokenPayload } from '@/lib/realtime-token'
+import { withTenant } from '@/lib/db'
 import { checkRateLimit, getClientIP } from '@/lib/rate-limit'
 
 /** CORS + rate-limit headers for widget API responses. */
@@ -63,58 +64,53 @@ export async function POST(
   const email = String(body.email ?? '').trim().toLowerCase().slice(0, 200)
   const name = String(body.name ?? '').trim().slice(0, 100)
 
-  // visitorId is REQUIRED — it is the visitor's identity.
   if (!visitorId) {
     return widgetHeaders(NextResponse.json({ error: 'visitorId_required' }, { status: 400 }))
   }
-
-  // Validate email format if provided (email is metadata only, never identity)
   if (email && !isValidEmail(email)) {
     return widgetHeaders(NextResponse.json({ error: 'invalid_email' }, { status: 400 }))
   }
 
-  // Lookup by (tenantId, visitorId) — NOT by email.
-  // A different visitorId with the same email gets a different contact.
-  let contact = await db.contact.findUnique({
-    where: { tenantId_identifier: { tenantId: tenant.id, identifier: visitorId } },
-  })
-
-  if (!contact) {
-    // New visitor — create a new contact with visitorId as the identifier.
-    // email is stored as metadata, not as the lookup key.
-    contact = await db.contact.create({
-      data: {
-        tenantId: tenant.id,
-        identifier: visitorId,
-        identifierType: 'visitorId',
-        name: name || 'Visitor',
-        email: email || null,
-        locale: tenant.defaultLocale,
-        metadata: {},
-      },
+  // Wrap tenant-scoped DB operations in withTenant
+  const { contact, existingConversation } = await withTenant(tenant.id, async () => {
+    let contact = await db.contact.findUnique({
+      where: { tenantId_identifier: { tenantId: tenant.id, identifier: visitorId } },
     })
-  } else {
-    // Same visitor updating their own profile metadata — NOT a takeover.
-    // Only update the email/name if provided; never change the identifier.
-    const updateData: { email?: string | null; name?: string } = {}
-    if (email) updateData.email = email
-    if (name) updateData.name = name
-    if (Object.keys(updateData).length > 0) {
-      contact = await db.contact.update({
-        where: { id: contact.id },
-        data: updateData,
-      })
-    }
-  }
 
-  const existingConversation = await db.conversation.findFirst({
-    where: { tenantId: tenant.id, contactId: contact.id, status: 'open' },
-    orderBy: { createdAt: 'desc' },
+    if (!contact) {
+      contact = await db.contact.create({
+        data: {
+          tenantId: tenant.id,
+          identifier: visitorId,
+          identifierType: 'visitorId',
+          name: name || 'Visitor',
+          email: email || null,
+          locale: tenant.defaultLocale,
+          metadata: {},
+        },
+      })
+    } else {
+      const updateData: { email?: string | null; name?: string } = {}
+      if (email) updateData.email = email
+      if (name) updateData.name = name
+      if (Object.keys(updateData).length > 0) {
+        contact = await db.contact.update({
+          where: { id: contact.id },
+          data: updateData,
+        })
+      }
+    }
+
+    const existingConversation = await db.conversation.findFirst({
+      where: { tenantId: tenant.id, contactId: contact.id, status: 'open' },
+      orderBy: { createdAt: 'desc' },
+    })
+    return { contact, existingConversation }
   })
 
   const tokenPayload: VisitorTokenPayload = {
     type: 'visitor',
-    contactId: contact.id,
+    contactId: contact!.id,
     tenantId: tenant.id,
     slug,
   }

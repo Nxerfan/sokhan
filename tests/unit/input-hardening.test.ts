@@ -17,15 +17,20 @@ test('widget-domains: limit >= 0 check (not count >= limit)', () => {
   expect(source).not.toMatch(/^.*if\s*\(\s*count\s*>=\s*limit\s*\)/m)
 })
 
-test('self-host-request: has rate limiting', () => {
+test('self-host-request: has dedicated 5/15min rate limit', () => {
   const source = readSrc('src/app/api/self-host-request/route.ts')
-  expect(source).toContain('checkRateLimit')
-  expect(source).toContain('self-host-request')
+  expect(source).toContain('checkSelfHostRateLimit')
+  expect(source).toContain('SELF_HOST_LIMIT')
+  expect(source).toContain('5')
+  expect(source).toContain('15')
 })
 
 test('self-host-request: rejects non-string body fields', () => {
   const source = readSrc('src/app/api/self-host-request/route.ts')
   expect(source).toContain('typeof body.name')
+  expect(source).toContain('typeof body.company')
+  expect(source).toContain('typeof body.email')
+  expect(source).toContain('typeof body.phone')
 })
 
 test('products: validates name non-empty + bounded', () => {

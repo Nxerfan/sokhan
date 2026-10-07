@@ -175,12 +175,20 @@ function buildTenantScopedClient() {
         const tid = currentTenantId()
         if (!tid) throw new TenantContextRequiredError(model)
         args.where = { ...(args.where ?? {}), tenantId: tid }
+        // Prevent tenantId override via update data
+        if (args.data && typeof args.data === 'object' && !Array.isArray(args.data)) {
+          delete args.data.tenantId
+        }
         return query(args)
       },
       async updateMany({ args, query }: any) {
         const tid = currentTenantId()
         if (!tid) throw new TenantContextRequiredError(model)
         args.where = { ...(args.where ?? {}), tenantId: tid }
+        // Prevent tenantId override via update data
+        if (args.data && typeof args.data === 'object' && !Array.isArray(args.data)) {
+          delete args.data.tenantId
+        }
         return query(args)
       },
       async upsert({ args, query }: any) {
@@ -190,6 +198,10 @@ function buildTenantScopedClient() {
         if (args.where) args.where = { ...args.where, tenantId: tid }
         // Force tenantId on create
         if (args.create) args.create = { ...args.create, tenantId: tid }
+        // Prevent tenantId override via update data
+        if (args.update && typeof args.update === 'object' && !Array.isArray(args.update)) {
+          delete args.update.tenantId
+        }
         return query(args)
       },
 

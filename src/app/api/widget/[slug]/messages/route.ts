@@ -4,6 +4,7 @@ import { verifyToken, type VisitorTokenPayload } from '@/lib/realtime-token'
 import { publishToRealtime, room, EVENTS } from '@/lib/realtime-publish'
 import { evaluateRoutingRules } from '@/lib/routing-engine'
 import { checkRateLimit, getClientIP } from '@/lib/rate-limit'
+import { withTenant } from '@/lib/db'
 import { checkMessageLimit } from '@/lib/payments/free-plan'
 import { getRequestDomain, isDomainAllowed } from '@/lib/payments/domain-validation'
 
@@ -60,19 +61,23 @@ export async function GET(
     return widgetHeaders(NextResponse.json({ messages: [] }))
   }
 
-  // Verify the conversation belongs to this contact+tenant
-  const conversation = await db.conversation.findFirst({
-    where: { id: conversationId, tenantId, contactId },
+  // Wrap tenant-scoped DB operations
+  const { conversation, messages } = await withTenant(tenantId, async () => {
+    const conversation = await db.conversation.findFirst({
+      where: { id: conversationId, contactId },
+    })
+    if (!conversation) return { conversation: null, messages: [] as any[] }
+    const messages = await db.message.findMany({
+      where: { conversationId },
+      orderBy: { createdAt: 'asc' },
+      take: 100,
+    })
+    return { conversation, messages }
   })
+
   if (!conversation) {
     return widgetHeaders(NextResponse.json({ messages: [] }))
   }
-
-  const messages = await db.message.findMany({
-    where: { conversationId, tenantId },
-    orderBy: { createdAt: 'asc' },
-    take: 100,
-  })
 
   return widgetHeaders(NextResponse.json({ messages, conversationId }))
 }
