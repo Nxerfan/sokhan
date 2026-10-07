@@ -205,11 +205,8 @@ export class SukhanSocket {
       if (msg === 'membership_inactive' || msg === 'membership_check_failed') {
         this.membershipRevoked = true
         if (this.socket) {
-          ;(
-            this.socket as SocketIOClient & {
-              io?: { opts?: { reconnection?: boolean } }
-            },
-          ).io!.opts!.reconnection = false
+          const sk = this.socket as SocketIOClient & { io?: { opts?: { reconnection?: boolean } } }
+          if (sk.io?.opts) sk.io.opts.reconnection = false
           this.socket.disconnect()
         }
         return
@@ -218,11 +215,8 @@ export class SukhanSocket {
       if (msg === 'invalid_token' || msg === 'no_token') {
         if (this.consecutiveRefreshFailures >= this.MAX_REFRESH_FAILURES) {
           if (this.socket) {
-            ;(
-              this.socket as SocketIOClient & {
-                io?: { opts?: { reconnection?: boolean } }
-              },
-            ).io!.opts!.reconnection = false
+            const sk = this.socket as SocketIOClient & { io?: { opts?: { reconnection?: boolean } } }
+            if (sk.io?.opts) sk.io.opts.reconnection = false
             this.socket.disconnect()
           }
           return
@@ -260,13 +254,14 @@ export class SukhanSocket {
    */
   private async refreshToken(): Promise<string | null> {
     if (this.refreshInFlight) return this.refreshInFlight
-    if (!this.onTokenExpired) {
+    const refreshFn = this.onTokenExpired
+    if (!refreshFn) {
       this.consecutiveRefreshFailures++
       return null
     }
     this.refreshInFlight = (async () => {
       try {
-        const fresh = await this.onTokenExpired()
+        const fresh = await refreshFn()
         if (fresh) {
           this.consecutiveRefreshFailures = 0
         } else {

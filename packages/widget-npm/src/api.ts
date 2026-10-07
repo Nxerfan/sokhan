@@ -15,8 +15,8 @@ import type {
 } from './types'
 
 // Re-export for backwards compat with `import { resolveApiUrl } from './api'`.
-export { resolveApiUrl } from './realtime-resolve'
-export { HOSTED_API_URL } from './realtime-resolve'
+export { resolveApiUrl, HOSTED_API_URL } from './realtime-resolve'
+import { resolveApiUrl } from './realtime-resolve'
 
 /** Strip the optional `sk_` prefix from an API key. */
 export function normalizeApiKey(key: string): string {
