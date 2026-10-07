@@ -15,30 +15,19 @@
  * - **Browser, key NOT set**: nothing happens. Consumers must call
  *   `initSukhan({ apiKey: '...' })` explicitly.
  * - **Server (Next.js SSR, Node)**: the module is a no-op. Safe to import
- *   in a server component or during SSR — initialization is deferred to the
- *   client.
+ *   in a server component or during SSR — initialization is deferred to
+ *   the client.
  *
- * ## Next.js usage (client component)
+ * ## Runtime contract (Task W)
  *
- * ```tsx
- * 'use client'
- * import { useEffect } from 'react'
- * import { initSukhan } from 'sukhan-widget'
- *
- * export function Chat() {
- *   useEffect(() => {
- *     initSukhan({ apiKey: process.env.NEXT_PUBLIC_SUKHAN_API_KEY })
- *   }, [])
- *   return null
- * }
- * ```
- *
- * ## Vanilla JS usage (script tag, no bundler)
- *
- * Don't import the NPM package — use the script-tag alternative endpoint
- * at `/api/widget/v1/sukhan.js` instead. That endpoint serves a
- * self-executing bundle that reads the API key from the `data-api-key`
- * attribute on the `<script>` tag.
+ * - The hosted default `apiUrl` is `https://app.sukhan.chat`. The widget
+ *   NEVER falls back to `window.location.origin` — the host page origin
+ *   is NOT the Sukhan backend by default. Self-hosted deployments MUST
+ *   pass `apiUrl` explicitly.
+ * - The realtime endpoint config comes from the BACKEND `config.realtime`
+ *   response (additive field). The widget passes it explicitly to
+ *   `SukhanSocket` (no `window.__sukhan_api_url` coupling). An optional
+ *   `SukhanOptions.realtime` override takes priority.
  *
  * @packageDocumentation
  */
@@ -48,7 +37,17 @@ import type { SukhanOptions, SukhanInstance } from './types'
 
 export { SukhanWidget } from './widget'
 export { ApiClient, normalizeApiKey, resolveApiUrl } from './api'
-export { SukhanSocket } from './socket'
+export { SukhanSocket, loadScriptOnce } from './socket'
+export type { SukhanSocketDeps } from './socket'
+export {
+  resolveRealtimeUrl,
+  resolveRealtimeFromConfig,
+  buildSocketIoScriptUrl,
+  HOSTED_API_URL,
+  HOSTED_REALTIME_CONFIG,
+  SukhanConfigError,
+} from './realtime-resolve'
+export { mergeMessages, mergeMessage } from './merge'
 export type {
   WidgetConfig,
   Message,
@@ -58,23 +57,17 @@ export type {
   IdentifyResponse,
   SukhanOptions,
   SukhanInstance,
+  SukhanSocketOptions,
   SocketEvent,
   SocketHandler,
+  RealtimeTransport,
+  RealtimeEndpointConfig,
 } from './types'
 
 /**
  * Initialize the Sukhan widget. Returns a handle with open/close/send/destroy
  * methods. Calling this more than once per page is a no-op (guarded by
  * `window.__sukhan_mounted`).
- *
- * Resolves the API key from (in priority order):
- *   1. `options.apiKey`
- *   2. `window.SUKHAN_API_KEY` (runtime injection — useful for non-bundler
- *      setups that can't do build-time env replacement)
- *   3. `process.env.SUKHAN_API_KEY` (inlined at build time by webpack /
- *      Turbopack / Vite when the consumer's `env` is exposed)
- *
- * Throws synchronously if no API key is found.
  */
 export function initSukhan(options: SukhanOptions = {}): SukhanInstance {
   const apiKey =
@@ -92,8 +85,6 @@ export function initSukhan(options: SukhanOptions = {}): SukhanInstance {
 
   const widget = new SukhanWidget({ ...options, apiKey })
 
-  // Kick off async init (fetches config, mounts DOM, connects socket). Errors
-  // are logged but not thrown — the page should still work without the widget.
   if (typeof document !== 'undefined') {
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', () => widget.init())
@@ -102,9 +93,6 @@ export function initSukhan(options: SukhanOptions = {}): SukhanInstance {
     }
   }
 
-  // Return a handle that exposes the public API. The methods proxy to the
-  // internal SukhanWidget — but guard against the widget not having mounted
-  // yet (e.g. open() before DOMContentLoaded).
   return {
     open: () => widget.open(),
     close: () => widget.close(),
@@ -121,16 +109,6 @@ export function initSukhan(options: SukhanOptions = {}): SukhanInstance {
 
 declare const process: { env: Record<string, string | undefined> } | undefined
 
-/**
- * Auto-initialize on import in a browser environment when SUKHAN_API_KEY is
- * set. On the server (Next.js SSR, Node), this is a no-op.
- *
- * The env var is read via `process.env.SUKHAN_API_KEY`. Bundlers like webpack
- * and Turbopack replace `process.env.SUKHAN_API_KEY` at build time, so the
- * consumer's `.env` file is the source of truth. For runtime injection (e.g.
- * when the API key isn't known at build time), set `window.SUKHAN_API_KEY`
- * before this module loads.
- */
 if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   const envKey =
     typeof process !== 'undefined' && process.env ? process.env.SUKHAN_API_KEY : undefined
