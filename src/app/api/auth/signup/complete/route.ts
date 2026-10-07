@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { db } from '@/lib/db'
+import { db, withTenant } from '@/lib/db'
 import bcrypt from 'bcryptjs'
 import { signToken, type AgentTokenPayload } from '@/lib/realtime-token'
 import { getAuthSecret } from '@/lib/env-check'
@@ -52,16 +52,20 @@ export async function POST(req: NextRequest) {
       },
     })
 
-    await tx.membership.create({
-      data: { userId: user.id, tenantId: tenant.id, role: 'owner', status: 'active' },
-    })
+    // Wrap tenant-scoped creates in withTenant — the extension requires
+    // tenant context for Membership + WidgetConfig operations.
+    await withTenant(tenant.id, async () => {
+      await tx.membership.create({
+        data: { userId: user.id, tenantId: tenant.id, role: 'owner', status: 'active' },
+      })
 
-    await tx.widgetConfig.create({
-      data: {
-        tenantId: tenant.id, accentColor: '#E09A2B', launcherShape: 'tab', position: 'bottom-end',
-        greetingTexts: { fa: 'سلام! چطور می‌تونم کمکتون کنم؟', en: 'Hi there! How can I help?' },
-        defaultLocale: 'fa',
-      },
+      await tx.widgetConfig.create({
+        data: {
+          tenantId: tenant.id, accentColor: '#E09A2B', launcherShape: 'tab', position: 'bottom-end',
+          greetingTexts: { fa: 'سلام! چطور می‌تونم کمکتون کنم؟', en: 'Hi there! How can I help?' },
+          defaultLocale: 'fa',
+        },
+      })
     })
 
     // Clean up

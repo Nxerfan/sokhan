@@ -47,6 +47,10 @@ jobs:
       NEXTAUTH_SECRET: ci-docker-test-secret-not-production
       POSTGRES_PASSWORD: ci-postgres-password
       NIXIFY_MOCK: "true"
+      # Direct Postgres connection for the bun db-boundary test runner
+      # (runs on the CI host, connects to the exposed Docker Postgres port).
+      DATABASE_URL: postgresql://sukhan:ci-postgres-password@127.0.0.1:5432/sukhan?schema=public
+      DIRECT_URL: postgresql://sukhan:ci-postgres-password@127.0.0.1:5432/sukhan?schema=public
     steps:
       - uses: actions/checkout@v4
       - name: Setup Bun
@@ -85,9 +89,11 @@ jobs:
               sleep 5
             done
           '
+      - name: Run Full DB boundary tests (real PostgreSQL)
+        run: bun test tests/db-boundary/
       - name: Run Full regression tests
         run: |
-          bunx playwright test             tests/module2.spec.ts             tests/socketio-verify.spec.ts             tests/socket-race.spec.ts             tests/realtime-authz.spec.ts             tests/widget-external-origin.spec.ts tests/reconnect-regression.spec.ts
+          bunx playwright test             tests/module2.spec.ts             tests/socketio-verify.spec.ts             tests/socket-race.spec.ts             tests/realtime-authz.spec.ts             tests/widget-external-origin.spec.ts tests/reconnect-regression.spec.ts tests/tenant-security.spec.ts
       - name: Print Full container logs on failure
         if: failure()
         run: |
@@ -116,9 +122,11 @@ jobs:
               sleep 5
             done
           '
+      - name: Run Lite DB boundary tests (real PostgreSQL)
+        run: bun test tests/db-boundary/
       - name: Run Lite regression tests
         run: |
-          bunx playwright test             tests/module2.spec.ts             tests/socketio-verify.spec.ts             tests/socket-race.spec.ts             tests/realtime-authz.spec.ts             tests/widget-external-origin.spec.ts tests/reconnect-regression.spec.ts
+          bunx playwright test             tests/module2.spec.ts             tests/socketio-verify.spec.ts             tests/socket-race.spec.ts             tests/realtime-authz.spec.ts             tests/widget-external-origin.spec.ts tests/reconnect-regression.spec.ts tests/tenant-security.spec.ts
       - name: Print Lite container logs on failure
         if: failure()
         run: |

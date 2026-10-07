@@ -1,8 +1,7 @@
 import { NextResponse, NextRequest } from 'next/server'
 import { withSessionTenant, hasRole } from '@/lib/auth'
 import { db, getCurrentTenantId } from '@/lib/db'
-import { getWebsiteLimit } from '@/lib/payments/domain-validation'
-import { normalizeDomain } from '@/lib/payments/domain-validation'
+import { getWebsiteLimit, validateDomain } from '@/lib/payments/domain-validation'
 
 export async function GET() {
   const result = await withSessionTenant(async () => {
@@ -24,7 +23,14 @@ export async function POST(req: NextRequest) {
     }
     const tid = getCurrentTenantId()!
     const body = await req.json()
-    const domain = normalizeDomain(String(body.domain ?? ''))
+    // Strict domain validation — rejects scheme-only, path-only, credentials,
+    // control characters, malformed hostnames, etc. Throws on rejection.
+    let domain: string
+    try {
+      domain = validateDomain(body.domain)
+    } catch (e) {
+      return { error: 'invalid_domain' as const }
+    }
 
     if (!domain || domain.length < 3) {
       return { error: 'invalid_domain' as const }
@@ -33,7 +39,7 @@ export async function POST(req: NextRequest) {
     // Check plan limit
     const limit = await getWebsiteLimit(tid)
     const count = await db.widgetDomain.count({ where: { tenantId: tid } })
-    if (count >= limit) {
+    if (limit >= 0 && count >= limit) {
       return { error: 'limit_reached' as const }
     }
 

@@ -36,9 +36,14 @@ export async function withSessionTenant<T>(
 ): Promise<{ session: TypedSession; result: T } | null> {
   const session = await getServerSession(authOptions) as TypedSession | null
   if (!session?.user?.workspaceId) return null
-  const membership = await db.membership.findFirst({
-    where: { userId: session.user.id, tenantId: session.user.workspaceId },
-  })
+  // Set tenant context FIRST — the Membership lookup is on a tenant-scoped
+  // model and requires context under the fail-closed Prisma extension.
+  const tid = session.user.workspaceId
+  const membership = await withTenant(tid, async () =>
+    db.membership.findFirst({
+      where: { userId: session.user.id },
+    })
+  )
   if (!membership) return null
   if (membership.status !== 'active') return null
 
@@ -48,7 +53,7 @@ export async function withSessionTenant<T>(
     user: { ...session.user, role: membership.role },
   }
 
-  return withTenant(session.user.workspaceId, async () => {
+  return withTenant(tid, async () => {
     const result = await fn({ session: freshSession })
     return { session: freshSession, result }
   })

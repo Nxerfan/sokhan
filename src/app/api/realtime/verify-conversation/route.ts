@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { getAuthSecret } from '@/lib/env-check'
+import { withTenant } from '@/lib/db'
 import crypto from 'crypto'
 
 /**
@@ -75,7 +76,7 @@ export async function GET(req: NextRequest) {
     where.contactId = contactId!
   }
 
-  const conv = await db.conversation.findFirst({ where, select: { id: true } })
+  const conv = await withTenant(tenantId, async () => db.conversation.findFirst({ where, select: { id: true } }))
   if (!conv) {
     return NextResponse.json({ error: 'not_found' }, { status: 403 })
   }

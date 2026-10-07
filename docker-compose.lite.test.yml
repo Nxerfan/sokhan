@@ -1,4 +1,4 @@
-# Test-only Compose override for Lite — exposes app and caddy ports.
+# Test-only Compose override for Lite — exposes app, caddy, and postgres ports.
 services:
   app:
     ports:
@@ -13,3 +13,11 @@ services:
     ports:
       - "81:80"
       - "443:443"
+
+  # Expose Postgres on the host so the bun db-boundary test runner (which
+  # runs on the CI host, not inside a container) can connect directly to
+  # exercise the fail-closed Prisma tenant extension against real PostgreSQL.
+  # Production docker-compose.lite.yml does NOT expose this port.
+  postgres:
+    ports:
+      - "5432:5432"

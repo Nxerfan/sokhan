@@ -43,10 +43,14 @@ export async function POST(req: NextRequest) {
       return { forbidden: true as const }
     }
     const body = await req.json()
+    const contactId = String(body.contactId ?? '').trim()
+    if (!contactId) return { error: 'contact_not_found' as const }
+    const contact = await db.contact.findFirst({ where: { id: contactId, tenantId: session.user.workspaceId! } })
+    if (!contact) return { error: 'contact_not_found' as const }
     const conversation = await db.conversation.create({
       data: {
         tenantId: session.user.workspaceId!,
-        contactId: body.contactId,
+        contactId,
         status: 'open',
         channel: body.channel || 'widget',
         tags: [],
@@ -56,5 +60,6 @@ export async function POST(req: NextRequest) {
   })
   if (!result) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
   if ('forbidden' in result.result) return NextResponse.json({ error: 'forbidden' }, { status: 403 })
+  if ('error' in result.result) return NextResponse.json({ error: result.result.error }, { status: 400 })
   return NextResponse.json({ conversation: result.result.conversation })
 }

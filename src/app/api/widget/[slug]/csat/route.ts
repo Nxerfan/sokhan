@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { verifyToken, type VisitorTokenPayload } from '@/lib/realtime-token'
+import { withTenant } from '@/lib/db'
 
 /** CORS headers for widget API responses. */
 function widgetHeaders(res: NextResponse): NextResponse {
@@ -52,26 +53,32 @@ export async function POST(
     return widgetHeaders(NextResponse.json({ error: 'invalid_input' }, { status: 400 }))
   }
 
-  // Verify the conversation belongs to this contact + tenant — tenantId explicit
-  const conversation = await db.conversation.findFirst({
-    where: { id: conversationId, tenantId, contactId },
+  // Wrap tenant-scoped DB operations in withTenant
+  const result = await withTenant(tenantId, async () => {
+    // Verify the conversation belongs to this contact + tenant
+    const conversation = await db.conversation.findFirst({
+      where: { id: conversationId, contactId },
+    })
+    if (!conversation) {
+      return { error: 'not_found' as const }
+    }
+    if (conversation.status !== 'closed') {
+      return { error: 'conversation_not_closed' as const }
+    }
+    if (conversation.csatRating !== null) {
+      return { error: 'already_rated' as const }
+    }
+    await db.conversation.updateMany({
+      where: { id: conversationId },
+      data: { csatRating: rating, csatComment: comment, csatAt: new Date() },
+    })
+    return { ok: true as const }
   })
-  if (!conversation) {
-    return widgetHeaders(NextResponse.json({ error: 'not_found' }, { status: 404 }))
-  }
 
-  if (conversation.status !== 'closed') {
-    return widgetHeaders(NextResponse.json({ error: 'conversation_not_closed' }, { status: 400 }))
+  if ('error' in result) {
+    const status = result.error === 'not_found' ? 404 : 400
+    return widgetHeaders(NextResponse.json({ error: result.error }, { status }))
   }
-
-  if (conversation.csatRating !== null) {
-    return widgetHeaders(NextResponse.json({ error: 'already_rated' }, { status: 400 }))
-  }
-
-  await db.conversation.updateMany({
-    where: { id: conversationId, tenantId },
-    data: { csatRating: rating, csatComment: comment, csatAt: new Date() },
-  })
 
   return widgetHeaders(NextResponse.json({ ok: true }))
 }

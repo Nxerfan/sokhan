@@ -12,9 +12,14 @@
  *     an active Subscription, that subscription's plan takes precedence.
  *   - Limits use -1 to mean "unlimited" — always allowed.
  *   - Conversations are counted for the current month (calendar month, UTC).
+ *
+ * Tenant context: every tenant-scoped read (Membership, Conversation,
+ * Department, Message, Subscription, WidgetDomain) runs inside
+ * `withTenant(tenantId)`. Callers that are already inside a tenant context
+ * (e.g. `withSessionTenant`) simply nest a same-value context — a no-op.
  */
 
-import { db, getCurrentTenantId } from '@/lib/db'
+import { db, getCurrentTenantId, withTenant } from '@/lib/db'
 import { getPlan, type PlanLimit } from './plans'
 
 export type LimitKind = keyof PlanLimit
@@ -48,12 +53,15 @@ export class PlanLimitExceededError extends Error {
  * `tenant.plan`.
  */
 export async function resolveTenantPlanSlug(tenantId: string): Promise<string> {
-  // Active subscription takes precedence.
-  const sub = await db.subscription.findFirst({
-    where: { tenantId, status: 'active' },
-    include: { plan: { select: { slug: true } } },
-    orderBy: { createdAt: 'desc' },
-  })
+  // Subscription is a tenant-scoped model — must run inside withTenant.
+  // Global Tenant lookup below doesn't need wrapping.
+  const sub = await withTenant(tenantId, () =>
+    db.subscription.findFirst({
+      where: { status: 'active' },
+      include: { plan: { select: { slug: true } } },
+      orderBy: { createdAt: 'desc' },
+    }),
+  )
   if (sub?.plan?.slug) return sub.plan.slug
 
   const tenant = await db.tenant.findUnique({
@@ -65,44 +73,48 @@ export async function resolveTenantPlanSlug(tenantId: string): Promise<string> {
 
 /** Count the current usage for the given limit kind. */
 async function countUsage(tenantId: string, limit: LimitKind): Promise<number> {
-  switch (limit) {
-    case 'agents': {
-      // Active + invited memberships count toward the agent limit.
-      return db.membership.count({
-        where: { tenantId, status: { in: ['active', 'invited'] } },
-      })
+  // All tenant-scoped model reads inside this function are wrapped in
+  // withTenant so the fail-closed extension allows them.
+  return withTenant(tenantId, async () => {
+    switch (limit) {
+      case 'agents': {
+        // Active + invited memberships count toward the agent limit.
+        return db.membership.count({
+          where: { status: { in: ['active', 'invited'] } },
+        })
+      }
+      case 'conversations': {
+        // Conversations created this calendar month (UTC).
+        const now = new Date()
+        const startOfMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
+        return db.conversation.count({
+          where: { createdAt: { gte: startOfMonth } },
+        })
+      }
+      case 'departments': {
+        return db.department.count({})
+      }
+      case 'aiActions': {
+        const now = new Date()
+        const startOfMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
+        return db.message.count({
+          where: { senderType: 'ai', createdAt: { gte: startOfMonth } },
+        })
+      }
+      case 'weeklyMessages': {
+        // Messages sent by visitors in the last 7 days (rolling window)
+        const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+        return db.message.count({
+          where: { senderType: 'contact', createdAt: { gte: sevenDaysAgo } },
+        })
+      }
+      case 'websites': {
+        return db.widgetDomain.count({})
+      }
+      default:
+        return 0
     }
-    case 'conversations': {
-      // Conversations created this calendar month (UTC).
-      const now = new Date()
-      const startOfMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
-      return db.conversation.count({
-        where: { tenantId, createdAt: { gte: startOfMonth } },
-      })
-    }
-    case 'departments': {
-      return db.department.count({ where: { tenantId } })
-    }
-    case 'aiActions': {
-      const now = new Date()
-      const startOfMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
-      return db.message.count({
-        where: { tenantId, senderType: 'ai', createdAt: { gte: startOfMonth } },
-      })
-    }
-    case 'weeklyMessages': {
-      // Messages sent by visitors in the last 7 days (rolling window)
-      const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
-      return db.message.count({
-        where: { tenantId, senderType: 'contact', createdAt: { gte: sevenDaysAgo } },
-      })
-    }
-    case 'websites': {
-      return db.widgetDomain.count({ where: { tenantId } })
-    }
-    default:
-      return 0
-  }
+  })
 }
 
 /**
