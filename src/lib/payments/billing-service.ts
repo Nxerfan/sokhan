@@ -157,24 +157,31 @@ function isPaidPlanRow(plan: Plan): boolean {
 // ─────────────────────────────────────────────────────────────────────────
 
 /**
- * Start a paid checkout.
+ * Start a paid checkout. PR #4 correction pass:
  *
- * MUST run inside the caller's tenant context (withSessionTenant). The caller
- * MUST have already verified admin authorization.
+ *   - Only `planSlug === 'free'` may use transitionToFreePlan (handled by the
+ *     route). A non-free plan with priceToman <= 0 (e.g. Coming-Soon pro/max)
+ *     is REJECTED here with `plan_unavailable` — it must NOT silently activate
+ *     the free plan and must NOT call a provider.
+ *   - Duplicate-pending checkout is REJECTED with `checkout_already_pending`.
+ *     A still-usable recent pending checkout is NEVER auto-canceled. Two
+ *     concurrent createCheckout calls for the same tenant cannot both create a
+ *     pending row — the checkout-creation phase is transactional:
  *
- * Steps:
- *   1. validate planSlug (string, supported, paid) + gateway (string, enabled).
- *   2. negative/zero price → reject (zero-amount never calls provider).
- *   3. duplicate-pending strategy: if a recent (< validity) pending checkout
- *      for the SAME plan exists, reuse it. If a pending checkout for a
- *      DIFFERENT plan exists, cancel it first. NEVER touch active.
- *   4. create pending Subscription.
- *   5. create pending Invoice with authority=null + REAL callbackUrl
- *      (invoice.id in the query).
- *   6. call provider.createPayment().
- *   7. persist authority on the invoice.
- *   8. on createPayment failure → compensating transition: invoice
- *      pending→canceled, subscription pending→canceled (legal). Return error.
+ *       1. db.$transaction: SELECT...FOR UPDATE the Tenant row.
+ *       2. inspect the most-recent pending checkout (any gateway/plan).
+ *       3. if a recent (< validity) pending exists -> throw
+ *          `checkout_already_pending` (transaction rolls back, lock releases).
+ *       4. otherwise create pending Subscription + pending Invoice
+ *          (authority=null, callbackUrl=REAL url with invoice.id). Commit.
+ *       5. ONLY AFTER the transaction commits (lock released) call
+ *          provider.createPayment(callbackUrl). External HTTP never occurs
+ *          under the DB lock.
+ *       6. persist the returned authority.
+ *       7. on createPayment failure -> compensating conditional
+ *          pending->canceled on both rows.
+ *
+ * The existing ACTIVE subscription is preserved until payment verifies.
  */
 export async function createCheckout(args: {
   tenantId: string
@@ -185,7 +192,6 @@ export async function createCheckout(args: {
 }): Promise<CheckoutResult> {
   const { tenantId, planSlug, gatewayName, origin, deps } = args
 
-  // Input validation — reject non-string / malformed (no String() coercion).
   if (typeof planSlug !== 'string' || planSlug.trim() === '') {
     throw new BillingError('planSlug is required', 'invalid_plan')
   }
@@ -196,151 +202,116 @@ export async function createCheckout(args: {
   if (!plan) throw new BillingError('unknown plan slug', 'invalid_plan')
   if (plan.contactSales) throw new BillingError('plan requires sales contact', 'contact_sales')
 
-  // Zero/negative-amount safety.
+  // Zero/negative-amount safety. The route routes `planSlug === 'free'` to
+  // transitionToFreePlan, so a non-free plan reaching here with priceToman
+  // <= 0 is a Coming-Soon / misconfigured plan — REJECT, do NOT activate free
+  // and do NOT call a provider.
   if (plan.priceToman < 0) {
     throw new BillingError('plan has negative price (configuration error)', 'invalid_plan')
   }
-  if (!isPaidPlanRow(plan)) {
-    // Free / zero-price plan must use transitionToFreePlan, not the gateway.
-    throw new BillingError(
-      'createCheckout is for paid plans only; use transitionToFreePlan for free/zero-price',
-      'invalid_plan',
-    )
+  if (plan.priceToman === 0) {
+    throw new BillingError('plan is not available for purchase (Coming Soon)', 'plan_unavailable')
   }
 
   const provider = deps.resolveProvider(gatewayName)
   if (!provider) throw new BillingError('unknown/disabled gateway', 'invalid_gateway')
 
-  // Defense-in-depth: if the caller is ALREADY inside a tenant context and it
-  // mismatches the tenantId they passed, reject (a session-scoped caller must
-  // not act on a different tenant). If there is NO context (e.g. a test or a
-  // bootstrap caller), createCheckout establishes its own below — this matches
-  // handleCallback / transitionToFreePlan / getBillingState which all wrap
-  // internally without requiring a pre-existing context.
   const ctxTid = getCurrentTenantId()
   if (ctxTid !== undefined && ctxTid !== tenantId) {
     throw new BillingError('tenant context mismatch', 'tenant_context_required')
   }
 
-  return withTenant(tenantId, async () => {
+  // ── TRANSACTIONAL CHECKOUT-CREATION PHASE (holds the per-tenant lock) ──
+  const created = await withTenant(tenantId, async () => {
     const now = deps.now()
+    return db.$transaction(async (tx: any) => {
+      // 1. Per-tenant pessimistic lock — serializes concurrent checkouts.
+      await tx.$queryRaw`SELECT 1 FROM "Tenant" WHERE "id" = ${tenantId} FOR UPDATE`
 
-    // Duplicate-pending strategy: reuse a recent same-plan pending checkout,
-    // cancel a superseded different-plan pending checkout. NEVER touch active.
-    const existingPending = await db.subscription.findFirst({
-      where: { status: 'pending' },
-      orderBy: { createdAt: 'desc' },
-      include: { plan: { select: { slug: true, id: true } } },
-    })
-    if (existingPending) {
-      const ageMs = now.getTime() - existingPending.createdAt.getTime()
-      const samePlan = existingPending.plan?.slug === planSlug
-      if (samePlan && ageMs < deps.checkoutValidityMs) {
-        // Reuse: return the existing pending checkout's invoice.
-        const inv = await db.invoice.findFirst({
-          where: { subscriptionId: existingPending.id },
-          orderBy: { createdAt: 'desc' },
-        })
-        if (inv && inv.authority) {
-          return {
-            free: false,
-            subscriptionId: existingPending.id,
-            invoiceId: inv.id,
-            gateway: gatewayName,
-            authority: inv.authority,
-            gatewayUrl: provider.testMode
-              ? `${origin}/api/billing/callback/${gatewayName}?invoiceId=${inv.id}&test=1`
-              : undefined,
-            testMode: provider.testMode,
-          }
+      // 2. Inspect the most-recent pending checkout (any gateway/plan). A
+      //    still-usable recent pending means the user already has a checkout
+      //    in flight — reject, do NOT auto-cancel it, do NOT create another.
+      const existingPending = await tx.subscription.findFirst({
+        where: { status: 'pending' },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true, createdAt: true },
+      })
+      if (existingPending) {
+        const ageMs = now.getTime() - existingPending.createdAt.getTime()
+        if (ageMs < deps.checkoutValidityMs) {
+          throw new BillingError(
+            'a pending checkout already exists for this tenant',
+            'checkout_already_pending',
+          )
         }
-        // Pending subscription with no paid invoice authority — cancel it and
-        // fall through to create a fresh checkout.
-        await cancelPendingSubscriptionAndInvoice(existingPending.id, now)
-      } else {
-        // Different plan, OR expired pending — cancel superseded pending.
-        await cancelPendingSubscriptionAndInvoice(existingPending.id, now)
       }
-    }
 
-    // planRow from DB (for planId FK).
-    const planRow = await db.plan.findUnique({ where: { slug: planSlug } })
-    if (!planRow) throw new BillingError('plan row not found', 'plan_not_found')
+      // 3. planRow from DB (for planId FK).
+      const planRow = await tx.plan.findUnique({ where: { slug: planSlug } })
+      if (!planRow) throw new BillingError('plan row not found', 'plan_not_found')
 
-    // 4. pending Subscription.
-    const subscription = await db.subscription.create({
-      data: {
-        tenantId,
-        planId: planRow.id,
-        status: 'pending',
-        gateway: gatewayName,
-        currentPeriodStart: now,
-        currentPeriodEnd: monthlyPeriodEnd(now),
-      },
-    })
-
-    // 5. pending Invoice with authority=null. The callback URL carrying the
-    //    REAL invoice id is built + persisted AFTER this create (we need the
-    //    invoice.id first), and BEFORE provider.createPayment is invoked — so
-    //    the provider NEVER receives a PLACEHOLDER callback URL.
-    const invoice = await db.invoice.create({
-      data: {
-        tenantId,
-        subscriptionId: subscription.id,
-        planId: planRow.id,
-        amountToman: plan.priceToman,
-        gateway: gatewayName,
-        authority: null,
-        status: 'pending',
-        callbackUrl: null,
-      },
-    })
-
-    // Build the REAL callback URL with the now-known invoice id, and persist
-    // it on the invoice BEFORE calling the provider.
-    const realUrl = `${origin}/api/billing/callback/${gatewayName}?invoiceId=${invoice.id}`
-    await db.invoice.update({ where: { id: invoice.id }, data: { callbackUrl: realUrl } })
-
-    // 6. call provider.createPayment — amount is plan.priceToman (> 0).
-    let created: { authority: string; gatewayUrl: string }
-    try {
-      created = await provider.createPayment({
-        amount: plan.priceToman,
-        description: `${plan.name} plan — ${plan.priceToman.toLocaleString()} Toman`,
-        callbackUrl: realUrl,
+      // 4. pending Subscription.
+      const subscription = await tx.subscription.create({
+        data: {
+          tenantId,
+          planId: planRow.id,
+          status: 'pending',
+          gateway: gatewayName,
+          currentPeriodStart: now,
+          currentPeriodEnd: monthlyPeriodEnd(now),
+        },
       })
-    } catch (err) {
-      // 8. compensating transition: cancel the pending checkout we just made.
-      // pending→canceled is legal for both invoice + subscription.
-      await db.invoice.updateMany({
-        where: { id: invoice.id, status: 'pending' },
-        data: { status: 'canceled' as InvoiceStatus },
-      })
-      await db.subscription.updateMany({
-        where: { id: subscription.id, status: 'pending' },
-        data: { status: 'canceled' as SubscriptionStatus, canceledAt: now },
-      })
-      const code = 'create_payment_failed'
-      console.warn(`[billing/checkout] createPayment failed (invoice ${invoice.id}) code=${code}`)
-      throw new BillingError('payment creation failed', code)
-    }
 
-    // 7. persist authority.
-    await db.invoice.update({
-      where: { id: invoice.id },
-      data: { authority: created.authority },
+      // 5. pending Invoice with authority=null + REAL callbackUrl (invoice.id).
+      const invoice = await tx.invoice.create({
+        data: {
+          tenantId,
+          subscriptionId: subscription.id,
+          planId: planRow.id,
+          amountToman: plan.priceToman,
+          gateway: gatewayName,
+          authority: null,
+          status: 'pending',
+          callbackUrl: null,
+        },
+      })
+      const realUrl = `${origin}/api/billing/callback/${gatewayName}?invoiceId=${invoice.id}`
+      await tx.invoice.update({ where: { id: invoice.id }, data: { callbackUrl: realUrl } })
+
+      return { subscriptionId: subscription.id, invoiceId: invoice.id, callbackUrl: realUrl }
     })
-
-    return {
-      free: false,
-      subscriptionId: subscription.id,
-      invoiceId: invoice.id,
-      gateway: gatewayName,
-      authority: created.authority,
-      gatewayUrl: created.gatewayUrl,
-      testMode: provider.testMode,
-    }
   })
+
+  // ── EXTERNAL HTTP (lock released) ──────────────────────────────────────
+  let created2: { authority: string; gatewayUrl: string }
+  try {
+    created2 = await provider.createPayment({
+      amount: plan.priceToman,
+      description: `${plan.name} plan — ${plan.priceToman.toLocaleString()} Toman`,
+      callbackUrl: created.callbackUrl,
+    })
+  } catch {
+    // Compensating: cancel the pending rows we just created (conditional
+    // pending->canceled — legal). Never touches active.
+    await withTenant(tenantId, () => cancelPendingSubscriptionAndInvoice(created.subscriptionId, deps.now()))
+    console.warn(`[billing/checkout] createPayment failed (invoice ${created.invoiceId}) code=create_payment_failed`)
+    throw new BillingError('payment creation failed', 'create_payment_failed')
+  }
+
+  // 6. persist authority.
+  await withTenant(tenantId, () =>
+    db.invoice.update({ where: { id: created.invoiceId }, data: { authority: created2.authority } }),
+  )
+
+  return {
+    free: false,
+    subscriptionId: created.subscriptionId,
+    invoiceId: created.invoiceId,
+    gateway: gatewayName,
+    authority: created2.authority,
+    gatewayUrl: created2.gatewayUrl,
+    testMode: provider.testMode,
+  }
 }
 
 /** Cancel a pending subscription + its pending invoice (compensating). Never touches active. */
@@ -348,7 +319,6 @@ async function cancelPendingSubscriptionAndInvoice(
   subscriptionId: string,
   now: Date,
 ): Promise<void> {
-  // Conditional update — only pending rows are affected.
   await db.subscription.updateMany({
     where: { id: subscriptionId, status: 'pending' },
     data: { status: 'canceled' as SubscriptionStatus, canceledAt: now },
@@ -382,10 +352,48 @@ interface InvoiceLookup {
 }
 
 /**
- * Handle a payment gateway callback.
+ * Read the FINAL persisted Invoice status and map it to a redirect result.
+ * Used on EVERY conditional-transition-loss path (cancel, expiry,
+ * verify-failure, verify-exception, success CAS) — NEVER infer the winner.
+ * The HTTP redirect reflects the actual committed DB state.
+ */
+async function resolvePersistedInvoiceResult(
+  invoiceId: string,
+): Promise<CallbackResult> {
+  const inv = await globalDb.invoice.findUnique({
+    where: { id: invoiceId },
+    select: { status: true },
+  })
+  if (!inv) return { redirect: 'error', code: 'invoice_not_found' }
+  const status = inv.status as InvoiceStatus
+  switch (status) {
+    case 'paid':
+      return { redirect: 'success' }
+    case 'canceled':
+      return { redirect: 'canceled' }
+    case 'failed':
+      return { redirect: 'error', code: 'invoice_failed' }
+    case 'expired':
+      return { redirect: 'expired' }
+    case 'pending':
+      return { redirect: 'error', code: 'race_pending' }
+    default:
+      return { redirect: 'error', code: 'unknown_invoice_status' }
+  }
+}
+
+/**
+ * Handle a payment gateway callback. Unauthenticated. The tenant is resolved
+ * from the STORED invoice, never from the request.
  *
- * Unauthenticated. The tenant is resolved from the STORED invoice, never from
- * the request.
+ * PR #4 corrections:
+ *   - On EVERY conditional-transition loss (CAS count===0), the redirect is
+ *     resolved from the FINAL persisted Invoice status via
+ *     resolvePersistedInvoiceResult — never inferred.
+ *   - Before provider.verifyPayment, the stored Subscription is loaded inside
+ *     withTenant(invoice.tenantId) and its tenant/plan/gateway/status are
+ *     verified against the Invoice. Any failure -> `inconsistent_state`,
+ *     NO provider call, NO mutation.
  */
 export async function handleCallback(args: {
   gatewayName: string
@@ -400,9 +408,6 @@ export async function handleCallback(args: {
     return { redirect: 'error', code: 'missing_invoice' }
   }
 
-  // NARROW globalDb lookup — bypass the fail-closed tenant extension. This is
-  // the documented bootstrap boundary: we retrieve ONLY the fields needed to
-  // identify the invoice + its tenant. No mutation here.
   const invoice = (await globalDb.invoice.findUnique({
     where: { id: invoiceId },
     select: {
@@ -422,16 +427,13 @@ export async function handleCallback(args: {
     return { redirect: 'error', code: 'invoice_not_found' }
   }
 
-  // Gateway bind: the stored gateway MUST equal the path gateway.
   if (invoice.gateway !== gatewayName) {
     return { redirect: 'error', code: 'gateway_mismatch' }
   }
 
-  // Idempotency: paid is terminal-success.
   if (invoice.status === 'paid') {
     return { redirect: 'success' }
   }
-  // Other terminal statuses: idempotent no-op, return the matching redirect.
   if (invoice.status === 'canceled') {
     return { redirect: 'canceled' }
   }
@@ -441,19 +443,15 @@ export async function handleCallback(args: {
   if (invoice.status === 'expired') {
     return { redirect: 'expired' }
   }
-
-  // Only `pending` remains reachable here.
   if (invoice.status !== 'pending') {
-    // Defensive — unknown status. Do not mutate.
     return { redirect: 'error', code: 'unknown_invoice_status' }
   }
 
-  // Expiry check (derived from createdAt — no schema change).
   const now = deps.now()
+
   const ageMs = now.getTime() - invoice.createdAt.getTime()
   if (ageMs > deps.checkoutValidityMs) {
     return withTenant(invoice.tenantId, async () => {
-      // Conditional transition pending→expired (race-safe).
       const upd = await db.invoice.updateMany({
         where: { id: invoice.id, status: 'pending' },
         data: { status: 'expired' as InvoiceStatus },
@@ -463,18 +461,18 @@ export async function handleCallback(args: {
           where: { id: invoice.subscriptionId, status: 'pending' },
           data: { status: 'canceled' as SubscriptionStatus, canceledAt: now },
         })
+        return { redirect: 'expired' as CallbackRedirect }
       }
-      return { redirect: 'expired' as CallbackRedirect }
+      // Lost the CAS race — resolve from the final persisted state.
+      return resolvePersistedInvoiceResult(invoice.id)
     })
   }
 
-  // Resolve the provider. The stored gateway was bound above; now resolve.
   const provider = deps.resolveProvider(invoice.gateway)
   if (!provider) {
     return { redirect: 'error', code: 'unknown_provider' }
   }
 
-  // Provider-specific callback parsing (lives in the adapter).
   const callback = provider.parseCallback(query)
 
   if (callback.kind === 'invalid') {
@@ -484,7 +482,6 @@ export async function handleCallback(args: {
   // ── CANCEL path ───────────────────────────────────────────────────────
   if (callback.kind === 'canceled') {
     return withTenant(invoice.tenantId, async () => {
-      // Conditional pending→canceled. If 0 rows, another callback won.
       const upd = await db.invoice.updateMany({
         where: { id: invoice.id, status: 'pending' },
         data: { status: 'canceled' as InvoiceStatus },
@@ -494,14 +491,14 @@ export async function handleCallback(args: {
           where: { id: invoice.subscriptionId, status: 'pending' },
           data: { status: 'canceled' as SubscriptionStatus, canceledAt: now },
         })
+        return { redirect: 'canceled' as CallbackRedirect }
       }
-      return { redirect: 'canceled' as CallbackRedirect }
+      // Lost the CAS race — resolve from the final persisted state.
+      return resolvePersistedInvoiceResult(invoice.id)
     })
   }
 
   // ── SUCCESS_CANDIDATE path ────────────────────────────────────────────
-  // Authority bind: if the callback supplies an authority AND the protocol
-  // supports authority matching, it must equal the stored authority.
   const storedAuthority = invoice.authority ?? ''
   if (!storedAuthority) {
     return { redirect: 'error', code: 'missing_authority' }
@@ -510,8 +507,29 @@ export async function handleCallback(args: {
     return { redirect: 'error', code: 'authority_mismatch' }
   }
 
-  // Verify with the STORED authority (never the callback-supplied one as the
-  // source of truth). Amount is the persisted invoice amount.
+  // ── PR #4 §4: CONSISTENCY CHECK BEFORE provider.verifyPayment ──────────
+  // Load the stored Subscription inside the Invoice's tenant context. Require
+  // every invariant. Any failure -> inconsistent_state, NO provider call, NO
+  // mutation.
+  const consistency = await withTenant(invoice.tenantId, async () => {
+    const sub = await db.subscription.findUnique({
+      where: { id: invoice.subscriptionId },
+      select: { id: true, tenantId: true, planId: true, gateway: true, status: true },
+    })
+    if (!sub) return { ok: false as const, code: 'inconsistent_state' }
+    if (sub.tenantId !== invoice.tenantId) return { ok: false as const, code: 'inconsistent_state' }
+    if (sub.planId !== invoice.planId) return { ok: false as const, code: 'inconsistent_state' }
+    if (sub.gateway !== invoice.gateway) return { ok: false as const, code: 'inconsistent_state' }
+    if (sub.status !== 'pending') return { ok: false as const, code: 'inconsistent_state' }
+    const planRow = await db.plan.findUnique({ where: { id: invoice.planId }, select: { id: true } })
+    if (!planRow) return { ok: false as const, code: 'inconsistent_state' }
+    return { ok: true as const }
+  })
+  if (!consistency.ok) {
+    return { redirect: 'error', code: consistency.code }
+  }
+
+  // Verify with the STORED authority. Amount is the persisted invoice amount.
   let verify
   try {
     verify = await provider.verifyPayment({
@@ -520,55 +538,46 @@ export async function handleCallback(args: {
     })
   } catch {
     return withTenant(invoice.tenantId, async () => {
-      await db.invoice.updateMany({
+      const upd = await db.invoice.updateMany({
         where: { id: invoice.id, status: 'pending' },
         data: { status: 'failed' as InvoiceStatus },
       })
-      await db.subscription.updateMany({
-        where: { id: invoice.subscriptionId, status: 'pending' },
-        data: { status: 'canceled' as SubscriptionStatus, canceledAt: now },
-      })
-      return { redirect: 'error' as CallbackRedirect, code: 'verify_error' }
+      if (upd.count > 0) {
+        await db.subscription.updateMany({
+          where: { id: invoice.subscriptionId, status: 'pending' },
+          data: { status: 'canceled' as SubscriptionStatus, canceledAt: now },
+        })
+        return { redirect: 'error' as CallbackRedirect, code: 'verify_error' }
+      }
+      return resolvePersistedInvoiceResult(invoice.id)
     })
   }
 
   if (!verify.success) {
     return withTenant(invoice.tenantId, async () => {
-      await db.invoice.updateMany({
+      const upd = await db.invoice.updateMany({
         where: { id: invoice.id, status: 'pending' },
         data: { status: 'failed' as InvoiceStatus },
       })
-      await db.subscription.updateMany({
-        where: { id: invoice.subscriptionId, status: 'pending' },
-        data: { status: 'canceled' as SubscriptionStatus, canceledAt: now },
-      })
-      return { redirect: 'error' as CallbackRedirect, code: 'verify_failed' }
+      if (upd.count > 0) {
+        await db.subscription.updateMany({
+          where: { id: invoice.subscriptionId, status: 'pending' },
+          data: { status: 'canceled' as SubscriptionStatus, canceledAt: now },
+        })
+        return { redirect: 'error' as CallbackRedirect, code: 'verify_failed' }
+      }
+      return resolvePersistedInvoiceResult(invoice.id)
     })
   }
 
   // ── ATOMIC SUCCESS TRANSACTION ──────────────────────────────────────────
-  // All of: invoice→paid, new subscription→active, prior active→canceled,
-  // tenant.plan→new plan — in ONE transaction. Either all commit or none.
-  //
-  // The transaction takes a per-tenant pessimistic lock (SELECT ... FOR
-  // UPDATE on the Tenant row) at the start. This SERIALIZES concurrent
-  // success callbacks for the same tenant, guaranteeing that two competing
-  // successful checkouts cannot both leave an active subscription. (Without
-  // this lock, two concurrent success transactions could each activate their
-  // own subscription before either sees the other's commit, leaving two
-  // active rows.) This is a query-level lock — NO schema migration.
   return withTenant(invoice.tenantId, async () => {
     try {
       await db.$transaction(async (tx: any) => {
-        // 0. Per-tenant pessimistic lock — blocks competing success
-        //    transactions for the same tenant until this one commits.
         await tx.$queryRaw`SELECT 1 FROM "Tenant" WHERE "id" = ${invoice.tenantId} FOR UPDATE`
-
         const periodStart = now
         const periodEnd = monthlyPeriodEnd(now)
 
-        // 1. Conditional invoice pending→paid (race-safe). If 0 rows,
-        //    another callback already won — throw to rollback.
         const invUpd = await tx.invoice.updateMany({
           where: { id: invoice.id, status: 'pending' },
           data: {
@@ -581,7 +590,6 @@ export async function handleCallback(args: {
           throw new Error('__invoice_not_pending__')
         }
 
-        // 2. Activate the new subscription (pending→active).
         const subUpd = await tx.subscription.updateMany({
           where: { id: invoice.subscriptionId, status: 'pending' },
           data: {
@@ -594,8 +602,6 @@ export async function handleCallback(args: {
           throw new Error('__subscription_not_pending__')
         }
 
-        // 3. Cancel prior active subscriptions for the same tenant, EXCLUDING
-        //    the newly-activated one.
         await tx.subscription.updateMany({
           where: {
             tenantId: invoice.tenantId,
@@ -605,7 +611,6 @@ export async function handleCallback(args: {
           data: { status: 'canceled', canceledAt: now },
         })
 
-        // 4. Look up the plan slug from the stored plan row (authoritative).
         const planRow = await tx.plan.findUnique({
           where: { id: invoice.planId },
           select: { slug: true },
@@ -622,14 +627,11 @@ export async function handleCallback(args: {
     } catch (err) {
       const msg = err instanceof Error ? err.message : ''
       if (msg === '__invoice_not_pending__') {
-        // Another success callback won the race — the invoice is no longer
-        // pending. Idempotent: return success (it's paid).
-        return { redirect: 'success' as CallbackRedirect }
+        // Lost the success CAS — resolve from the FINAL persisted state
+        // (never assume success).
+        return resolvePersistedInvoiceResult(invoice.id)
       }
       if (msg === '__subscription_not_pending__') {
-        // Inconsistent state — the invoice transitioned but the subscription
-        // didn't. Roll back the invoice too (the transaction did). Surface a
-        // bounded error.
         console.error(
           `[billing/callback] inconsistent state invoice ${invoice.id}: subscription not pending`,
         )
