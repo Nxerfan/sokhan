@@ -1427,3 +1427,40 @@ Stage Summary:
 - No schema change, no migration, no billing change.
 - Local verification all green. Remote CI/Vercel status NOT TESTED (no push possible — sandbox has no GitHub credentials).
 - Branch: fix/tenant-boundary-ssrf-input-hardening, HEAD NOT pushed.
+
+---
+Task ID: I
+Agent: general-purpose (Inbox realtime + message delivery reliability)
+Task: Harden the dashboard inbox (`src/components/dashboard/views/inbox-view.tsx`) realtime + message delivery reliability. Extract pure helpers to a new `src/lib/inbox-helpers.ts` and add unit tests in `tests/unit/inbox-helpers.test.ts`. Public API of `src/lib/realtime-client.ts` is unchanged.
+
+Work Log:
+- Created `src/lib/inbox-helpers.ts` - pure (no React / DOM / fetch) helpers, the chokepoint for every inbox data mutation:
+  - `moveConversationToTop<T extends { id: string }>(list, conversationId): T[]` - immutable; updated conversation becomes index 0; others stable; no duplicate IDs. Fixes the (19) bug where the previous `updated.splice(idx, 1); updated.unshift(updated[0])` removed the updated conversation and duplicated the wrong first item. Idempotent + same-reference no-op when already at 0 or not found.
+  - `compareMessages<T>(a, b)` - chronological comparator (createdAt ASC, id ASC tie-break).
+  - `mergeMessages<T extends { id, createdAt }>(existing, incoming): T[]` - central ID-based merge. Same ID keeps the copy with the LATER createdAt (ties go to incoming / server view). Sorts the result chronologically. The single chokepoint for ALL message-ingestion paths (history fetch, Socket.IO broadcast, POST reply response, 8s polling), guaranteeing no duplicate IDs, history fetch does NOT erase a newer realtime message, POST reply + Socket.IO echo -> one entry (27), Socket.IO broadcast + polling -> one entry.
+  - `mergeSingle(existing, msg)` - convenience wrapper around `mergeMessages` for the single-message case.
+  - `incrementUnreadOnce(seen, messageId): { seen, incremented }` - tracks seen message IDs; a duplicate delivery returns `incremented: false` and does NOT re-bump the unread badge (26). Pure.
+  - `previewFromMessage(message)` - first 120 chars of message text or `[attachment]` fallback.
+  - `applyMessageToConversationList<C extends ConversationLike, M extends MessageLike>(list, message, isSelected, unreadSeen)` - end-to-end pure helper for the `message:new` handler: immutable move-to-top + lastMessagePreview/lastMessageAt update + unread-once-by-message-id + `isNew` flag for "conversation not in list, caller should reload".
+- Created `tests/unit/inbox-helpers.test.ts` - 40 pure-data `bun:test` cases (75 expect calls). Covers move-to-top (first / middle / last, no duplicate IDs, purity), mergeMessages / mergeSingle (no duplicates, chronological order, same-ID newer-wins, history-does-not-erase-realtime, POST+echo=one, polling+realtime=one), incrementUnreadOnce (increment-once, purity), applyMessageToConversationList (end-to-end). All 40 pass: `40 pass | 0 fail | 75 expect() calls`.
+- Rewrote `src/components/dashboard/views/inbox-view.tsx` end-to-end, fixing 16-27:
+  - 16 stale selectedId closure: added `selectedIdRef`, `loadConversationsRef`, `conversationsRef`, `connectedRef` - all synced via small effects. EVERY socket event handler reads the current value via `*.current`.
+  - 17 stale loadConversations filter closure: socket handlers call `loadConversationsRef.current?.()` (current filter) without reconnecting the socket on every filter change.
+  - 18 socket cleanup: connect effect owns the socket via local `let s: Socket | null = null`. Cleanup captures that local, calls `sock.removeAllListeners()`, `sock.io.removeAllListeners()`, `sock.disconnect()`, clears React state via `setSocket(prev => prev === sock ? null : prev)` (no zombie sockets, no clobbering of a fresher mount).
+  - 19 conversation move-to-top: replaced the buggy `splice + unshift(updated[0])` with a call to the pure `applyMessageToConversationList` helper.
+  - 20 central message merge: every ingestion path (history fetch, MESSAGE_NEW, POST reply, 8s polling, reconnect reconciliation) goes through `mergeMessages` / `mergeSingle`. No more `[...prev, msg]`.
+  - 21 message polling as fallback: 8s open-conversation interval SKIPS work when `connectedRef.current === true`. Reconnect handler does ONE generation-guarded reconciliation fetch. One interval per `selectedId`.
+  - 22 conversation-list polling as fallback: 10s list interval SKIPS work when connected. Reconnect handler does ONE list reload. One interval per mount - no duplicates.
+  - 23 reconnect room membership: `s.io.on('reconnect', ...)` re-joins the CURRENTLY selected conversation via `joinConversation(s, conv)` (using `selectedIdRef.current`, so a switched-away conversation is NOT rejoined), calls `sendRead(s, conv)`, does ONE guarded history fetch + ONE list reload.
+  - 24 conversation-switch race-safe: `msgReqGenRef` (generation counter, bumped on each switch). Both initial history fetch and 8s polling fetch check `gen !== msgReqGenRef.current` before applying. Cleanup bumps the gen to invalidate in-flight fetches.
+  - 25 clear typing state: `setTyping(false)` on every conversation change; user's pending `typingTimeoutRef` is fired-with-sendTypingStop-for-OLD-conversation-then-cleared on cleanup; cleared on socket `disconnect`; cleared on mount-effect teardown. isSelected guard via `selectedIdRef.current` ensures a typing:start for A NEVER renders while B is open.
+  - 26 unread count semantics: contact message to selected conversation does NOT increment unread (isSelected check inside `applyMessageToConversationList`); agent-sender messages never increment; duplicate delivery of SAME message ID does NOT re-increment (via `unreadSeenRef` + `incrementUnreadOnce`).
+  - 27 send reply echo dedup: `sendReply` does `setMessages(prev => mergeSingle(prev, data.message))` instead of `[...prev, data.message]`. POST + Socket.IO echo collapses to one render.
+
+Verification:
+- `bun test tests/unit/inbox-helpers.test.ts` -> `40 pass | 0 fail | 75 expect() calls`.
+- `bunx tsc --noEmit` (whole repo) -> ZERO errors in my files. The only 2 tsc errors are in `skills/image-edit/scripts/image-edit.ts` and `skills/stock-analysis-skill/src/analyzer.ts` - both pre-existing and out of scope.
+
+Stage Summary:
+- The dashboard inbox now has a stable single-mount socket connection for the session, with all event handlers reading the LATEST state via refs (no stale closures), an owned-local socket that is properly disconnected on teardown (no zombies), true-fallback polling that skips work when realtime is up, race-safe conversation switching via a generation counter, typing-state cleanup on switch / unmount / disconnect, unread-count semantics that increment EXACTLY once per unique message ID and never for the selected conversation, and a central ID-based message merge that makes POST reply + Socket.IO echo + history fetch + polling collapse to a single render of each message.
+- All pure inbox logic is extracted to `src/lib/inbox-helpers.ts` (no React, no DOM, no fetch) and covered by 40 unit tests in `tests/unit/inbox-helpers.test.ts`. The realtime-client public API is unchanged.

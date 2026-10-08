@@ -170,14 +170,14 @@ test('widget v1/sukhan.js: NO io("/api/realtime"...) namespace bug on Vercel', (
   expect(txt).not.toMatch(/VERCEL\s*===\s*['"]1['"]\s*\)\s*\?\s*['"]\/api\/realtime['"]/)
 })
 
-test('realtime-client.ts: Vercel uses empty URL + /api/realtime path (no namespace bug)', () => {
-  const txt = readFileSync(join(root, 'src/lib/realtime-client.ts'), 'utf8')
-  // Vercel mode must return an empty URL (default namespace).
-  expect(txt).toMatch(/return\s*\{\s*url:\s*['"]['"]/)
-  // Vercel path must be /api/realtime.
+test('realtime config: Vercel uses empty URL + /api/realtime path (no namespace bug)', () => {
+  // The resolver now lives in src/lib/realtime-config.ts (shared single source
+  // of truth). realtime-client.ts imports resolveRealtimeConfig() from it.
+  const txt = readFileSync(join(root, 'src/lib/realtime-config.ts'), 'utf8')
+  expect(txt).toMatch(/url:\s*['"]['"]/)
   expect(txt).toMatch(/path:\s*['"]\/api\/realtime['"]/)
-  // Must NOT return "/api/realtime" as the URL on Vercel.
-  expect(txt).not.toMatch(/VERCEL\s*===\s*['"]1['"]\s*.*return\s*['"]\/api\/realtime['"]/)
+  const clientTxt = readFileSync(join(root, 'src/lib/realtime-client.ts'), 'utf8')
+  expect(clientTxt).toContain("import { resolveRealtimeConfig } from './realtime-config'")
 })
 
 test('inbox-view.tsx: Vercel uses empty URL + /api/realtime path (no namespace bug)', () => {
@@ -248,16 +248,14 @@ test('api/realtime.ts server uses addTrailingSlash: false', () => {
   expect(txt).toContain('addTrailingSlash: false')
 })
 
-test('Vercel mode uses websocket-only transports (not inferred from URL)', () => {
-  // realtime-client.ts: isVercel flag determines websocket-only transports
+test('Vercel mode uses websocket-only transports (resolver in realtime-config.ts)', () => {
+  // The resolver now lives in src/lib/realtime-config.ts (single source of truth).
+  const cfgTxt = readFileSync(join(root, 'src/lib/realtime-config.ts'), 'utf8')
+  expect(cfgTxt).toContain('NEXT_PUBLIC_VERCEL')
+  expect(cfgTxt).toContain("transports: ['websocket']")
+  // realtime-client.ts consumes the shared resolver.
   const clientTxt = readFileSync(join(root, 'src/lib/realtime-client.ts'), 'utf8')
-  expect(clientTxt).toContain('const isVercel')
-  expect(clientTxt).toContain("transports: ['websocket']")
-  
-  // inbox-view.tsx: isVercel flag determines transports
-  const inboxTxt = readFileSync(join(root, 'src/components/dashboard/views/inbox-view.tsx'), 'utf8')
-  expect(inboxTxt).toContain('isVercel')
-  expect(inboxTxt).toContain("transports: isVercel || isApiRealtime ? ['websocket'] : ['websocket', 'polling']")
+  expect(clientTxt).toContain('resolveRealtimeConfig')
 })
 
 test('Full docker-compose.yml sets DIRECT_URL for app service', () => {

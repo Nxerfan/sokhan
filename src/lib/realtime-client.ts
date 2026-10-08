@@ -36,34 +36,9 @@ let storedCleanup: (() => void) | null = null
  * The URL is resolved ONCE at module load time so that it is stable
  * across reconnects. Tests can set the env var before loading the page.
  */
-interface SocketConfig {
-  url: string
-  path: string
-  transports: ('websocket' | 'polling')[]
-}
+import { resolveRealtimeConfig } from './realtime-config'
 
-function resolveSocketConfig(): SocketConfig {
-  const isVercel = process.env.NEXT_PUBLIC_VERCEL === '1' || process.env.VERCEL === '1'
-  if (isVercel) {
-    return { url: '', path: '/api/realtime', transports: ['websocket'] }
-  }
-  const explicit = process.env.NEXT_PUBLIC_REALTIME_URL
-  if (explicit) {
-    const isApiRealtime = explicit.includes('/api/realtime')
-    return {
-      url: explicit,
-      path: isApiRealtime ? '/api/realtime' : '/',
-      transports: isApiRealtime ? ['websocket'] : ['websocket', 'polling'],
-    }
-  }
-  return {
-    url: '/?XTransformPort=3003',
-    path: '/',
-    transports: ['websocket', 'polling'],
-  }
-}
-
-const { url: SOCKET_URL, path: SOCKET_PATH, transports: SOCKET_TRANSPORTS } = resolveSocketConfig()
+const { url: SOCKET_URL, path: SOCKET_PATH, transports: SOCKET_TRANSPORTS } = resolveRealtimeConfig()
 
 // Refresh-in-flight guard — prevents concurrent token refresh storms.
 let refreshPromise: Promise<string | null> | null = null

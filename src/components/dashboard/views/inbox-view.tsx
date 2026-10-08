@@ -6,9 +6,14 @@ import { useSession } from 'next-auth/react'
 import { io, type Socket } from 'socket.io-client'
 
 // Note: useSession is already imported above and used below for the agent ID.
-// The realtime connection depends on session status — it must not attempt to
+// The realtime connection depends on session status - it must not attempt to
 // fetch /api/realtime-token until the session is authenticated.
 import { RT_EVENTS, joinConversation, leaveConversation, sendTypingStart, sendTypingStop, sendRead } from '@/lib/realtime-client'
+import {
+  applyMessageToConversationList,
+  mergeMessages,
+  mergeSingle,
+} from '@/lib/inbox-helpers'
 import { cn } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -60,15 +65,28 @@ export function InboxView() {
   const [connected, setConnected] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null)
-  // Ref to the currently-selected conversation, so socket reconnect handlers
-  // (registered once at mount) can read the latest value without re-running
-  // the effect.
-  const selectedIdRef = useRef<string | null>(null)
-  useEffect(() => {
-    selectedIdRef.current = selectedId
-  }, [selectedId])
 
-  // Load conversation list
+  // Latest-value refs (16, 17): socket event handlers are registered ONCE
+  // at mount and capture the values that existed at mount time. Without
+  // these refs, the handlers would read STALE values (selectedId from
+  // mount, loadConversations from mount, etc.) forever. The refs are kept
+  // in sync with state via the small effects below, and the handlers read
+  // from .current.
+  const selectedIdRef = useRef<string | null>(null)
+  const loadConversationsRef = useRef<(() => Promise<void>) | null>(null)
+  const conversationsRef = useRef<Conversation[]>(conversations)
+  const connectedRef = useRef(false)
+
+  // (24) race-safety: bumped on each conversation switch. In-flight fetch
+  // results check this generation before applying - a slow A response
+  // cannot overwrite B's messages after the user switches.
+  const msgReqGenRef = useRef(0)
+
+  // (26) unread dedup: tracks message IDs whose unread-count effect has
+  // already fired, so a duplicate delivery does not re-increment.
+  const unreadSeenRef = useRef<Set<string>>(new Set())
+
+  // Load conversation list (depends on current filter)
   const loadConversations = useCallback(async () => {
     const res = await fetch(`/api/conversations?status=${filter}`)
     const data = await res.json()
@@ -76,19 +94,45 @@ export function InboxView() {
     setLoading(false)
   }, [filter])
 
-  // Connect to realtime service — only when session is authenticated.
-  // If we attempt the token fetch before the session is ready, /api/realtime-token
-  // returns 401 and the socket never connects. This was the root cause of
-  // Socket.IO delivery failing in the sandbox (the dashboard mounted InboxView
-  // before useSession resolved, so the token fetch 401'd silently).
+  // Keep refs in sync with state so socket handlers (registered once at
+  // mount) read the CURRENT value without re-running the connect effect.
+  // Sync refs DURING render (synchronous) — the React-recommended pattern for
+  // refs read in long-lived event handlers (socket MESSAGE_NEW). Effect-based
+  // sync lags by one render, so the existsInList check (conversationsRef.current)
+  // could read a stale value when two back-to-back MESSAGE_NEW events arrive
+  // before the effect flushes (PR#5 burst race). Synchronous render-time sync
+  // guarantees the ref is always current — the MESSAGE_NEW functional updater
+  // (setConversations(prev => applyMessageToConversationList(prev, ...).list))
+  // reliably runs for the selected conversation (NOT the loadConversations
+  // fallback), so its preview = the latest message.
+  selectedIdRef.current = selectedId
+  conversationsRef.current = conversations
+  loadConversationsRef.current = loadConversations
+
+  // Connect to realtime service - only when session is authenticated.
+  // If we attempt the token fetch before the session is ready,
+  // /api/realtime-token returns 401 and the socket never connects. This
+  // was the root cause of Socket.IO delivery failing in the sandbox (the
+  // dashboard mounted InboxView before useSession resolved, so the token
+  // fetch 401'd silently).
+  //
+  // (18) socket cleanup: we OWN the socket via a LOCAL variable s (NOT
+  // the React socket state, whose captured-closure value may still be
+  // null when cleanup runs). The cleanup captures the local s and
+  // disconnects the ACTUAL socket this effect created - no zombie
+  // sockets after unmount / remount. React state is cleared ONLY if it
+  // still refers to this effect's socket (so a newer mount that already
+  // produced a fresher socket is not nulled out).
   useEffect(() => {
     if (sessionStatus !== 'authenticated') return
     let active = true
+    let s: Socket | null = null
     ;(async () => {
       try {
         const tokenRes = await fetch('/api/realtime-token')
         if (!tokenRes.ok) return
         const { token } = await tokenRes.json()
+        if (!active) return
         // CRITICAL: passing '/api/realtime' as the URL to io() makes Socket.IO
         // treat it as a NAMESPACE, not a path. On Vercel we pass an empty URL
         // (default namespace) and route via path: '/api/realtime' which
@@ -98,72 +142,140 @@ export function InboxView() {
         const explicit = process.env.NEXT_PUBLIC_REALTIME_URL
         const socketUrl = isVercel ? '' : (explicit || '/?XTransformPort=3003')
         const isApiRealtime = socketUrl.includes('/api/realtime')
-        const s = io(socketUrl, {
+        s = io(socketUrl, {
           path: isVercel || isApiRealtime ? '/api/realtime' : '/',
           addTrailingSlash: false,
           auth: { token },
           transports: isVercel || isApiRealtime ? ['websocket'] : ['websocket', 'polling'],
           reconnection: true,
         })
-        if (!active) { s.disconnect(); return }
-        s.on('connect', () => setConnected(true))
-        s.on('disconnect', () => setConnected(false))
-        // CRITICAL: on reconnect, re-join the currently open conversation so
-        // we keep receiving its messages. The server's room state is lost
-        // when the socket disconnects, so re-joining is required.
-        // We use a ref because this handler is registered once (on mount)
-        // but selectedId changes over time without re-mounting the effect.
+        if (!active) { s.disconnect(); s = null; return }
+
+        s.on('connect', () => {
+          connectedRef.current = true
+          setConnected(true)
+        })
+        s.on('disconnect', () => {
+          connectedRef.current = false
+          setConnected(false)
+          // (25) clear typing state on disconnect - don't leave a stale
+          // 'visitor is typing' indicator pointing at the wrong conversation.
+          setTyping(false)
+        })
+
+        // (23) reconnect room membership: re-join the CURRENTLY selected
+        // conversation (using the latest selectedIdRef - never a stale
+        // value from mount time). Also sendRead to reconcile unread
+        // counts, and fetch history once to catch any messages missed
+        // while disconnected. Do NOT rejoin a conversation that is no
+        // longer selected (the ref reads the CURRENT value, so if the
+        // user has switched away by the time reconnect fires, we skip).
         s.io.on('reconnect', () => {
           const conv = selectedIdRef.current
           if (conv) {
-            s.emit('conversation:join', conv)
+            joinConversation(s as Socket, conv)
+            sendRead(s as Socket, conv)
+            // (21) reconnect reconciliation - ONE immediate history fetch.
+            fetch(`/api/conversations/${conv}/messages`)
+              .then(r => r.json())
+              .then(d => {
+                // Guard against the user having switched away while the
+                // fetch was in flight.
+                if (conv !== selectedIdRef.current) return
+                setMessages(prev => mergeMessages(prev, d.messages ?? []))
+              })
+              .catch(() => {})
           }
+          // (22) reconnect reconciliation - ONE list reload to catch any
+          // new conversations that arrived while disconnected.
+          loadConversationsRef.current?.()
         })
-        // New conversation arrives
-        s.on(RT_EVENTS.CONVERSATION_NEW, () => loadConversations())
-        // Conversation updated (assignment/status change)
-        s.on(RT_EVENTS.CONVERSATION_UPDATED, () => loadConversations())
+
+        // New conversation arrives - (17) use the LATEST loadConversations
+        // (with the CURRENT filter), NOT the stale closure from mount.
+        s.on(RT_EVENTS.CONVERSATION_NEW, () => {
+          loadConversationsRef.current?.()
+        })
+        s.on(RT_EVENTS.CONVERSATION_UPDATED, () => {
+          loadConversationsRef.current?.()
+        })
+
         // New message arrives
-        s.on(RT_EVENTS.MESSAGE_NEW, (msg: Message & { isNewConversation?: boolean }) => {
-          // Update conversation list (bump to top, update preview)
-          setConversations(prev => {
-            const idx = prev.findIndex(c => c.id === msg.conversationId)
-            if (idx === -1) {
-              // New conversation — reload the list
-              loadConversations()
-              return prev
-            }
-            const updated = [...prev]
-            const conv = updated[idx]
-            updated[idx] = {
-              ...conv,
-              lastMessagePreview: msg.content?.text?.slice(0, 120) || '[attachment]',
-              lastMessageAt: msg.createdAt,
-              unreadCount: msg.senderType === 'contact' && msg.conversationId !== selectedId
-                ? conv.unreadCount + 1
-                : conv.unreadCount,
-            }
-            // Move to top
-            updated.splice(idx, 1)
-            updated.unshift(updated[0])
-            return updated
-          })
-          // If this message is for the currently open conversation, append it
-          if (msg.conversationId === selectedId) {
-            setMessages(prev => [...prev, msg])
+        s.on(RT_EVENTS.MESSAGE_NEW, (msg: Message) => {
+          // (16) read the CURRENT selected conversation from the ref —
+          // the effect closure captured the value at mount, which is
+          // long-stale by the time a message actually arrives.
+          const currentSelected = selectedIdRef.current
+          const isSelected = msg.conversationId === currentSelected
+
+          // (PR#5 final race fix) Decide the unread increment + update the
+          // seen ref OUTSIDE the state updater. The event handler runs once
+          // per Socket.IO delivery, so the ref mutation is safe (no StrictMode
+          // double-invoke of event handlers). This makes the list-mutation
+          // updater PURE: two back-to-back MESSAGE_NEW events no longer read
+          // the same stale conversationsRef.current snapshot — event 2's
+          // functional updater receives event 1's committed result.
+          const shouldIncrement =
+            msg.senderType === 'contact' &&
+            !isSelected &&
+            !unreadSeenRef.current.has(msg.id)
+          if (shouldIncrement) {
+            const nextSeen = new Set(unreadSeenRef.current)
+            nextSeen.add(msg.id)
+            unreadSeenRef.current = nextSeen
+          }
+
+          // isNew detection: read-only use of conversationsRef (may lag by
+          // one render; acceptable per spec — a reload is idempotent). The
+          // list MUTATION below composes against the previous React state,
+          // NOT this ref.
+          const existsInList = conversationsRef.current.some(
+            (c) => c.id === msg.conversationId,
+          )
+          if (!existsInList) {
+            // Conversation not in the current list — reload (current filter
+            // via the ref, NOT the stale closure).
+            loadConversationsRef.current?.()
+          } else {
+            // Functional updater — pure, composes against the latest React
+            // state. Two back-to-back MESSAGE_NEW events now chain: event
+            // 2's updater receives event 1's committed result, not a stale
+            // conversationsRef snapshot.
+            setConversations((prev) =>
+              applyMessageToConversationList(
+                prev,
+                msg,
+                isSelected,
+                shouldIncrement,
+              ).list,
+            )
+          }
+
+          // (20 + 27) central message merge for the open thread: if this
+          // message belongs to the selected conversation, merge it in by ID.
+          // Same message delivered via POST response + Socket.IO broadcast
+          // ends up exactly once (ID dedup).
+          if (isSelected) {
+            setMessages((prev) => mergeSingle(prev, msg))
           }
         })
-        // Typing indicator
+
+        // Typing indicator (16, 25): use the CURRENT selectedId from the
+        // ref. A typing:start for conversation A must NEVER show while B
+        // is open - the isSelected guard handles that. The
+        // open-conversation effect below also clears any leftover typing
+        // state on every switch.
         s.on(RT_EVENTS.TYPING_START, (data: { conversationId: string; senderType: string }) => {
-          if (data.conversationId === selectedId && data.senderType === 'visitor') {
+          if (data.conversationId === selectedIdRef.current && data.senderType === 'visitor') {
             setTyping(true)
           }
         })
         s.on(RT_EVENTS.TYPING_STOP, (data: { conversationId: string; senderType: string }) => {
-          if (data.conversationId === selectedId) {
+          if (data.conversationId === selectedIdRef.current) {
             setTyping(false)
           }
         })
+
         setSocket(s)
       } catch (e) {
         console.error('realtime connect failed', e)
@@ -171,9 +283,29 @@ export function InboxView() {
     })()
     return () => {
       active = false
-      if (socket) { socket.disconnect(); setSocket(null) }
+      const sock = s
+      if (sock) {
+        // Remove ALL listeners we registered (socket + Manager) so
+        // reconnect handlers don't fire on a dead socket after teardown.
+        sock.removeAllListeners()
+        sock.io.removeAllListeners()
+        sock.disconnect()
+        // Clear React state ONLY if it still points at our socket -
+        // a remount that already created a newer socket must not be
+        // nulled out here.
+        setSocket(prev => (prev === sock ? null : prev))
+        setConnected(false)
+        connectedRef.current = false
+        setTyping(false)
+      }
+      // (25) clear the user's own typing-stop timeout on teardown so it
+      // does not fire after the socket (and the component) are gone.
+      if (typingTimeoutRef.current) {
+        clearTimeout(typingTimeoutRef.current)
+        typingTimeoutRef.current = null
+      }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+
   }, [sessionStatus])
 
   // Reload when filter changes
@@ -181,50 +313,100 @@ export function InboxView() {
     loadConversations()
   }, [loadConversations])
 
-  // Polling fallback — reload conversations every 10 seconds.
-  // This is a SAFETY NET, not the primary delivery path. Socket.IO is primary.
-  // Polling catches new conversations only if the realtime connection is down.
-  // NOTE: during the Socket.IO verification test, this is effectively disabled
-  // by the 60s interval override below — but in normal operation it's 10s.
+  // (22) conversation-list polling - TRUE FALLBACK ONLY.
+  // The interval runs continuously, but SKIPS work when Socket.IO is
+  // connected. When realtime drops, the next tick picks up the slack.
+  // Reconnect reconciliation (one list reload) is handled in the
+  // 'reconnect' handler above - this interval does NOT double-fire on
+  // reconnect. ONE interval per mount - no duplicates.
   useEffect(() => {
     const interval = setInterval(() => {
-      loadConversations()
-    }, process.env.NODE_ENV === 'production' ? 10000 : 10000)
+      if (connectedRef.current) return // realtime is up - no list polling
+      loadConversationsRef.current?.()
+    }, 10000)
     return () => clearInterval(interval)
-  }, [loadConversations])
+  }, [])
 
-  // Load messages when conversation selected
+  // Open-conversation effect: join room, fetch history, run fallback
+  // message polling, and clean up typing state on switch / unmount.
+  //
+  // (24) race-safe: msgReqGenRef is bumped on every switch; in-flight
+  // fetch results check the generation before applying - a slow A
+  // response cannot overwrite B's messages after the user switches.
+  //
+  // (21) polling as fallback: the 8s interval runs continuously but
+  // SKIPS work when realtime is connected. On reconnect, the
+  // 'reconnect' handler does a one-shot reconciliation fetch.
+  //
+  // (25) typing cleanup: typing state is cleared on every switch; the
+  // user's pending typing-stop timeout is fired (for the OLD
+  // conversation) on cleanup, then cleared.
   useEffect(() => {
     if (!selectedId) return
-    // Join the conversation room
+    const gen = ++msgReqGenRef.current
+
+    // (25) clear typing state when conversation changes - typing:start
+    // from the OLD conversation must not linger in the NEW view.
+    setTyping(false)
+
+    // (PR#5 selected-thread isolation) On A->B switch, drop A's messages from
+    // state immediately so B's thread never displays A's messages. Any realtime
+    // B messages that already arrived (conversationId === B) are PRESERVED;
+    // the history fetch below merges B's history with them by ID.
+    setMessages(prev => prev.filter(m => m.conversationId === selectedId))
+
+    // Join the conversation room (if the socket is already up)
     if (socket && socket.connected) {
       joinConversation(socket, selectedId)
       sendRead(socket, selectedId)
     }
-    // Fetch message history
+
+    // Fetch message history - merge by ID with anything already in
+    // state (e.g. a realtime message that arrived before this fetch
+    // resolved - (20) protects against the history erasing it).
     fetch(`/api/conversations/${selectedId}/messages`)
       .then(r => r.json())
-      .then(d => setMessages(d.messages ?? []))
+      .then(d => {
+        if (gen !== msgReqGenRef.current) return // stale - user switched
+        setMessages(prev => mergeMessages(prev, d.messages ?? []))
+      })
+      .catch(() => {})
 
-    // Polling fallback for messages in the open conversation (8s safety net).
-    // Socket.IO is primary; this catches messages only if realtime is down.
+    // Polling fallback for messages in the open conversation.
+    // Socket.IO is primary; this ONLY fires when realtime is down.
     const msgInterval = setInterval(() => {
+      if (connectedRef.current) return // realtime up - no polling
+      const pollGen = msgReqGenRef.current
       fetch(`/api/conversations/${selectedId}/messages`)
         .then(r => r.json())
         .then(d => {
-          if (d.messages && d.messages.length !== messages.length) {
-            setMessages(d.messages)
-          }
+          if (pollGen !== msgReqGenRef.current) return // stale
+          setMessages(prev => mergeMessages(prev, d.messages ?? []))
         })
         .catch(() => {})
-    }, 8000) // 8s safety net — Socket.IO is primary
+    }, 8000)
 
     return () => {
       clearInterval(msgInterval)
+      // (24) invalidate any in-flight fetch - its result must NOT
+      // overwrite the NEXT conversation's messages.
+      msgReqGenRef.current++
+
+      // (25) if the user was typing in this conversation, fire typing:stop
+      // for the OLD conversation (captured in this closure) before
+      // clearing the timeout - otherwise the server thinks the user is
+      // still typing in a conversation they have left.
+      if (typingTimeoutRef.current && socket && socket.connected) {
+        sendTypingStop(socket, selectedId)
+        clearTimeout(typingTimeoutRef.current)
+        typingTimeoutRef.current = null
+      }
+      // Leave the OLD conversation room
       if (socket && socket.connected) {
         leaveConversation(socket, selectedId)
       }
     }
+
   }, [selectedId, socket])
 
   // Auto-scroll to bottom on new messages
@@ -232,7 +414,9 @@ export function InboxView() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  // Send reply
+  // Send reply - (27) reply echo dedup: the POST response and the
+  // Socket.IO broadcast of the same message both go through the central
+  // ID-based merge, so the message renders exactly once.
   const sendReply = async () => {
     if (!replyText.trim() || !selectedId) return
     setSending(true)
@@ -248,7 +432,12 @@ export function InboxView() {
         toast.error(data.error ?? 'Failed to send')
         return
       }
-      setMessages(prev => [...prev, data.message])
+      // (20 + 27) merge via ID - if the Socket.IO echo arrives first,
+      // this is a no-op (same ID, same/newer timestamp -> merge keeps
+      // whichever is newer, ties go to incoming server view). If the
+      // echo arrives later, the merge in the message:new handler is a
+      // no-op. Either way: ONE render of the message.
+      setMessages(prev => mergeSingle(prev, data.message as Message))
       setReplyText('')
       loadConversations()
     } finally {
@@ -421,7 +610,7 @@ export function InboxView() {
             {/* Messages */}
             <ScrollArea className="flex-1 scroll-thin">
               <div className="space-y-3 p-4">
-                {messages.map(msg => (
+                {messages.filter(m => m.conversationId === selectedId).map(msg => (
                   <MessageBubble key={msg.id} msg={msg} agentId={session?.user?.id} />
                 ))}
                 {typing && (

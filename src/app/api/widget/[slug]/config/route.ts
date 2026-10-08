@@ -3,6 +3,7 @@ import { db } from '@/lib/db'
 import { getEffectiveWidgetConfig } from '@/lib/payments/free-plan'
 import { checkMessageLimit } from '@/lib/payments/free-plan'
 import { getRequestDomain, isDomainAllowed } from '@/lib/payments/domain-validation'
+import { resolveRealtimeConfig } from '@/lib/realtime-config'
 
 /** CORS headers for widget API responses. */
 function widgetHeaders(res: NextResponse): NextResponse {
@@ -53,9 +54,14 @@ export async function GET(
     return widgetHeaders(NextResponse.json({ error: 'not_configured' }, { status: 404 }))
   }
 
+  // Additive: realtime endpoint config so the cross-origin NPM widget does
+  // not need to know deployment topology. Older clients ignore the field.
+  const realtime = resolveRealtimeConfig()
+
   return widgetHeaders(NextResponse.json({
     slug,
     name: tenant.name,
     ...config,
+    realtime,
   }))
 }
