@@ -180,6 +180,29 @@ test.describe('Inbox stale selection (Scenario A)', () => {
     // B's thread should now be visible (visitor's first message).
     await expect(dashboardPage.getByText(firstMsgB).first()).toBeVisible({ timeout: 10000 })
 
+    // === CRITICAL ASSERTION: firstMsgA is NO LONGER present in B's thread ===
+    // Before the selected-thread-isolation fix, switching A->B left A's
+    // messages in React `messages` state and the effect merged B's history
+    // with them -> B's thread displayed firstMsgA (from A). The fix drops
+    // A's messages on switch + a render-time filter guarantees no
+    // cross-conversation message displays. Scope to the thread's message-list
+    // container (div.space-y-3 inside the thread ScrollArea) to exclude the
+    // conversation-list preview (which legitimately shows firstMsgA as A's
+    // lastMessagePreview).
+    const threadView = dashboardPage
+      .locator('div.flex.flex-1.flex-col.overflow-hidden')
+      .first()
+    const firstMsgABubbles = threadView
+      .locator('div.space-y-3')
+      .locator('p')
+      .filter({ hasText: firstMsgA })
+    await dashboardPage.waitForTimeout(1000) // let any late render settle
+    const firstMsgAInB = await firstMsgABubbles.count()
+    expect(
+      firstMsgAInB,
+      `firstMsgA ("${firstMsgA}") must NO LONGER be present in B's thread after switching A->B (selected-thread isolation regression - found ${firstMsgAInB} occurrence(s))`,
+    ).toBe(0)
+
     // === Visitor A sends a NEW message to A (B is currently selected) ===
     const newMsgA = `NEW_A_${stampA}`
     await visitorSend(dashboardPage.request, slug, tokenA, newMsgA)
@@ -193,10 +216,12 @@ test.describe('Inbox stale selection (Scenario A)', () => {
     // messages to the messages array when B is selected (the handler
     // reads selectedIdRef.current = B, so isSelected = false for A's
     // message), so the count must be 0.
-    const threadView = dashboardPage
-      .locator('div.flex.flex-1.flex-col.overflow-hidden')
-      .first()
-    const leakedBubbles = threadView.locator('p').filter({ hasText: newMsgA })
+    // (threadView already defined above; reuse it. newMsgA must not leak
+    // into B's thread while B is selected.)
+    const leakedBubbles = threadView
+      .locator('div.space-y-3')
+      .locator('p')
+      .filter({ hasText: newMsgA })
 
     // Give the realtime delivery path a moment to land in case a future
     // regression re-introduces a stale-closure handler that incorrectly
