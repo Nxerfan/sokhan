@@ -59,7 +59,7 @@ docker compose up -d --build
 
 #### Lite edition (small VPS / single-user)
 
-Includes: Next.js app (SQLite), realtime service (in-memory), Caddy. No Postgres, no Redis.
+Includes: Next.js app, realtime service (in-memory), Caddy, PostgreSQL. No Redis.
 
 ```bash
 docker compose -f docker-compose.lite.yml up -d --build
@@ -147,19 +147,19 @@ The original Sukhan copyright notice and license must be preserved in all copies
 
 | Feature | Lite | Full |
 |---------|------|------|
-| Database | SQLite (single file) | PostgreSQL |
+| Database | PostgreSQL (small container) | PostgreSQL |
 | Realtime adapter | In-memory (single instance) | Redis (multi-instance) |
 | Containers | 3 (app + realtime + caddy) | 5 (app + realtime + postgres + redis + caddy) |
 | RAM usage | ~512 MB | ~1 GB |
 | Horizontal scaling | No | Yes (add more `realtime` replicas) |
-| Backup complexity | Copy the SQLite file | `pg_dump` + uploads volume |
+| Backup complexity | `pg_dump` + uploads volume | `pg_dump` + uploads volume |
 | Best for | Personal use, small team, dev/staging | Production, multi-tenant, scaling |
 
 ### When to choose Lite
 
 - Single VPS with ≤ 1 GB RAM.
 - Personal or small-team use (under ~100 concurrent users).
-- Simple backup (just copy the SQLite file).
+- Simple backup (`pg_dump`).
 - No need for multi-instance realtime or Postgres features.
 
 ### When to choose Full
@@ -175,9 +175,9 @@ The original Sukhan copyright notice and license must be preserved in all copies
    ```bash
    docker compose -f docker-compose.lite.yml down
    ```
-2. Export SQLite data:
+2. Export PostgreSQL data:
    ```bash
-   # The SQLite file lives in the sqlite-data volume — extract it:
+   # Use pg_dump to export the database:
    docker run --rm -v sukhan_sqlite-data:/data -v $(pwd):/backup alpine \
      cp /data/sukhan.db /backup/sukhan-backup.db
    ```
@@ -228,12 +228,12 @@ docker compose cp ./uploads-backup-YYYYMMDD app:/app/uploads
 docker compose up -d
 ```
 
-### Lite edition (SQLite file)
+### Lite edition (PostgreSQL)
 
 **Backup:**
 
 ```bash
-# Just copy the SQLite file — simple!
+# Use pg_dump — simple!
 docker compose -f docker-compose.lite.yml cp app:/app/data ./data-backup-$(date +%Y%m%d)
 ```
 
