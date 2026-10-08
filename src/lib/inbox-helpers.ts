@@ -221,25 +221,22 @@ export function applyMessageToConversationList<
   list: C[],
   message: M,
   isSelected: boolean,
-  unreadSeen: Set<string>,
+  /** Whether the caller decided to increment unread for this message.
+   *  Computed OUTSIDE the React state updater (from the unread-seen ref)
+   *  so the updater stays PURE — two back-to-back MESSAGE_NEW events chain
+   *  correctly under React StrictMode double-invocation. */
+  shouldIncrementUnread: boolean,
 ): {
   list: C[]
   isNew: boolean
   incrementedUnread: boolean
-  seen: Set<string>
 } {
   const idx = list.findIndex((c) => c.id === message.conversationId)
   if (idx === -1) {
-    return { list, isNew: true, incrementedUnread: false, seen: unreadSeen }
+    return { list, isNew: true, incrementedUnread: false }
   }
   const conv = list[idx]
-  let incrementedUnread = false
-  let seen = unreadSeen
-  if (message.senderType === 'contact' && !isSelected) {
-    const r = incrementUnreadOnce(seen, message.id)
-    seen = r.seen
-    incrementedUnread = r.incremented
-  }
+  const incrementedUnread = shouldIncrementUnread
   const updatedConv: C = {
     ...conv,
     lastMessagePreview: previewFromMessage(message),
@@ -252,6 +249,5 @@ export function applyMessageToConversationList<
     list: moveConversationToTop(next, message.conversationId),
     isNew: false,
     incrementedUnread,
-    seen,
   }
 }

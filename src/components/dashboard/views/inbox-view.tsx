@@ -193,38 +193,61 @@ export function InboxView() {
 
         // New message arrives
         s.on(RT_EVENTS.MESSAGE_NEW, (msg: Message) => {
-          // (16) read the CURRENT selected conversation from the ref -
+          // (16) read the CURRENT selected conversation from the ref —
           // the effect closure captured the value at mount, which is
           // long-stale by the time a message actually arrives.
           const currentSelected = selectedIdRef.current
           const isSelected = msg.conversationId === currentSelected
 
-          // (19 + 26) apply the pure helper: immutable move-to-top,
-          // lastMessagePreview update, and unread-once-by-message-id.
-          // Reads the latest conversations list from conversationsRef
-          // (NOT a stale closure).
-          const result = applyMessageToConversationList(
-            conversationsRef.current,
-            msg,
-            isSelected,
-            unreadSeenRef.current,
-          )
-          unreadSeenRef.current = result.seen
-
-          if (result.isNew) {
-            // Conversation not in the current list - reload (with the
-            // current filter via the ref, NOT the stale closure).
-            loadConversationsRef.current?.()
-          } else {
-            setConversations(result.list)
+          // (PR#5 final race fix) Decide the unread increment + update the
+          // seen ref OUTSIDE the state updater. The event handler runs once
+          // per Socket.IO delivery, so the ref mutation is safe (no StrictMode
+          // double-invoke of event handlers). This makes the list-mutation
+          // updater PURE: two back-to-back MESSAGE_NEW events no longer read
+          // the same stale conversationsRef.current snapshot — event 2's
+          // functional updater receives event 1's committed result.
+          const shouldIncrement =
+            msg.senderType === 'contact' &&
+            !isSelected &&
+            !unreadSeenRef.current.has(msg.id)
+          if (shouldIncrement) {
+            const nextSeen = new Set(unreadSeenRef.current)
+            nextSeen.add(msg.id)
+            unreadSeenRef.current = nextSeen
           }
 
-          // (20 + 27) central message merge for the open thread: if
-          // this message belongs to the selected conversation, merge it
-          // in by ID. Same message delivered via POST response +
-          // Socket.IO broadcast ends up exactly once (ID dedup).
+          // isNew detection: read-only use of conversationsRef (may lag by
+          // one render; acceptable per spec — a reload is idempotent). The
+          // list MUTATION below composes against the previous React state,
+          // NOT this ref.
+          const existsInList = conversationsRef.current.some(
+            (c) => c.id === msg.conversationId,
+          )
+          if (!existsInList) {
+            // Conversation not in the current list — reload (current filter
+            // via the ref, NOT the stale closure).
+            loadConversationsRef.current?.()
+          } else {
+            // Functional updater — pure, composes against the latest React
+            // state. Two back-to-back MESSAGE_NEW events now chain: event
+            // 2's updater receives event 1's committed result, not a stale
+            // conversationsRef snapshot.
+            setConversations((prev) =>
+              applyMessageToConversationList(
+                prev,
+                msg,
+                isSelected,
+                shouldIncrement,
+              ).list,
+            )
+          }
+
+          // (20 + 27) central message merge for the open thread: if this
+          // message belongs to the selected conversation, merge it in by ID.
+          // Same message delivered via POST response + Socket.IO broadcast
+          // ends up exactly once (ID dedup).
           if (isSelected) {
-            setMessages(prev => mergeSingle(prev, msg))
+            setMessages((prev) => mergeSingle(prev, msg))
           }
         })
 

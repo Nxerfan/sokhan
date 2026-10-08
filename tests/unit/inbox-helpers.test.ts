@@ -340,7 +340,7 @@ describe('compareMessages', () => {
   })
 })
 
-// ─── applyMessageToConversationList ───────────────────────────────
+// ─── applyMessageToConversationList (pure — shouldIncrementUnread: boolean) ───
 
 describe('applyMessageToConversationList', () => {
   function setup() {
@@ -355,78 +355,143 @@ describe('applyMessageToConversationList', () => {
   test('updates the affected conversation and moves it to index 0', () => {
     const { list } = setup()
     const msg = makeMsg('m99', 'b', 'new message', '2024-01-01T00:00:30.000Z', 'contact')
-    const r = applyMessageToConversationList(list, msg, false, new Set())
+    const r = applyMessageToConversationList(list, msg, false, false)
     expect(r.isNew).toBe(false)
     expect(r.list.map((c) => c.id)).toEqual(['b', 'a', 'c'])
     expect(r.list[0].lastMessagePreview).toBe('new message')
     expect(r.list[0].lastMessageAt).toBe('2024-01-01T00:00:30.000Z')
   })
 
-  test('increments unread for a contact message to a NON-selected conversation, once', () => {
+  test('increments unread when shouldIncrementUnread=true; no-op when false (dedup)', () => {
     const { list } = setup()
     const msg = makeMsg('m99', 'b', 'new', '2024-01-01T00:00:30.000Z', 'contact')
-    const seen = new Set<string>()
-    const r1 = applyMessageToConversationList(list, msg, false, seen)
+    const r1 = applyMessageToConversationList(list, msg, false, true)
     expect(r1.incrementedUnread).toBe(true)
-    expect(r1.list.find((c) => c.id === 'b')!.unreadCount).toBe(2) // was 1
-    // Duplicate delivery of the SAME message — must NOT increment again.
-    const r2 = applyMessageToConversationList(r1.list, msg, false, r1.seen)
+    expect(r1.list.find((c) => c.id === 'b')!.unreadCount).toBe(2)
+    const r2 = applyMessageToConversationList(r1.list, msg, false, false)
     expect(r2.incrementedUnread).toBe(false)
-    expect(r2.list.find((c) => c.id === 'b')!.unreadCount).toBe(2) // unchanged
+    expect(r2.list.find((c) => c.id === 'b')!.unreadCount).toBe(2)
   })
 
-  test('does NOT increment unread when the conversation IS selected (§26)', () => {
+  test('does NOT increment unread when the conversation IS selected', () => {
     const { list } = setup()
     const msg = makeMsg('m99', 'b', 'new', '2024-01-01T00:00:30.000Z', 'contact')
-    const r = applyMessageToConversationList(list, msg, true /* selected */, new Set())
+    const r = applyMessageToConversationList(list, msg, true, false)
     expect(r.incrementedUnread).toBe(false)
-    expect(r.list.find((c) => c.id === 'b')!.unreadCount).toBe(1) // unchanged
+    expect(r.list.find((c) => c.id === 'b')!.unreadCount).toBe(1)
   })
 
   test('does NOT increment unread for an AGENT-sender message', () => {
     const { list } = setup()
     const msg = makeMsg('m99', 'b', 'agent reply', '2024-01-01T00:00:30.000Z', 'agent')
-    const r = applyMessageToConversationList(list, msg, false, new Set())
+    const r = applyMessageToConversationList(list, msg, false, false)
     expect(r.incrementedUnread).toBe(false)
-    expect(r.list.find((c) => c.id === 'b')!.unreadCount).toBe(1) // unchanged
+    expect(r.list.find((c) => c.id === 'b')!.unreadCount).toBe(1)
   })
 
   test('returns isNew=true when the conversation is not in the list (caller reloads)', () => {
     const { list } = setup()
     const msg = makeMsg('m99', 'unknown-conv', 'hi', '2024-01-01T00:00:30.000Z', 'contact')
-    const r = applyMessageToConversationList(list, msg, false, new Set())
+    const r = applyMessageToConversationList(list, msg, false, false)
     expect(r.isNew).toBe(true)
-    expect(r.list).toBe(list) // unchanged — caller will reload
+    expect(r.list).toBe(list)
   })
 
-  test('produces NO duplicate IDs after move-to-top (the §19 fix)', () => {
+  test('produces NO duplicate IDs after move-to-top', () => {
     const { list } = setup()
     const msg = makeMsg('m99', 'c', 'new', '2024-01-01T00:00:30.000Z', 'contact')
-    const r = applyMessageToConversationList(list, msg, false, new Set())
+    const r = applyMessageToConversationList(list, msg, false, false)
     const ids = r.list.map((c) => c.id)
     expect(new Set(ids).size).toBe(ids.length)
-    expect(ids[0]).toBe('c') // updated → index 0
-    expect(ids.slice(1)).toEqual(['a', 'b']) // others stable
+    expect(ids[0]).toBe('c')
+    expect(ids.slice(1)).toEqual(['a', 'b'])
   })
 
   test('does NOT mutate the input list (purity)', () => {
     const { list } = setup()
     const snapshot = list.map((c) => ({ ...c }))
     const msg = makeMsg('m99', 'b', 'new', '2024-01-01T00:00:30.000Z', 'contact')
-    applyMessageToConversationList(list, msg, false, new Set())
+    applyMessageToConversationList(list, msg, false, false)
     expect(list.map((c) => ({ ...c }))).toEqual(snapshot)
   })
 
   test('preview falls back to [attachment] for a no-text message', () => {
     const { list } = setup()
     const msg: MessageLike = {
-      id: 'm99',
-      conversationId: 'b',
-      senderType: 'contact',
-      createdAt: '2024-01-01T00:00:30.000Z',
-      content: {},
+      id: 'm99', conversationId: 'b', senderType: 'contact',
+      createdAt: '2024-01-01T00:00:30.000Z', content: {},
     }
-    const r = applyMessageToConversationList(list, msg, false, new Set())
+    const r = applyMessageToConversationList(list, msg, false, false)
     expect(r.list.find((c) => c.id === 'b')!.lastMessagePreview).toBe('[attachment]')
+  })
+})
+
+// ─── Burst: two MESSAGE_NEW events before a render (PR#5 final race fix) ───
+
+describe('Burst: two back-to-back MESSAGE_NEW events (PR#5 race fix)', () => {
+  function applyEvent(
+    list: ConversationLike[],
+    seen: Set<string>,
+    msg: MessageLike,
+    isSelected: boolean,
+  ): { list: ConversationLike[]; seen: Set<string> } {
+    const shouldIncrement =
+      msg.senderType === 'contact' && !isSelected && !seen.has(msg.id)
+    const nextSeen = shouldIncrement ? new Set(seen).add(msg.id) : seen
+    const r = applyMessageToConversationList(list, msg, isSelected, shouldIncrement)
+    return { list: r.isNew ? list : r.list, seen: nextSeen }
+  }
+
+  test('Case A: same non-selected conversation, two distinct IDs → unread = 2', () => {
+    const list = [
+      makeConv('a', '', 0, '2024-01-01T00:00:00.000Z'),
+      makeConv('b', '', 0, '2024-01-01T00:00:10.000Z'),
+    ]
+    let seen = new Set<string>()
+    const msg1 = makeMsg('m1', 'b', 'first', '2024-01-01T00:00:30.000Z', 'contact')
+    const msg2 = makeMsg('m2', 'b', 'second', '2024-01-01T00:00:31.000Z', 'contact')
+    let state = list
+    const r1 = applyEvent(state, seen, msg1, false); state = r1.list; seen = r1.seen
+    const r2 = applyEvent(state, seen, msg2, false); state = r2.list; seen = r2.seen
+    expect(seen.has('m1')).toBe(true)
+    expect(seen.has('m2')).toBe(true)
+    expect(seen.size).toBe(2)
+    expect(state.find((c) => c.id === 'b')!.unreadCount).toBe(2)
+    expect(state.find((c) => c.id === 'b')!.lastMessagePreview).toBe('second')
+  })
+
+  test('Case A: duplicate redelivery of the SAME message ID → unread stays 1', () => {
+    const list = [makeConv('b', '', 0, '2024-01-01T00:00:10.000Z')]
+    let seen = new Set<string>()
+    const msg = makeMsg('m1', 'b', 'first', '2024-01-01T00:00:30.000Z', 'contact')
+    let state = list
+    const r1 = applyEvent(state, seen, msg, false); state = r1.list; seen = r1.seen
+    const r2 = applyEvent(state, seen, msg, false); state = r2.list; seen = r2.seen
+    const r3 = applyEvent(state, seen, msg, false); state = r3.list; seen = r3.seen
+    expect(seen.size).toBe(1)
+    expect(state.find((c) => c.id === 'b')!.unreadCount).toBe(1)
+  })
+
+  test('Case B: two different conversations back-to-back → both previews preserved, latest at index 0', () => {
+    const list = [
+      makeConv('a', 'old-a', 0, '2024-01-01T00:00:00.000Z'),
+      makeConv('b', 'old-b', 0, '2024-01-01T00:00:10.000Z'),
+    ]
+    let seen = new Set<string>()
+    const msgA = makeMsg('m1', 'a', 'preview-A', '2024-01-01T00:00:30.000Z', 'contact')
+    const msgB = makeMsg('m2', 'b', 'preview-B', '2024-01-01T00:00:31.000Z', 'contact')
+    let state = list
+    const r1 = applyEvent(state, seen, msgA, false); state = r1.list; seen = r1.seen
+    const r2 = applyEvent(state, seen, msgB, false); state = r2.list; seen = r2.seen
+    expect(state.find((c) => c.id === 'a')!.lastMessagePreview).toBe('preview-A')
+    expect(state.find((c) => c.id === 'b')!.lastMessagePreview).toBe('preview-B')
+    expect(state.find((c) => c.id === 'a')!.lastMessageAt).toBe('2024-01-01T00:00:30.000Z')
+    expect(state.find((c) => c.id === 'b')!.lastMessageAt).toBe('2024-01-01T00:00:31.000Z')
+    const ids = state.map((c) => c.id)
+    expect(new Set(ids).size).toBe(ids.length)
+    expect(ids.length).toBe(2)
+    expect(ids[0]).toBe('b')
+    expect(state.find((c) => c.id === 'a')!.unreadCount).toBe(1)
+    expect(state.find((c) => c.id === 'b')!.unreadCount).toBe(1)
   })
 })
