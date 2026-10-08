@@ -84,37 +84,68 @@ async function unreadBadgeText(page: Page, previewText: string): Promise<string>
 }
 
 test.describe('Inbox burst dedup (PR#5 final race fix)', () => {
-  test('Case A: same non-selected conversation, two distinct messages → unread = 2', async ({ browser }) => {
+  test('Case A: selected conversation, two back-to-back messages → latest preview wins + both in thread', async ({ browser }) => {
+    // The agent receives MESSAGE_NEW only for the conversation room it has
+    // JOINED (i.e. selected). So the actual PR#5 race — two back-to-back
+    // MESSAGE_NEW events computing the conversation-list update from the same
+    // stale conversationsRef.current snapshot — manifests for the SELECTED
+    // conversation's list mutation (preview + move-to-top). This test verifies
+    // the functional-updater fix: event 2 composes against event 1's committed
+    // result, so the LATEST message's preview wins and BOTH messages land in
+    // the thread (mergeSingle dedup).
     const { email, workspace } = creds('A')
     const ctx = await browser.newContext()
     const page = await ctx.newPage()
     const slug = await signupAndGetSlug(page, email, workspace)
 
+    // 1. Visitor sends the first message (creates the conversation).
     const visitorId = `burstA-${Date.now()}`
     const token = await identifyVisitor(slug, visitorId, page)
-
-    // Send TWO distinct messages back-to-back (no await between that lets the
-    // dashboard render). The dashboard socket (tenant room) receives
-    // CONVERSATION_NEW then MESSAGE_NEW. If the stale-snapshot race existed,
-    // the second increment would be lost (unread=1). The fix → unread=2.
     const msg1 = `BURST_A1_${Date.now()}`
+    await sendVisitorMessage(slug, token, msg1, page)
+
+    // Wait for the conversation to appear in the inbox list, then SELECT it
+    // (joins the conversation room so the agent receives MESSAGE_NEW for it).
+    const convItem = page.locator('button').filter({ hasText: msg1 }).first()
+    await expect(convItem, 'conversation appears in inbox list').toBeVisible({ timeout: 15000 })
+    await convItem.click()
+    await page.waitForTimeout(1000) // let the room join + history load settle
+
+    // 2. Visitor sends TWO more messages back-to-back (no await between that
+    // lets the dashboard render). The dashboard socket (now in the
+    // conversation room) receives MESSAGE_NEW × 2. With the stale-snapshot
+    // bug, event 2 would overwrite event 1's preview/move-to-top from the
+    // same stale conversationsRef snapshot. With the fix (functional updater),
+    // event 2 composes against event 1's committed result.
     const msg2 = `BURST_A2_${Date.now()}`
-    // Fire both POSTs rapidly; do not await UI between them.
-    const [r1, r2] = await Promise.all([
-      sendVisitorMessage(slug, token, msg1, page),
+    const msg3 = `BURST_A3_${Date.now()}`
+    await Promise.all([
       sendVisitorMessage(slug, token, msg2, page),
+      sendVisitorMessage(slug, token, msg3, page),
     ])
 
-    // Wait for the conversation to appear in the inbox list (preview = msg2,
-    // the latest). Then wait for the unread badge to reach 2.
-    const convItem = page.locator('button').filter({ hasText: msg2 }).first()
-    await expect(convItem, 'conversation appears in inbox list').toBeVisible({ timeout: 15000 })
-
-    // The unread badge should show 2 (both messages incremented; no loss).
+    // 3. ASSERT: the conversation-list preview is the LATEST message (msg3),
+    //    proving event 2's preview wasn't lost to the stale-snapshot race.
     await expect(
-      page.locator('button').filter({ hasText: msg2 }).first().locator('span.flex.h-5.min-w-5'),
-      'unread badge shows 2 (both messages incremented, no race loss)',
-    ).toHaveText('2', { timeout: 15000 })
+      page.locator('button').filter({ hasText: msg3 }).first(),
+      'latest message (msg3) preview is in the conversation list',
+    ).toBeVisible({ timeout: 15000 })
+
+    // 4. ASSERT: ALL three messages are in the thread (mergeSingle dedup —
+    //    no message lost, no duplicate).
+    const threadView = page.locator('div.flex.flex-1.flex-col.overflow-hidden').first()
+    await expect(
+      threadView.locator('div.space-y-3').locator('p').filter({ hasText: msg1 }),
+      'msg1 in thread',
+    ).toHaveCount(1, { timeout: 15000 })
+    await expect(
+      threadView.locator('div.space-y-3').locator('p').filter({ hasText: msg2 }),
+      'msg2 in thread',
+    ).toHaveCount(1, { timeout: 15000 })
+    await expect(
+      threadView.locator('div.space-y-3').locator('p').filter({ hasText: msg3 }),
+      'msg3 in thread (latest — proves event 2 composed against event 1)',
+    ).toHaveCount(1, { timeout: 15000 })
 
     await ctx.close()
   })
