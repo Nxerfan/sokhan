@@ -111,25 +111,33 @@ test.describe('Inbox burst dedup (PR#5 final race fix)', () => {
     const msg1 = `BURST_A1_${stamp}`
     await sendVisitorMessage(slug, token, msg1, page)
 
+    // CRITICAL (Lite robustness): explicitly wait for the CONVERSATION_NEW-
+    // triggered /api/conversations list reload RESPONSE to settle BEFORE the
+    // burst. In a slower environment (Lite), this server-authoritative reload
+    // can be slow + return AFTER the burst's local functional-updater updates,
+    // overwriting the preview with a pre-burst server state (msg1) rather than
+    // the functional-updater result (msg3). Waiting for the response ensures
+    // the reload is fully done + rendered before the burst, so the ONLY list
+    // mutation during the burst is the local MESSAGE_NEW functional updater.
+    const listReloadPromise = page.waitForResponse(
+      (res) => res.url().includes('/api/conversations') && !res.url().includes('/messages') && res.status() === 200,
+      { timeout: 15000 },
+    ).catch(() => null)
+
     // Wait for the conversation to appear in the inbox list (addressed by the
     // unique contact NAME — the preview changes as burst messages arrive, but
     // the name is stable).
     const convAItem = page.locator('button').filter({ hasText: nameA }).first()
     await expect(convAItem, 'conversation A appears in inbox list (by name)').toBeVisible({ timeout: 15000 })
+    await listReloadPromise // the CONVERSATION_NEW reload response settled
 
-    // CRITICAL (Lite robustness): wait for the conversation-A list item's
-    // preview to settle at msg1 — this PROVES the CONVERSATION_NEW-triggered
-    // loadConversations has returned with conversation A (preview=msg1) AND the
-    // conversationsRef has synced (the useEffect that mirrors `conversations`
-    // into conversationsRef runs after that render). This guarantees the
-    // MESSAGE_NEW handler's `existsInList` check (conversationsRef.current)
-    // will find conversation A when msg2/msg3 arrive → the local functional
-    // updater (setConversations(prev => applyMessageToConversationList(...)))
-    // runs, NOT the loadConversations fallback. Without this settle, a slower
-    // environment (Lite) can race: conversationsRef lags → existsInList=false →
-    // loadConversations runs instead of the local functional updater → the
-    // preview is server-authoritative (transiently stale) rather than the
-    // functional-updater result under test.
+    // Wait for the conversation-A list item's preview to settle at msg1 —
+    // PROVES the CONVERSATION_NEW loadConversations returned with conversation A
+    // (preview=msg1) AND conversationsRef synced (the useEffect that mirrors
+    // `conversations` into conversationsRef runs after that render). This
+    // guarantees the MESSAGE_NEW handler's existsInList check finds conversation
+    // A when msg2/msg3 arrive → the local functional updater runs (NOT the
+    // loadConversations fallback).
     await expect(
       convAItem.locator('p.truncate').first(),
       'conversation-A preview settled at msg1 (CONVERSATION_NEW load done + ref synced)',
@@ -150,7 +158,7 @@ test.describe('Inbox burst dedup (PR#5 final race fix)', () => {
 
     // Extra settle for the conversationsRef sync effect to flush (defensive
     // against React concurrent-mode effect deferral in slower environments).
-    await page.waitForTimeout(1500)
+    await page.waitForTimeout(2000)
 
     // 3. Visitor sends TWO more messages back-to-back (no await between that
     //    lets the dashboard render). The dashboard socket (now in the
