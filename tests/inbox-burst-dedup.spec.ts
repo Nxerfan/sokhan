@@ -113,10 +113,27 @@ test.describe('Inbox burst dedup (PR#5 final race fix)', () => {
 
     // Wait for the conversation to appear in the inbox list (addressed by the
     // unique contact NAME — the preview changes as burst messages arrive, but
-    // the name is stable). This also proves the CONVERSATION_NEW-triggered
-    // loadConversations (server-authoritative list) has settled BEFORE the burst.
+    // the name is stable).
     const convAItem = page.locator('button').filter({ hasText: nameA }).first()
     await expect(convAItem, 'conversation A appears in inbox list (by name)').toBeVisible({ timeout: 15000 })
+
+    // CRITICAL (Lite robustness): wait for the conversation-A list item's
+    // preview to settle at msg1 — this PROVES the CONVERSATION_NEW-triggered
+    // loadConversations has returned with conversation A (preview=msg1) AND the
+    // conversationsRef has synced (the useEffect that mirrors `conversations`
+    // into conversationsRef runs after that render). This guarantees the
+    // MESSAGE_NEW handler's `existsInList` check (conversationsRef.current)
+    // will find conversation A when msg2/msg3 arrive → the local functional
+    // updater (setConversations(prev => applyMessageToConversationList(...)))
+    // runs, NOT the loadConversations fallback. Without this settle, a slower
+    // environment (Lite) can race: conversationsRef lags → existsInList=false →
+    // loadConversations runs instead of the local functional updater → the
+    // preview is server-authoritative (transiently stale) rather than the
+    // functional-updater result under test.
+    await expect(
+      convAItem.locator('p.truncate').first(),
+      'conversation-A preview settled at msg1 (CONVERSATION_NEW load done + ref synced)',
+    ).toContainText(msg1, { timeout: 15000 })
 
     // 2. SELECT conversation A (joins the conversation room so the agent
     //    receives MESSAGE_NEW for it).
@@ -131,15 +148,9 @@ test.describe('Inbox burst dedup (PR#5 final race fix)', () => {
       'msg1 in thread (room join + history fetch done)',
     ).toHaveCount(1, { timeout: 15000 })
 
-    // (Defensive) Wait for any in-flight server-authoritative /api/conversations
-    // list reload to settle before the burst — so the only list mutation during
-    // the burst is the local MESSAGE_NEW functional updater (no overlap that
-    // could transiently overwrite the preview). If no reload is in flight, the
-    // short timeout + catch moves on.
-    await page.waitForResponse(
-      (res) => res.url().includes('/api/conversations') && !res.url().includes('/messages') && res.status() === 200,
-      { timeout: 4000 },
-    ).catch(() => {})
+    // Extra settle for the conversationsRef sync effect to flush (defensive
+    // against React concurrent-mode effect deferral in slower environments).
+    await page.waitForTimeout(1500)
 
     // 3. Visitor sends TWO more messages back-to-back (no await between that
     //    lets the dashboard render). The dashboard socket (now in the
