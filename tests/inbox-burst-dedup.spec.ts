@@ -54,10 +54,12 @@ async function signupAndGetSlug(page: Page, email: string, workspace: string): P
   return (await tenantRes.json()).tenant.slug
 }
 
-/** Identify a visitor + get a realtime token. */
-async function identifyVisitor(slug: string, visitorId: string, page: Page) {
+/** Identify a visitor + get a realtime token. Pass a unique `name` so the
+ * conversation-list item can be addressed by name (not by the transient
+ * message preview, which changes as burst messages arrive). */
+async function identifyVisitor(slug: string, visitorId: string, page: Page, name: string) {
   const res = await page.request.post(`${BASE}/api/widget/${slug}/contact`, {
-    data: { visitorId, name: visitorId.slice(0, 8) },
+    data: { visitorId, name },
     headers: { 'Content-Type': 'application/json' },
   })
   expect(res.ok(), `contact POST ok (status=${res.status()})`).toBe(true)
@@ -84,77 +86,110 @@ async function unreadBadgeText(page: Page, previewText: string): Promise<string>
 }
 
 test.describe('Inbox burst dedup (PR#5 final race fix)', () => {
-  test('Case A: selected conversation, two back-to-back messages → latest preview wins + both in thread', async ({ browser }) => {
+  test('Case A: selected conversation, two back-to-back messages → conversation-list preview = latest (msg3) + both in thread', async ({ browser }) => {
     // The agent receives MESSAGE_NEW only for the conversation room it has
     // JOINED (i.e. selected). So the actual PR#5 race — two back-to-back
     // MESSAGE_NEW events computing the conversation-list update from the same
     // stale conversationsRef.current snapshot — manifests for the SELECTED
-    // conversation's list mutation (preview + move-to-top). This test verifies
-    // the functional-updater fix: event 2 composes against event 1's committed
-    // result, so the LATEST message's preview wins and BOTH messages land in
-    // the thread (mergeSingle dedup).
+    // conversation's LIST mutation (preview + move-to-top via
+    // setConversations(prev => applyMessageToConversationList(prev, msg, ...).list)).
+    // This test verifies the functional-updater fix: event 2 composes against
+    // event 1's committed result, so the conversation-list item for A reflects
+    // the LATEST burst message (msg3) as its preview — proving event 2 didn't
+    // overwrite event 1 from a stale snapshot — AND both messages land in the
+    // thread (mergeSingle dedup).
     const { email, workspace } = creds('A')
     const ctx = await browser.newContext()
     const page = await ctx.newPage()
     const slug = await signupAndGetSlug(page, email, workspace)
 
     // 1. Visitor sends the first message (creates the conversation).
-    const visitorId = `burstA-${Date.now()}`
-    const token = await identifyVisitor(slug, visitorId, page)
-    const msg1 = `BURST_A1_${Date.now()}`
+    const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+    const visitorId = `burstA-${stamp}`
+    const nameA = `BurstA-${stamp}`
+    const token = await identifyVisitor(slug, visitorId, page, nameA)
+    const msg1 = `BURST_A1_${stamp}`
     await sendVisitorMessage(slug, token, msg1, page)
 
-    // Wait for the conversation to appear in the inbox list, then SELECT it
-    // (joins the conversation room so the agent receives MESSAGE_NEW for it).
-    const convItem = page.locator('button').filter({ hasText: msg1 }).first()
-    await expect(convItem, 'conversation appears in inbox list').toBeVisible({ timeout: 15000 })
-    await convItem.click()
+    // Wait for the conversation to appear in the inbox list (addressed by the
+    // unique contact NAME — the preview changes as burst messages arrive, but
+    // the name is stable). This also proves the CONVERSATION_NEW-triggered
+    // loadConversations (server-authoritative list) has settled BEFORE the burst.
+    const convAItem = page.locator('button').filter({ hasText: nameA }).first()
+    await expect(convAItem, 'conversation A appears in inbox list (by name)').toBeVisible({ timeout: 15000 })
 
-    // Wait for msg1 to appear in the thread — this proves the conversation
-    // room JOIN + the history fetch have completed, so the agent's socket is
-    // in room A and will receive MESSAGE_NEW for msg2/msg3.
+    // 2. SELECT conversation A (joins the conversation room so the agent
+    //    receives MESSAGE_NEW for it).
+    await convAItem.click()
+
+    // Wait for msg1 to appear in the thread — proves the conversation-room
+    // JOIN + the history fetch completed, so the agent's socket is in room A
+    // and will receive MESSAGE_NEW for msg2/msg3.
     const threadView = page.locator('div.flex.flex-1.flex-col.overflow-hidden').first()
     await expect(
       threadView.locator('div.space-y-3').locator('p').filter({ hasText: msg1 }),
       'msg1 in thread (room join + history fetch done)',
     ).toHaveCount(1, { timeout: 15000 })
 
-    // 2. Visitor sends TWO more messages back-to-back (no await between that
-    // lets the dashboard render). The dashboard socket (now in the
-    // conversation room) receives MESSAGE_NEW × 2. With the stale-snapshot
-    // bug, event 2 would overwrite event 1's preview/move-to-top from the
-    // same stale conversationsRef snapshot. With the fix (functional updater),
-    // event 2 composes against event 1's committed result.
-    const msg2 = `BURST_A2_${Date.now()}`
-    const msg3 = `BURST_A3_${Date.now()}`
+    // (Defensive) Wait for any in-flight server-authoritative /api/conversations
+    // list reload to settle before the burst — so the only list mutation during
+    // the burst is the local MESSAGE_NEW functional updater (no overlap that
+    // could transiently overwrite the preview). If no reload is in flight, the
+    // short timeout + catch moves on.
+    await page.waitForResponse(
+      (res) => res.url().includes('/api/conversations') && !res.url().includes('/messages') && res.status() === 200,
+      { timeout: 4000 },
+    ).catch(() => {})
+
+    // 3. Visitor sends TWO more messages back-to-back (no await between that
+    //    lets the dashboard render). The dashboard socket (now in the
+    //    conversation room) receives MESSAGE_NEW × 2. The conversation-list
+    //    functional updater must compose both: setConversations(prev =>
+    //    applyMessageToConversationList(prev, msg, ...).list). With the
+    //    stale-snapshot bug, event 2 would compute from the same stale
+    //    conversationsRef.current as event 1 → event 1's preview/move-to-top
+    //    lost, preview = msg2 (not msg3). With the fix, event 2 composes
+    //    against event 1's committed result → preview = msg3 (the latest).
+    const msg2 = `BURST_A2_${stamp}`
+    const msg3 = `BURST_A3_${stamp}`
     await Promise.all([
       sendVisitorMessage(slug, token, msg2, page),
       sendVisitorMessage(slug, token, msg3, page),
     ])
 
-    // 3. ASSERT: ALL three messages are in the thread (mergeSingle dedup —
-    //    no message lost, no duplicate). This robustly verifies the MESSAGE_NEW
-    //    functional-updater chaining: both back-to-back events landed (msg2
-    //    AND msg3), proving event 2 composed against event 1's committed
-    //    result rather than a stale conversationsRef snapshot. (The
-    //    conversation-list preview assertion is omitted because the
-    //    server-authoritative loadConversations — triggered by sendRead's
-    //    CONVERSATION_UPDATED on select — can transiently overwrite the
-    //    local preview in a timing-dependent way that is not the race under
-    //    test; the thread merge is the reliable signal.)
+    // 4. ASSERT (thread): BOTH burst messages appear once in the thread
+    //    (mergeSingle dedup — no loss, no duplicate).
     await expect(
       threadView.locator('div.space-y-3').locator('p').filter({ hasText: msg2 }),
       'msg2 in thread (event 1 of the back-to-back burst landed)',
     ).toHaveCount(1, { timeout: 15000 })
     await expect(
       threadView.locator('div.space-y-3').locator('p').filter({ hasText: msg3 }),
-      'msg3 in thread (event 2 composed against event 1 — no stale-snapshot loss)',
+      'msg3 in thread (event 2 landed — no stale-snapshot loss)',
     ).toHaveCount(1, { timeout: 15000 })
+
+    // 5. CRITICAL ASSERT (conversation-list): the conversation-A list item's
+    //    preview reflects the LATEST burst message (msg3) — proving the
+    //    conversation-list functional updater composed event 2 against event
+    //    1's committed result (preview = msg3), NOT a stale snapshot (which
+    //    would leave the preview at msg2, event 1's value, losing event 2's
+    //    preview/move-to-top). Addressed by the stable contact name; the
+    //    preview <p> inside the item must contain msg3.
+    await expect(
+      convAItem.locator('p.truncate').filter({ hasText: msg3 }),
+      'conversation-A list preview = latest burst message (msg3) — functional updater composed both events',
+    ).toBeVisible({ timeout: 15000 })
+    // And explicitly NOT msg2 (the older burst message) as the preview.
+    const previewText = (await convAItem.locator('p.truncate').first().textContent()) ?? ''
+    expect(
+      previewText,
+      'conversation-A preview must be msg3 (latest), not msg2 (stale-snapshot would leave it at msg2)',
+    ).toContain(msg3)
 
     await ctx.close()
   })
 
-  test('Case B: two different conversations back-to-back → both previews preserved, latest at index 0', async ({ browser }) => {
+test('Case B: two different conversations back-to-back → both previews preserved, latest at index 0', async ({ browser }) => {
     const { email, workspace } = creds('B')
     const ctx = await browser.newContext()
     const page = await ctx.newPage()
@@ -162,14 +197,14 @@ test.describe('Inbox burst dedup (PR#5 final race fix)', () => {
 
     // Visitor A sends a message (creates conversation A).
     const visitorA = `burstBA-${Date.now()}`
-    const tokenA = await identifyVisitor(slug, visitorA, page)
+    const tokenA = await identifyVisitor(slug, visitorA, page, `BurstBA-${Date.now()}`)
     const msgA = `BURST_B_A_${Date.now()}`
     await sendVisitorMessage(slug, tokenA, msgA, page)
     await expect(page.locator('button').filter({ hasText: msgA }).first()).toBeVisible({ timeout: 15000 })
 
     // Visitor B sends a message (creates conversation B) immediately after.
     const visitorB = `burstBB-${Date.now()}`
-    const tokenB = await identifyVisitor(slug, visitorB, page)
+    const tokenB = await identifyVisitor(slug, visitorB, page, `BurstBB-${Date.now()}`)
     const msgB = `BURST_B_B_${Date.now()}`
     await sendVisitorMessage(slug, tokenB, msgB, page)
     await expect(page.locator('button').filter({ hasText: msgB }).first()).toBeVisible({ timeout: 15000 })
