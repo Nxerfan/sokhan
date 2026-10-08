@@ -237,16 +237,31 @@ export function applyMessageToConversationList<
   }
   const conv = list[idx]
   const incrementedUnread = shouldIncrementUnread
-  const updatedConv: C = {
-    ...conv,
-    lastMessagePreview: previewFromMessage(message),
-    lastMessageAt: message.createdAt,
-    unreadCount: incrementedUnread ? conv.unreadCount + 1 : conv.unreadCount,
-  }
+  // createdAt guard: only update the preview + lastMessageAt + move-to-top if
+  // this message is at least as new as the conversation's current last message.
+  // Socket.IO delivery order is non-deterministic when two messages are sent
+  // back-to-back (Promise.all -> concurrent server processing -> MESSAGE_NEW
+  // published out of order). Without this guard, an OLDER message arriving
+  // AFTER a newer one would overwrite the preview with stale text. The guard
+  // ensures the preview always reflects the LATEST message (by createdAt),
+  // regardless of delivery order — the actual race the burst test exercises.
+  const isAtLeastAsNew = message.createdAt >= conv.lastMessageAt
+  const updatedConv: C = incrementedUnread || isAtLeastAsNew
+    ? {
+        ...conv,
+        ...(isAtLeastAsNew
+          ? {
+              lastMessagePreview: previewFromMessage(message),
+              lastMessageAt: message.createdAt,
+            }
+          : {}),
+        unreadCount: incrementedUnread ? conv.unreadCount + 1 : conv.unreadCount,
+      }
+    : conv
   const next = list.slice()
   next[idx] = updatedConv
   return {
-    list: moveConversationToTop(next, message.conversationId),
+    list: isAtLeastAsNew ? moveConversationToTop(next, message.conversationId) : next,
     isNew: false,
     incrementedUnread,
   }

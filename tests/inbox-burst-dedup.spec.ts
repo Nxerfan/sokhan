@@ -197,25 +197,18 @@ test.describe('Inbox burst dedup (PR#5 final race fix)', () => {
     //    Use a polling loop (30s) that logs the actual preview text on each
     //    poll — this surfaces the real state in the CI log if the assertion
     //    fails (diagnostic for the intermittent flake).
-    const previewP = convAItem.locator('p.truncate').first()
-    let previewText = ''
-    const deadline = Date.now() + 30000
-    while (Date.now() < deadline) {
-      previewText = (await previewP.textContent().catch(() => null)) ?? ''
-      // eslint-disable-next-line no-console
-      console.log(`[burst Case A] conv-A preview text now: "${previewText}" (want msg3="${msg3}")`)
-      if (previewText.includes(msg3)) break
-      await page.waitForTimeout(500)
-    }
-    expect(
-      previewText,
-      'conversation-A list preview must contain msg3 (the latest burst message) — functional updater composed both events',
-    ).toContain(msg3)
-    // And explicitly NOT msg2 (the older burst message) as the preview.
-    expect(
-      previewText,
-      'conversation-A preview must NOT be msg2 (stale-snapshot would leave it at msg2)',
-    ).not.toContain(msg2)
+    // 5. CRITICAL ASSERT (conversation-list): the conversation-A list item's
+    //    preview reflects the LATEST burst message (msg3) — proving the
+    //    conversation-list functional updater composed both events correctly
+    //    AND the createdAt guard prevented an out-of-order delivery (msg3
+    //    before msg2) from leaving the preview at the older msg2.
+    await expect(
+      convAItem.locator('p.truncate').filter({ hasText: msg3 }),
+      'conversation-A list preview = latest burst message (msg3) — functional updater + createdAt guard',
+    ).toBeVisible({ timeout: 15000 })
+    const previewText = (await convAItem.locator('p.truncate').first().textContent()) ?? ''
+    expect(previewText, 'conversation-A preview must be msg3 (latest), not msg2').toContain(msg3)
+    expect(previewText, 'conversation-A preview must NOT be msg2 (older)').not.toContain(msg2)
 
     await ctx.close()
   })

@@ -472,6 +472,26 @@ describe('Burst: two back-to-back MESSAGE_NEW events (PR#5 race fix)', () => {
     expect(state.find((c) => c.id === 'b')!.unreadCount).toBe(1)
   })
 
+  test('out-of-order delivery: older message (msg2) after newer (msg3) does NOT overwrite the preview', () => {
+    // Two messages sent back-to-back via Promise.all -> the server processes
+    // them concurrently -> Socket.IO MESSAGE_NEW delivery order is non-
+    // deterministic. If msg3 (newer createdAt) is delivered BEFORE msg2
+    // (older createdAt), msg2's applyMessageToConversationList must NOT
+    // overwrite the preview with its stale (older) text. The createdAt guard
+    // ensures the preview always reflects the LATEST message.
+    const list = [makeConv('b', 'old', 0, '2024-01-01T00:00:10.000Z')]
+    let seen = new Set<string>()
+    // msg3 (newer) arrives FIRST.
+    const msg3 = makeMsg('m3', 'b', 'preview-3', '2024-01-01T00:00:31.000Z', 'contact')
+    // msg2 (older) arrives SECOND (out of order).
+    const msg2 = makeMsg('m2', 'b', 'preview-2', '2024-01-01T00:00:30.000Z', 'contact')
+    let state = list
+    const r3 = applyEvent(state, seen, msg3, false); state = r3.list; seen = r3.seen
+    const r2 = applyEvent(state, seen, msg2, false); state = r2.list; seen = r2.seen
+    // The preview must be msg3 (the NEWER message), NOT msg2 (the older).
+    expect(state.find((c) => c.id === 'b')!.lastMessagePreview).toBe('preview-3')
+    expect(state.find((c) => c.id === 'b')!.lastMessageAt).toBe('2024-01-01T00:00:31.000Z')
+  })
   test('Case B: two different conversations back-to-back → both previews preserved, latest at index 0', () => {
     const list = [
       makeConv('a', 'old-a', 0, '2024-01-01T00:00:00.000Z'),
