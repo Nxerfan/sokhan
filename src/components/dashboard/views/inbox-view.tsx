@@ -96,9 +96,18 @@ export function InboxView() {
 
   // Keep refs in sync with state so socket handlers (registered once at
   // mount) read the CURRENT value without re-running the connect effect.
-  useEffect(() => { selectedIdRef.current = selectedId }, [selectedId])
-  useEffect(() => { conversationsRef.current = conversations }, [conversations])
-  useEffect(() => { loadConversationsRef.current = loadConversations }, [loadConversations])
+  // Sync refs DURING render (synchronous) — the React-recommended pattern for
+  // refs read in long-lived event handlers (socket MESSAGE_NEW). Effect-based
+  // sync lags by one render, so the existsInList check (conversationsRef.current)
+  // could read a stale value when two back-to-back MESSAGE_NEW events arrive
+  // before the effect flushes (PR#5 burst race). Synchronous render-time sync
+  // guarantees the ref is always current — the MESSAGE_NEW functional updater
+  // (setConversations(prev => applyMessageToConversationList(prev, ...).list))
+  // reliably runs for the selected conversation (NOT the loadConversations
+  // fallback), so its preview = the latest message.
+  selectedIdRef.current = selectedId
+  conversationsRef.current = conversations
+  loadConversationsRef.current = loadConversations
 
   // Connect to realtime service - only when session is authenticated.
   // If we attempt the token fetch before the session is ready,
