@@ -147,7 +147,7 @@ The original Sukhan copyright notice and license must be preserved in all copies
 
 | Feature | Lite | Full |
 |---------|------|------|
-| Database | PostgreSQL (small container) | PostgreSQL |
+| Database | PostgreSQL (small container, postgres:16-alpine) | PostgreSQL |
 | Realtime adapter | In-memory (single instance) | Redis (multi-instance) |
 | Containers | 3 (app + realtime + caddy) | 5 (app + realtime + postgres + redis + caddy) |
 | RAM usage | ~512 MB | ~1 GB |
