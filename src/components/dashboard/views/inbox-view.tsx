@@ -340,6 +340,12 @@ export function InboxView() {
     // from the OLD conversation must not linger in the NEW view.
     setTyping(false)
 
+    // (PR#5 selected-thread isolation) On A->B switch, drop A's messages from
+    // state immediately so B's thread never displays A's messages. Any realtime
+    // B messages that already arrived (conversationId === B) are PRESERVED;
+    // the history fetch below merges B's history with them by ID.
+    setMessages(prev => prev.filter(m => m.conversationId === selectedId))
+
     // Join the conversation room (if the socket is already up)
     if (socket && socket.connected) {
       joinConversation(socket, selectedId)
@@ -595,7 +601,7 @@ export function InboxView() {
             {/* Messages */}
             <ScrollArea className="flex-1 scroll-thin">
               <div className="space-y-3 p-4">
-                {messages.map(msg => (
+                {messages.filter(m => m.conversationId === selectedId).map(msg => (
                   <MessageBubble key={msg.id} msg={msg} agentId={session?.user?.id} />
                 ))}
                 {typing && (
