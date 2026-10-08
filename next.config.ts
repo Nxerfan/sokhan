@@ -29,9 +29,11 @@ const nextConfig: NextConfig = {
   // Only enable standalone output for Docker. Vercel must NOT use this.
   ...(isVercelBuild() ? {} : { output: "standalone" }),
   typescript: {
-    // NOTE: this is a pre-existing repo setting; do NOT change it in this
-    // PR without coordinating with the broader type cleanup work.
-    ignoreBuildErrors: true,
+    // Production builds MUST fail on real TypeScript errors — no suppression.
+    // (Previously ignoreBuildErrors: true, which allowed broken builds to
+    // pass. The skills/ sample code has its own tsconfig and is excluded from
+    // the app's tsconfig.json so it does not block the production build.)
+    ignoreBuildErrors: false,
   },
   reactStrictMode: false,
 };

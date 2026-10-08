@@ -39,6 +39,7 @@
   "exclude": [
     "node_modules",
     "packages/**",
-    "mini-services/**"
+    "mini-services/**",
+    "skills/**"
   ]
 }
