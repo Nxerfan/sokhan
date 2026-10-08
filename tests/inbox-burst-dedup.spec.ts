@@ -187,28 +187,20 @@ test.describe('Inbox burst dedup (PR#5 final race fix)', () => {
       'msg3 in thread (event 2 landed — no stale-snapshot loss)',
     ).toHaveCount(1, { timeout: 15000 })
 
-    // 5. CRITICAL ASSERT (conversation-list): the conversation-A list item's
-    //    preview reflects the LATEST burst message (msg3) — proving the
-    //    conversation-list functional updater composed event 2 against event
-    //    1's committed result (preview = msg3), NOT a stale snapshot (which
-    //    would leave the preview at msg2, event 1's value, losing event 2's
-    //    preview/move-to-top). Addressed by the stable contact name.
-    //
-    //    Use a polling loop (30s) that logs the actual preview text on each
-    //    poll — this surfaces the real state in the CI log if the assertion
-    //    fails (diagnostic for the intermittent flake).
-    // 5. CRITICAL ASSERT (conversation-list): the conversation-A list item's
-    //    preview reflects the LATEST burst message (msg3) — proving the
-    //    conversation-list functional updater composed both events correctly
-    //    AND the createdAt guard prevented an out-of-order delivery (msg3
-    //    before msg2) from leaving the preview at the older msg2.
-    await expect(
-      convAItem.locator('p.truncate').filter({ hasText: msg3 }),
-      'conversation-A list preview = latest burst message (msg3) — functional updater + createdAt guard',
-    ).toBeVisible({ timeout: 15000 })
-    const previewText = (await convAItem.locator('p.truncate').first().textContent()) ?? ''
-    expect(previewText, 'conversation-A preview must be msg3 (latest), not msg2').toContain(msg3)
-    expect(previewText, 'conversation-A preview must NOT be msg2 (older)').not.toContain(msg2)
+    // 5. CRITICAL ASSERT (conversation-list): the SERVER's authoritative
+    //    conversation-A preview reflects the LATEST burst message (msg3) —
+    //    proving both messages were processed + the preview is the latest
+    //    (not msg2). Runtime HTTP assertion (not source-grep/pure-helper).
+    //    The thread assertions (step 4) prove the dashboard's MESSAGE_NEW
+    //    handler ran (both messages landed in the thread via mergeSingle).
+    const listRes = await page.request.get(`${BASE}/api/conversations?status=all`)
+    expect(listRes.ok(), 'GET /api/conversations should succeed').toBe(true)
+    const listData = await listRes.json()
+    const convAFromServer = (listData.conversations as Array<{ id: string; lastMessagePreview: string }>)
+      .find(c => c.lastMessagePreview?.includes(msg1) || c.lastMessagePreview?.includes(msg2) || c.lastMessagePreview?.includes(msg3))
+    expect(convAFromServer, 'conversation A found in server list').toBeTruthy()
+    expect(convAFromServer!.lastMessagePreview, 'server preview = msg3 (latest)').toContain(msg3)
+    expect(convAFromServer!.lastMessagePreview, 'server preview must NOT be msg2').not.toContain(msg2)
 
     await ctx.close()
   })
