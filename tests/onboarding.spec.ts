@@ -153,10 +153,14 @@ test.describe('Widget Installation & Onboarding UX', () => {
     //    step 7 because the Free plan allows exactly 1 domain — after
     //    the first valid add, the Add button becomes disabled. With
     //    count=0 the Add button is enabled; the strict domain validator
-    //    rejects a path-bearing string and the user sees a toast.
+    //    rejects an empty-label hostname ('example..com') and the user
+    //    sees a toast. (A path-bearing string like 'bad.example.com/path'
+    //    would have its path SILENTLY STRIPPED by normalizeDomain —
+    //    so it would NOT fail validation. An empty label, by contrast,
+    //    is unambiguously rejected.)
     const domainInput = page.getByPlaceholder('example.com')
     await expect(domainInput).toBeVisible({ timeout: 10_000 })
-    await domainInput.fill('bad.example.com/path')
+    await domainInput.fill('example..com')
     await page.getByRole('button', { name: /^افزودن$|^Add$/ }).click()
     await expect(
       page.getByText(/Invalid domain|دامنه نامعتبر است/).first(),
