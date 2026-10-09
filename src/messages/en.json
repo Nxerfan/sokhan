@@ -78,8 +78,9 @@
     "today": "Today",
     "noConversations": "No conversations yet",
     "noConversationsHint": "Embed your widget to start chatting with visitors.",
-    "comingSoon": "Coming in Module 2",
-    "comingSoonHint": "Real-time messaging, routing and automation land next."
+    "comingSoon": "Coming Soon",
+    "comingSoonHint": "Integrations will be added soon. Real-time messaging and automation are already live.",
+    "integrationsHint": "Integrations will be coming soon."
   },
   "settings": {
     "generalTitle": "General",
