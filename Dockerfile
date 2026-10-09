@@ -114,6 +114,14 @@ COPY --from=builder /app/prisma ./prisma
 #   Cannot find module '../../src/lib/realtime-token-shared'
 COPY --from=builder /app/src/lib/realtime-token-shared.ts ./src/lib/realtime-token-shared.ts
 
+# Copy the canonical secret validator + the runtime validator script.
+# docker-entrypoint.sh runs `bun /app/scripts/validate-secrets.ts ...` at
+# boot time to reject missing/empty/placeholder NEXTAUTH_SECRET and (in
+# web mode) POSTGRES_PASSWORD. This is the SAME validator the unit tests
+# exercise — there is no mirrored/duplicated validation logic.
+COPY --from=builder /app/src/lib/secret-validation.ts ./src/lib/secret-validation.ts
+COPY --from=builder /app/scripts ./scripts
+
 # Copy the realtime service source + install its production deps.
 # We use --frozen-lockfile so the build fails loudly if out of sync.
 COPY --from=builder /app/mini-services/realtime ./mini-services/realtime

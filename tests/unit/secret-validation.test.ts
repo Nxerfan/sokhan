@@ -263,29 +263,27 @@ test('.env.docker.example: does NOT silently auto-generate secrets', () => {
   expect(src).not.toMatch(/POSTGRES_PASSWORD=\$\(/)
 })
 
-test('docker-entrypoint.sh: rejects NEXTAUTH_SECRET placeholder values', () => {
+test('docker-entrypoint.sh: invokes the canonical validator for NEXTAUTH_SECRET (no inline validator)', () => {
   const src = readSrc('docker-entrypoint.sh')
-  // The entrypoint must reference the historical placeholder so its
-  // node one-liner rejects it. (If a future PR removes the placeholder
-  // from .env.docker.example but forgets to update the entrypoint,
-  // this test fails.)
-  expect(src).toContain('CHANGE_ME_generate_with_openssl_rand_base64_32')
-  expect(src).toContain('sukhan-dev-secret-DO-NOT-USE-IN-PRODUCTION-a7f3b2c1')
-  expect(src).toContain('CHANGE_ME')
+  // The entrypoint must delegate to the canonical validator script
+  // (which imports validateNextAuthSecret from src/lib/secret-validation.ts).
+  // This is the synchronization guarantee: the runtime path uses the
+  // SAME validators the unit tests exercise. There is no inline
+  // mirrored validator in the entrypoint.
+  expect(src).toContain('bun /app/scripts/validate-secrets.ts nextauth')
+  // Must NOT contain the old inline `CHANGE_ME` references — the
+  // canonical validator in src/lib/secret-validation.ts owns the
+  // known-bad list now.
+  expect(src).not.toContain('CHANGE_ME_generate_with_openssl_rand_base64_32')
+  expect(src).not.toContain('sukhan-dev-secret-DO-NOT-USE-IN-PRODUCTION-a7f3b2c1')
   // The entrypoint must mention the variable NAME (never the value).
-  // Verify a failure-echo line never interpolates the raw secret value
-  // — i.e. `$NEXTAUTH_SECRET` as a bare variable reference, NOT
-  // `$NEXTAUTH_SECRET_FAILURE` (which is the failure message text, not
-  // the secret). Use word-boundary matching so the suffix `_FAILURE`
-  // does NOT match.
+  // Word-boundary matching so $NEXTAUTH_SECRET_FAILURE (the failure
+  // message variable) does NOT match $NEXTAUTH_SECRET (the secret value).
   const echoLines = src.split('\n').filter(l => {
     const t = l.trim()
     return (t.startsWith('echo ') || t.startsWith('echo\t'))
   })
   for (const ln of echoLines) {
-    // $NEXTAUTH_SECRET followed by end-of-line, whitespace, or a non-word
-    // char (NOT a letter/digit/underscore — those would be part of a
-    // longer variable name like $NEXTAUTH_SECRET_FAILURE).
     const bareRef = /\$NEXTAUTH_SECRET(?![A-Za-z0-9_])/
     const bracedRef = /\$\{NEXTAUTH_SECRET\}/
     expect(
@@ -295,23 +293,24 @@ test('docker-entrypoint.sh: rejects NEXTAUTH_SECRET placeholder values', () => {
   }
 })
 
-test('docker-entrypoint.sh: rejects POSTGRES_PASSWORD placeholder values', () => {
+test('docker-entrypoint.sh: invokes the canonical validator for POSTGRES_PASSWORD in web mode', () => {
   const src = readSrc('docker-entrypoint.sh')
-  // The entrypoint delegates POSTGRES_PASSWORD enforcement to
-  // docker-compose's ${VAR:?...} guard. Verify the compose files
-  // reference the placeholder name correctly (so a fresh .env with
-  // the placeholder can't start the stack).
-  // (The runtime validator in src/lib/secret-validation.ts is the
-  // canonical guard; compose ${VAR:?...} guards the empty case.)
-  // This test documents that the entrypoint itself does not echo
-  // the password value.
+  // The entrypoint must delegate to the canonical validator for
+  // POSTGRES_PASSWORD too (in web mode only — realtime mode doesn't
+  // touch the database). This is the contract fix that closes the
+  // POSTGRES_PASSWORD runtime-enforcement gap.
+  expect(src).toContain('bun /app/scripts/validate-secrets.ts postgres')
+  // Word-boundary matching so $POSTGRES_PASSWORD_FAILURE (the failure
+  // message variable) does NOT match $POSTGRES_PASSWORD (the password value).
   const echoLines = src.split('\n').filter(l => {
     const t = l.trim()
     return (t.startsWith('echo ') || t.startsWith('echo\t')) && t.toLowerCase().includes('postgres_password')
   })
   for (const ln of echoLines) {
+    const bareRef = /\$POSTGRES_PASSWORD(?![A-Za-z0-9_])/
+    const bracedRef = /\$\{POSTGRES_PASSWORD\}/
     expect(
-      ln.includes('$POSTGRES_PASSWORD') || ln.includes('${POSTGRES_PASSWORD}'),
+      bareRef.test(ln) || bracedRef.test(ln),
       `docker-entrypoint.sh echo line must NOT print POSTGRES_PASSWORD value (line: ${ln.trim()})`,
     ).toBe(false)
   }

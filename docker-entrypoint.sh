@@ -7,11 +7,18 @@ set -e
 #
 # Fail-closed behavior:
 #   - Missing/empty/placeholder NEXTAUTH_SECRET → exit 1
+#     (validated for BOTH web + realtime modes — both need it)
 #   - Missing/empty/placeholder POSTGRES_PASSWORD (web mode) → exit 1
 #   - Missing DATABASE_URL    → exit 1
 #   - Missing DIRECT_URL      → exit 1 (migrations need it)
 #   - Migration failure       → exit 1 (do NOT start with unmigrated schema)
 #   - Migration success       → start node server.js
+#
+# Secret validation is performed by `bun /app/scripts/validate-secrets.ts`,
+# which imports the SAME canonical validators (`validateNextAuthSecret`,
+# `validatePostgresPassword`) from `src/lib/secret-validation.ts` that the
+# unit tests exercise. This keeps the runtime path synchronized with the
+# tested module — there is no mirrored/duplicated validation logic.
 #
 # Secret values are NEVER echoed. Failure messages mention the
 # variable NAME only (e.g. "NEXTAUTH_SECRET is set to a known
@@ -19,36 +26,15 @@ set -e
 # into any echo, log, or error message.
 # ============================================================
 
-# Validate NEXTAUTH_SECRET against missing/empty/placeholder values.
-# Implemented in node via the shared src/lib/secret-validation.ts so
-# the same logic is unit-tested and reused by the realtime service.
-NEXTAUTH_SECRET_FAILURE=$(node -e "
-const mod = require('/app/node_modules/bun') ? null : null;
-" 2>/dev/null || true)
-# The above is a placeholder; we use a self-contained node one-liner
-# that mirrors src/lib/secret-validation.ts. Keeping it inline avoids a
-# boot-time dependency on the TS toolchain inside the Docker web image.
-NEXTAUTH_SECRET_FAILURE=$(node -e '
-const v = process.env.NEXTAUTH_SECRET;
-let ok = true;
-let reason = "";
-if (v === undefined || v === null) { ok = false; reason = "NEXTAUTH_SECRET is missing. Set it to a strong random value (openssl rand -base64 32)."; }
-else {
-  const t = String(v).trim();
-  if (t === "") { ok = false; reason = "NEXTAUTH_SECRET is empty. Set it to a strong random value (openssl rand -base64 32)."; }
-  else {
-    const knownBad = new Set([
-      "CHANGE_ME_generate_with_openssl_rand_base64_32",
-      "sukhan-dev-secret-DO-NOT-USE-IN-PRODUCTION-a7f3b2c1",
-    ]);
-    if (knownBad.has(t) || t.startsWith("CHANGE_ME")) {
-      ok = false;
-      reason = "NEXTAUTH_SECRET is set to a known placeholder value. Generate a real secret (openssl rand -base64 32) and set it before starting in production.";
-    }
-  }
-}
-if (!ok) { process.stdout.write(reason); process.exit(0); }
-')
+# Determine the mode first so we know whether POSTGRES_PASSWORD is
+# required (web mode needs it; realtime mode does not).
+MODE="${1:-web}"
+shift 2>/dev/null || true
+
+# --- NEXTAUTH_SECRET (required for BOTH web + realtime modes) -------
+# Capture stderr (where validate-secrets.ts writes its failure message)
+# without printing it if the validation succeeds (exit 0 → empty output).
+NEXTAUTH_SECRET_FAILURE=$(bun /app/scripts/validate-secrets.ts nextauth 2>&1) || true
 if [ -n "$NEXTAUTH_SECRET_FAILURE" ]; then
   echo ""
   echo "============================================================"
@@ -65,13 +51,38 @@ if [ -n "$NEXTAUTH_SECRET_FAILURE" ]; then
   exit 1
 fi
 
-MODE="${1:-web}"
-shift 2>/dev/null || true
-
 case "$MODE" in
   web)
     echo "[entrypoint] Starting Next.js (web) on port ${PORT:-3000}..."
     echo "[entrypoint] NODE_ENV=${NODE_ENV:-production}"
+
+    # --- POSTGRES_PASSWORD (required for web mode only) --------------
+    # Web mode touches the database directly (Prisma migrations + the
+    # Next.js app runtime). POSTGRES_PASSWORD is passed in by
+    # docker-compose.yml / docker-compose.lite.yml as a standalone env
+    # var on the `app` service (NOT parsed back out of DATABASE_URL —
+    # the entrypoint reads the env var directly).
+    #
+    # Docker Compose's ${POSTGRES_PASSWORD:?...} guard catches missing
+    # /empty values at compose-interpolation time. This runtime check
+    # ADDITIONALLY rejects known-bad placeholder values (e.g.
+    # `CHANGE_ME_strong_password_here`) that would otherwise pass the
+    # compose guard because they are non-empty.
+    POSTGRES_PASSWORD_FAILURE=$(bun /app/scripts/validate-secrets.ts postgres 2>&1) || true
+    if [ -n "$POSTGRES_PASSWORD_FAILURE" ]; then
+      echo ""
+      echo "============================================================"
+      echo "FATAL: $POSTGRES_PASSWORD_FAILURE"
+      echo ""
+      echo "This variable is required for:"
+      echo "  - PostgreSQL database authentication (web mode)"
+      echo "  - DATABASE_URL / DIRECT_URL connection string"
+      echo ""
+      echo "Generate a strong random value with:"
+      echo "  openssl rand -hex 24"
+      echo "============================================================"
+      exit 1
+    fi
 
     # Validate required env vars for web mode
     if [ -z "$DATABASE_URL" ]; then
