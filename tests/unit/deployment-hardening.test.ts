@@ -107,3 +107,30 @@ test('SELF_HOSTING.md documents Lite edition with 4 containers', () => {
   expect(src).toMatch(/4 \(app \+ realtime \+ postgres \+ caddy\)/)
   expect(src).not.toMatch(/Containers \| 3 /)
 })
+
+test('SELF_HOSTING.md does not recommend prisma db push --accept-data-loss', () => {
+  const src = readSrc('SELF_HOSTING.md')
+  expect(src).not.toContain('db push --accept-data-loss')
+  expect(src).not.toContain('prisma db push')
+})
+
+test('SELF_HOSTING.md documents prisma migrate deploy (the production migration strategy)', () => {
+  const src = readSrc('SELF_HOSTING.md')
+  expect(src).toContain('prisma migrate deploy')
+})
+
+test('SELF_HOSTING.md Lite migration does not claim an uploads copy with an unrelated docker compose up command', () => {
+  const src = readSrc('SELF_HOSTING.md')
+  // The uploads migration section should explain that the volume is shared,
+  // not show a bare `docker compose up -d` as a "copy" command.
+  expect(src).toContain('shared automatically')
+  expect(src).toContain('No copy is needed')
+})
+
+test('SELF_HOSTING.md includes Lite uploads backup/restore guidance', () => {
+  const src = readSrc('SELF_HOSTING.md')
+  // Lite backup section must include uploads backup (not just pg_dump).
+  expect(src).toMatch(/docker compose -f docker-compose\.lite\.yml cp app:\/app\/uploads/)
+  // Lite restore section must include uploads restore.
+  expect(src).toMatch(/docker compose -f docker-compose\.lite\.yml cp \.\/uploads-backup-YYYYMMDD app:\/app\/uploads/)
+})

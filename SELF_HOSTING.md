@@ -187,10 +187,12 @@ The original Sukhan copyright notice and license must be preserved in all copies
    ```bash
    cat backup.sql | docker compose exec -T postgres psql -U sukhan sukhan
    ```
-5. Copy the `uploads` volume contents to the new stack's `uploads` volume:
-   ```bash
-   docker compose up -d
-   ```
+5. The `uploads` volume is shared automatically:
+   Both `docker-compose.yml` and `docker-compose.lite.yml` define the same
+   named volume `uploads`. When run from the same directory, Docker Compose
+   uses the same project name (the directory name), so the `uploads` volume
+   is the same physical volume. No copy is needed — uploaded files from the
+   Lite stack are immediately available in the Full stack.
 
 ---
 
@@ -235,15 +237,26 @@ docker compose up -d
 **Backup:**
 
 ```bash
-# Use pg_dump — simple!
+# 1. Back up the database (PostgreSQL)
 docker compose -f docker-compose.lite.yml exec -T postgres pg_dump -U sukhan sukhan > backup-$(date +%Y%m%d).sql
+
+# 2. Back up uploads (user-attached files)
+docker compose -f docker-compose.lite.yml cp app:/app/uploads ./uploads-backup-$(date +%Y%m%d)
 ```
 
 **Restore:**
 
 ```bash
+# 1. Stop the app so nothing writes during restore
 docker compose -f docker-compose.lite.yml stop app
+
+# 2. Restore the database
 cat backup-YYYYMMDD.sql | docker compose -f docker-compose.lite.yml exec -T postgres psql -U sukhan sukhan
+
+# 3. Restore uploads
+docker compose -f docker-compose.lite.yml cp ./uploads-backup-YYYYMMDD app:/app/uploads
+
+# 4. Restart
 docker compose -f docker-compose.lite.yml up -d
 ```
 
@@ -282,19 +295,29 @@ docker compose up -d
 
 > If you change `POSTGRES_PASSWORD` after the first run, the existing Postgres data volume still has the OLD password. You'll need to either reset the password inside Postgres or delete the volume (`docker compose down -v` — **this deletes all data**).
 
-### `prisma db push` fails at app startup
+### Migration fails at app startup
+
+The Docker entrypoint (`docker-entrypoint.sh`) automatically runs
+`prisma migrate deploy` before starting the app. If this fails, the
+container exits without starting the web server (fail-closed — the app
+must NOT run against an unmigrated schema).
 
 Possible causes:
 
 1. **Postgres not ready yet** — check `docker compose logs postgres`. The healthcheck should prevent this, but on slow machines it can race.
-2. **Schema mismatch** — try running it manually:
-   ```bash
-   docker compose exec app prisma db push --accept-data-loss
-   ```
-3. **Wrong DATABASE_URL** — verify the connection string:
+2. **Pending migration files missing** — ensure the `prisma/migrations/` directory is present in the image. Migrations are applied from these files, not generated at runtime.
+3. **Wrong DATABASE_URL / DIRECT_URL** — verify the connection strings:
    ```bash
    docker compose exec app printenv DATABASE_URL
+   docker compose exec app printenv DIRECT_URL
    ```
+
+To manually re-run the production-safe migration (non-destructive — applies
+pending migration files only):
+
+```bash
+docker compose exec app prisma migrate deploy
+```
 
 ### Socket.IO not working (realtime messages not delivered)
 
@@ -403,10 +426,9 @@ git pull
 # 3. Rebuild the image
 docker compose build
 
-# 4. Apply any schema changes
-docker compose run --rm app prisma db push --accept-data-loss
-
-# 5. Recreate containers with the new image
+# 4. Recreate containers with the new image
+#    The Docker entrypoint automatically applies pending Prisma migrations
+#    (prisma migrate deploy) on startup — no manual migration step needed.
 docker compose up -d
 
 # 6. Verify
