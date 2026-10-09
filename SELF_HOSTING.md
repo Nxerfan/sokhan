@@ -43,7 +43,7 @@ NEXTAUTH_URL=https://chat.example.com
 # Your domain for auto-HTTPS (leave empty for HTTP-only local testing)
 DOMAIN=chat.example.com
 
-# Full edition only — strong Postgres password
+# BOTH editions — strong Postgres password
 POSTGRES_PASSWORD=$(openssl rand -hex 24)
 ```
 
@@ -59,7 +59,7 @@ docker compose up -d --build
 
 #### Lite edition (small VPS / single-user)
 
-Includes: Next.js app (SQLite), realtime service (in-memory), Caddy. No Postgres, no Redis.
+Includes: Next.js app, realtime service (in-memory), Caddy, PostgreSQL. No Redis.
 
 ```bash
 docker compose -f docker-compose.lite.yml up -d --build
@@ -88,7 +88,7 @@ See `.env.docker.example` for the full list with comments. Key variables:
 |----------|----------|---------|-------------|
 | `NEXTAUTH_SECRET` | **Yes** | — | Secret for signing session JWTs + realtime tokens. Generate with `openssl rand -base64 32`. |
 | `NEXTAUTH_URL` | Yes | `http://localhost` | Public URL where users access the app. |
-| `POSTGRES_PASSWORD` | Full only | — | Password for the Postgres `sukhan` user. |
+| `POSTGRES_PASSWORD` | **Yes** (both editions) | — | Password for the Postgres `sukhan` user. |
 | `DATABASE_URL` | Auto | — | DB connection string. Set automatically by compose. Override for external DB. |
 | `REDIS_URL` | Auto (full) | — | Redis connection string. Set automatically. Override for external Redis. |
 | `DOMAIN` | No | empty | Domain for Caddy auto-HTTPS. Empty = HTTP-only. |
@@ -99,7 +99,7 @@ See `.env.docker.example` for the full list with comments. Key variables:
 
 ### Fail-fast on missing required vars
 
-Both `docker-compose.yml` and `docker-compose.lite.yml` use the `${VAR:?error}` syntax for `NEXTAUTH_SECRET` and (full edition) `POSTGRES_PASSWORD`. If these are missing or empty, `docker compose up` refuses to start and prints a clear error.
+Both `docker-compose.yml` and `docker-compose.lite.yml` use the `${VAR:?error}` syntax for `NEXTAUTH_SECRET` and `POSTGRES_PASSWORD`. If these are missing or empty, `docker compose up` refuses to start and prints a clear error.
 
 The Docker entrypoint (`docker-entrypoint.sh`) re-validates `NEXTAUTH_SECRET` at container startup. If the env var somehow slips through (e.g. someone runs `docker run` directly without compose), the container exits with a clear error message.
 
@@ -147,27 +147,27 @@ The original Sukhan copyright notice and license must be preserved in all copies
 
 | Feature | Lite | Full |
 |---------|------|------|
-| Database | SQLite (single file) | PostgreSQL |
+| Database | PostgreSQL (small container, postgres:16-alpine) | PostgreSQL |
 | Realtime adapter | In-memory (single instance) | Redis (multi-instance) |
-| Containers | 3 (app + realtime + caddy) | 5 (app + realtime + postgres + redis + caddy) |
+| Containers | 4 (app + realtime + postgres + caddy) | 5 (app + realtime + postgres + redis + caddy) |
 | RAM usage | ~512 MB | ~1 GB |
 | Horizontal scaling | No | Yes (add more `realtime` replicas) |
-| Backup complexity | Copy the SQLite file | `pg_dump` + uploads volume |
+| Backup complexity | `pg_dump` + uploads volume | `pg_dump` + uploads volume |
 | Best for | Personal use, small team, dev/staging | Production, multi-tenant, scaling |
 
 ### When to choose Lite
 
 - Single VPS with ≤ 1 GB RAM.
 - Personal or small-team use (under ~100 concurrent users).
-- Simple backup (just copy the SQLite file).
-- No need for multi-instance realtime or Postgres features.
+- Simple backup (`pg_dump`).
+- No need for multi-instance realtime or Redis-backed features.
 
 ### When to choose Full
 
 - Production deployment with multiple users/tenants.
 - Need horizontal scaling (multiple app or realtime replicas).
-- Want Postgres features (concurrent writes, better performance under load).
-- Plan to add Redis-backed features (caching, queues) in the future.
+- Need Redis-backed features (caching, queues, multi-instance realtime).
+- Want horizontal scaling (multiple app or realtime replicas).
 
 ### Migrating from Lite to Full
 
@@ -175,20 +175,24 @@ The original Sukhan copyright notice and license must be preserved in all copies
    ```bash
    docker compose -f docker-compose.lite.yml down
    ```
-2. Export SQLite data:
+2. Export the Lite PostgreSQL database:
    ```bash
-   # The SQLite file lives in the sqlite-data volume — extract it:
-   docker run --rm -v sukhan_sqlite-data:/data -v $(pwd):/backup alpine \
-     cp /data/sukhan.db /backup/sukhan-backup.db
+   docker compose -f docker-compose.lite.yml exec -T postgres pg_dump -U sukhan sukhan > backup.sql
    ```
-3. Convert and import into Postgres. The simplest path is to use a tool like
-   [`pgloader`](https://pgloader.io/) or manually export each table as CSV and
-   `COPY` them in. The schema is identical — only the engine differs.
-4. Copy the `uploads` volume contents to the new stack's `uploads` volume.
-5. Start the full stack:
+3. Start the full stack (it creates its own fresh Postgres volume):
    ```bash
    docker compose up -d
    ```
+4. Import the data into the full stack's Postgres:
+   ```bash
+   cat backup.sql | docker compose exec -T postgres psql -U sukhan sukhan
+   ```
+5. The `uploads` volume is shared automatically:
+   Both `docker-compose.yml` and `docker-compose.lite.yml` define the same
+   named volume `uploads`. When run from the same directory, Docker Compose
+   uses the same project name (the directory name), so the `uploads` volume
+   is the same physical volume. No copy is needed — uploaded files from the
+   Lite stack are immediately available in the Full stack.
 
 ---
 
@@ -228,20 +232,31 @@ docker compose cp ./uploads-backup-YYYYMMDD app:/app/uploads
 docker compose up -d
 ```
 
-### Lite edition (SQLite file)
+### Lite edition (PostgreSQL)
 
 **Backup:**
 
 ```bash
-# Just copy the SQLite file — simple!
-docker compose -f docker-compose.lite.yml cp app:/app/data ./data-backup-$(date +%Y%m%d)
+# 1. Back up the database (PostgreSQL)
+docker compose -f docker-compose.lite.yml exec -T postgres pg_dump -U sukhan sukhan > backup-$(date +%Y%m%d).sql
+
+# 2. Back up uploads (user-attached files)
+docker compose -f docker-compose.lite.yml cp app:/app/uploads ./uploads-backup-$(date +%Y%m%d)
 ```
 
 **Restore:**
 
 ```bash
+# 1. Stop the app so nothing writes during restore
 docker compose -f docker-compose.lite.yml stop app
-docker compose -f docker-compose.lite.yml cp ./data-backup-YYYYMMDD app:/app/data
+
+# 2. Restore the database
+cat backup-YYYYMMDD.sql | docker compose -f docker-compose.lite.yml exec -T postgres psql -U sukhan sukhan
+
+# 3. Restore uploads
+docker compose -f docker-compose.lite.yml cp ./uploads-backup-YYYYMMDD app:/app/uploads
+
+# 4. Restart
 docker compose -f docker-compose.lite.yml up -d
 ```
 
@@ -269,7 +284,7 @@ echo "NEXTAUTH_SECRET=$(openssl rand -base64 32)" >> .env
 docker compose up -d
 ```
 
-### Container won't start: "POSTGRES_PASSWORD is required" (full edition)
+### Container won't start: "POSTGRES_PASSWORD is required" (both editions)
 
 Same pattern — set a strong password in `.env`:
 
@@ -280,19 +295,29 @@ docker compose up -d
 
 > If you change `POSTGRES_PASSWORD` after the first run, the existing Postgres data volume still has the OLD password. You'll need to either reset the password inside Postgres or delete the volume (`docker compose down -v` — **this deletes all data**).
 
-### `prisma db push` fails at app startup
+### Migration fails at app startup
+
+The Docker entrypoint (`docker-entrypoint.sh`) automatically runs
+`prisma migrate deploy` before starting the app. If this fails, the
+container exits without starting the web server (fail-closed — the app
+must NOT run against an unmigrated schema).
 
 Possible causes:
 
 1. **Postgres not ready yet** — check `docker compose logs postgres`. The healthcheck should prevent this, but on slow machines it can race.
-2. **Schema mismatch** — try running it manually:
-   ```bash
-   docker compose exec app prisma db push --accept-data-loss
-   ```
-3. **Wrong DATABASE_URL** — verify the connection string:
+2. **Pending migration files missing** — ensure the `prisma/migrations/` directory is present in the image. Migrations are applied from these files, not generated at runtime.
+3. **Wrong DATABASE_URL / DIRECT_URL** — verify the connection strings:
    ```bash
    docker compose exec app printenv DATABASE_URL
+   docker compose exec app printenv DIRECT_URL
    ```
+
+To manually re-run the production-safe migration (non-destructive — applies
+pending migration files only):
+
+```bash
+docker compose exec app prisma migrate deploy
+```
 
 ### Socket.IO not working (realtime messages not delivered)
 
@@ -401,10 +426,9 @@ git pull
 # 3. Rebuild the image
 docker compose build
 
-# 4. Apply any schema changes
-docker compose run --rm app prisma db push --accept-data-loss
-
-# 5. Recreate containers with the new image
+# 4. Recreate containers with the new image
+#    The Docker entrypoint automatically applies pending Prisma migrations
+#    (prisma migrate deploy) on startup — no manual migration step needed.
 docker compose up -d
 
 # 6. Verify

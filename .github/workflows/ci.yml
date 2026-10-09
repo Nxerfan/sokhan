@@ -2,13 +2,16 @@ name: CI
 on:
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened]
   push:
-    branches: [fix/vercel-deployment]
+    branches: [main]
 jobs:
   ci:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
       - name: Install dependencies
@@ -53,6 +56,8 @@ jobs:
       DIRECT_URL: postgresql://sukhan:ci-postgres-password@127.0.0.1:5432/sukhan?schema=public
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
       - name: Install dependencies
