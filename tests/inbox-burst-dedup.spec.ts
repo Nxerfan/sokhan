@@ -67,13 +67,19 @@ async function identifyVisitor(slug: string, visitorId: string, page: Page, name
 }
 
 /** Send a visitor message (creates a conversation on the first send). */
-async function sendVisitorMessage(slug: string, token: string, text: string, page: Page) {
+async function sendVisitorMessage(
+  slug: string,
+  token: string,
+  text: string,
+  page: Page,
+): Promise<{ conversationId: string; message?: { createdAt?: string; id?: string } }> {
   const res = await page.request.post(`${BASE}/api/widget/${slug}/messages`, {
     data: { text },
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
   })
   expect(res.ok(), `messages POST ok (status=${res.status()})`).toBe(true)
-  return (await res.json()).conversationId as string
+  const data = await res.json()
+  return { conversationId: data.conversationId as string, message: data.message }
 }
 
 /** The unread badge <span> inside the conversation-list item whose preview
@@ -86,7 +92,7 @@ async function unreadBadgeText(page: Page, previewText: string): Promise<string>
 }
 
 test.describe('Inbox burst dedup (PR#5 final race fix)', () => {
-  test('Case A: selected conversation, two back-to-back messages → conversation-list preview = latest (msg3) + both in thread', async ({ browser }) => {
+  test('Case A: selected conversation, two back-to-back messages → conversation-list preview = newest (by createdAt) + both in thread', async ({ browser }) => {
     // The agent receives MESSAGE_NEW only for the conversation room it has
     // JOINED (i.e. selected). So the actual PR#5 race — two back-to-back
     // MESSAGE_NEW events computing the conversation-list update from the same
@@ -171,38 +177,59 @@ test.describe('Inbox burst dedup (PR#5 final race fix)', () => {
     //    against event 1's committed result → preview = msg3 (the latest).
     const msg2 = `BURST_A2_${stamp}`
     const msg3 = `BURST_A3_${stamp}`
-    await Promise.all([
+
+    // Send both messages back-to-back + capture the POST responses. The
+    // responses contain the PERSISTED message objects with their actual
+    // server-determined createdAt timestamps. Do NOT assume msg3 is newer
+    // just because it was the second Promise.all item.
+    const [res2, res3] = await Promise.all([
       sendVisitorMessage(slug, token, msg2, page),
       sendVisitorMessage(slug, token, msg3, page),
     ])
 
-    // 4. ASSERT (thread): BOTH burst messages appear once in the thread
-    //    (mergeSingle dedup — no loss, no duplicate).
+    // Determine which burst message is ACTUALLY the newest by comparing
+    // the persisted createdAt timestamps. The createdAt guard in
+    // applyMessageToConversationList ensures the conversation-list preview
+    // = the message with the latest createdAt, regardless of delivery order.
+    const ts2 = res2.message?.createdAt ?? ''
+    const ts3 = res3.message?.createdAt ?? ''
+    const isTie = ts2 === ts3
+    const newestText = ts3 > ts2 ? msg3 : (ts2 > ts3 ? msg2 : null)
+    const expectedPreview = isTie ? new RegExp(`${msg2}|${msg3}`) : newestText!
+
+    // 4. ASSERT (thread): BOTH burst messages appear once in the thread.
     await expect(
       threadView.locator('div.space-y-3').locator('p').filter({ hasText: msg2 }),
-      'msg2 in thread (event 1 of the back-to-back burst landed)',
+      'msg2 in thread',
     ).toHaveCount(1, { timeout: 15000 })
     await expect(
       threadView.locator('div.space-y-3').locator('p').filter({ hasText: msg3 }),
-      'msg3 in thread (event 2 landed — no stale-snapshot loss)',
+      'msg3 in thread',
     ).toHaveCount(1, { timeout: 15000 })
 
-    // 5. CRITICAL ASSERT (conversation-list): the SERVER's authoritative
-    //    conversation-A preview reflects the LATEST burst message (msg3) —
-    //    proving both messages were processed + the preview is the latest
-    //    (not msg2). Runtime HTTP assertion (not source-grep/pure-helper).
-    //    The thread assertions (step 4) prove the dashboard's MESSAGE_NEW
-    //    handler ran (both messages landed in the thread via mergeSingle).
-    const listRes = await page.request.get(`${BASE}/api/conversations?status=all`)
-    expect(listRes.ok(), 'GET /api/conversations should succeed').toBe(true)
-    const listData = await listRes.json()
-    const convAFromServer = (listData.conversations as Array<{ id: string; lastMessagePreview: string }>)
-      .find(c => c.lastMessagePreview?.includes(msg1) || c.lastMessagePreview?.includes(msg2) || c.lastMessagePreview?.includes(msg3))
-    expect(convAFromServer, 'conversation A found in server list').toBeTruthy()
-    expect(convAFromServer!.lastMessagePreview, 'server preview = msg3 (latest)').toContain(msg3)
-    expect(convAFromServer!.lastMessagePreview, 'server preview must NOT be msg2').not.toContain(msg2)
+    // 5. CRITICAL ASSERT (conversation-list UI): the RENDERED conversation-A
+    //    list item preview reflects the NEWEST burst message (determined from
+    //    the POST response timestamps). This exercises the actual client-side
+    //    conversation-list functional updater
+    //    (setConversations(prev => applyMessageToConversationList(prev, msg, ...).list))
+    //    + the createdAt guard.
+    await expect(
+      convAItem.locator('p.truncate').first(),
+      `conversation-A list preview = newest burst message (ts2=${ts2}, ts3=${ts3}, tie=${isTie})`,
+    ).toContainText(expectedPreview, { timeout: 15000 })
 
-    await ctx.close()
+    // When timestamps are not tied, assert the preview does NOT contain
+    // the older burst message.
+    if (!isTie) {
+      const olderText = newestText === msg3 ? msg2 : msg3
+      const previewText = (await convAItem.locator('p.truncate').first().textContent()) ?? ''
+      expect(
+        previewText,
+        `conversation-A preview must NOT contain the older burst message (${olderText})`,
+      ).not.toContain(olderText)
+    }
+
+        await ctx.close()
   })
 
 test('Case B: two different conversations back-to-back → both previews preserved, latest at index 0', async ({ browser }) => {

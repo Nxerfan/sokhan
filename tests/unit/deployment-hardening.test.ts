@@ -87,3 +87,23 @@ test('CI workflow validates the exact PR HEAD (not a merge commit)', () => {
   expect(src).not.toContain('fix/vercel-deployment')
   expect(src).toContain('branches: [main]')
 })
+
+test('SELF_HOSTING.md does not reference stale SQLite volumes or files', () => {
+  const src = readSrc('SELF_HOSTING.md')
+  expect(src).not.toContain('sukhan_sqlite-data')
+  expect(src).not.toContain('sukhan.db')
+  expect(src).not.toContain('pgloader')
+  expect(src).not.toContain('/app/data')
+})
+
+test('SELF_HOSTING.md requires POSTGRES_PASSWORD for BOTH editions', () => {
+  const src = readSrc('SELF_HOSTING.md')
+  expect(src).not.toContain('Full only')
+  expect(src).toMatch(/BOTH editions.*Postgres password/i)
+})
+
+test('SELF_HOSTING.md documents Lite edition with 4 containers', () => {
+  const src = readSrc('SELF_HOSTING.md')
+  expect(src).toMatch(/4 \(app \+ realtime \+ postgres \+ caddy\)/)
+  expect(src).not.toMatch(/Containers \| 3 /)
+})

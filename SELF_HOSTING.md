@@ -43,7 +43,7 @@ NEXTAUTH_URL=https://chat.example.com
 # Your domain for auto-HTTPS (leave empty for HTTP-only local testing)
 DOMAIN=chat.example.com
 
-# Full edition only — strong Postgres password
+# BOTH editions — strong Postgres password
 POSTGRES_PASSWORD=$(openssl rand -hex 24)
 ```
 
@@ -88,7 +88,7 @@ See `.env.docker.example` for the full list with comments. Key variables:
 |----------|----------|---------|-------------|
 | `NEXTAUTH_SECRET` | **Yes** | — | Secret for signing session JWTs + realtime tokens. Generate with `openssl rand -base64 32`. |
 | `NEXTAUTH_URL` | Yes | `http://localhost` | Public URL where users access the app. |
-| `POSTGRES_PASSWORD` | Full only | — | Password for the Postgres `sukhan` user. |
+| `POSTGRES_PASSWORD` | **Yes** (both editions) | — | Password for the Postgres `sukhan` user. |
 | `DATABASE_URL` | Auto | — | DB connection string. Set automatically by compose. Override for external DB. |
 | `REDIS_URL` | Auto (full) | — | Redis connection string. Set automatically. Override for external Redis. |
 | `DOMAIN` | No | empty | Domain for Caddy auto-HTTPS. Empty = HTTP-only. |
@@ -99,7 +99,7 @@ See `.env.docker.example` for the full list with comments. Key variables:
 
 ### Fail-fast on missing required vars
 
-Both `docker-compose.yml` and `docker-compose.lite.yml` use the `${VAR:?error}` syntax for `NEXTAUTH_SECRET` and (full edition) `POSTGRES_PASSWORD`. If these are missing or empty, `docker compose up` refuses to start and prints a clear error.
+Both `docker-compose.yml` and `docker-compose.lite.yml` use the `${VAR:?error}` syntax for `NEXTAUTH_SECRET` and `POSTGRES_PASSWORD`. If these are missing or empty, `docker compose up` refuses to start and prints a clear error.
 
 The Docker entrypoint (`docker-entrypoint.sh`) re-validates `NEXTAUTH_SECRET` at container startup. If the env var somehow slips through (e.g. someone runs `docker run` directly without compose), the container exits with a clear error message.
 
@@ -149,7 +149,7 @@ The original Sukhan copyright notice and license must be preserved in all copies
 |---------|------|------|
 | Database | PostgreSQL (small container, postgres:16-alpine) | PostgreSQL |
 | Realtime adapter | In-memory (single instance) | Redis (multi-instance) |
-| Containers | 3 (app + realtime + caddy) | 5 (app + realtime + postgres + redis + caddy) |
+| Containers | 4 (app + realtime + postgres + caddy) | 5 (app + realtime + postgres + redis + caddy) |
 | RAM usage | ~512 MB | ~1 GB |
 | Horizontal scaling | No | Yes (add more `realtime` replicas) |
 | Backup complexity | `pg_dump` + uploads volume | `pg_dump` + uploads volume |
@@ -160,14 +160,14 @@ The original Sukhan copyright notice and license must be preserved in all copies
 - Single VPS with ≤ 1 GB RAM.
 - Personal or small-team use (under ~100 concurrent users).
 - Simple backup (`pg_dump`).
-- No need for multi-instance realtime or Postgres features.
+- No need for multi-instance realtime or Redis-backed features.
 
 ### When to choose Full
 
 - Production deployment with multiple users/tenants.
 - Need horizontal scaling (multiple app or realtime replicas).
-- Want Postgres features (concurrent writes, better performance under load).
-- Plan to add Redis-backed features (caching, queues) in the future.
+- Need Redis-backed features (caching, queues, multi-instance realtime).
+- Want horizontal scaling (multiple app or realtime replicas).
 
 ### Migrating from Lite to Full
 
@@ -175,17 +175,19 @@ The original Sukhan copyright notice and license must be preserved in all copies
    ```bash
    docker compose -f docker-compose.lite.yml down
    ```
-2. Export PostgreSQL data:
+2. Export the Lite PostgreSQL database:
    ```bash
-   # Use pg_dump to export the database:
-   docker run --rm -v sukhan_sqlite-data:/data -v $(pwd):/backup alpine \
-     cp /data/sukhan.db /backup/sukhan-backup.db
+   docker compose -f docker-compose.lite.yml exec -T postgres pg_dump -U sukhan sukhan > backup.sql
    ```
-3. Convert and import into Postgres. The simplest path is to use a tool like
-   [`pgloader`](https://pgloader.io/) or manually export each table as CSV and
-   `COPY` them in. The schema is identical — only the engine differs.
-4. Copy the `uploads` volume contents to the new stack's `uploads` volume.
-5. Start the full stack:
+3. Start the full stack (it creates its own fresh Postgres volume):
+   ```bash
+   docker compose up -d
+   ```
+4. Import the data into the full stack's Postgres:
+   ```bash
+   cat backup.sql | docker compose exec -T postgres psql -U sukhan sukhan
+   ```
+5. Copy the `uploads` volume contents to the new stack's `uploads` volume:
    ```bash
    docker compose up -d
    ```
@@ -234,14 +236,14 @@ docker compose up -d
 
 ```bash
 # Use pg_dump — simple!
-docker compose -f docker-compose.lite.yml cp app:/app/data ./data-backup-$(date +%Y%m%d)
+docker compose -f docker-compose.lite.yml exec -T postgres pg_dump -U sukhan sukhan > backup-$(date +%Y%m%d).sql
 ```
 
 **Restore:**
 
 ```bash
 docker compose -f docker-compose.lite.yml stop app
-docker compose -f docker-compose.lite.yml cp ./data-backup-YYYYMMDD app:/app/data
+cat backup-YYYYMMDD.sql | docker compose -f docker-compose.lite.yml exec -T postgres psql -U sukhan sukhan
 docker compose -f docker-compose.lite.yml up -d
 ```
 
@@ -269,7 +271,7 @@ echo "NEXTAUTH_SECRET=$(openssl rand -base64 32)" >> .env
 docker compose up -d
 ```
 
-### Container won't start: "POSTGRES_PASSWORD is required" (full edition)
+### Container won't start: "POSTGRES_PASSWORD is required" (both editions)
 
 Same pattern — set a strong password in `.env`:
 
