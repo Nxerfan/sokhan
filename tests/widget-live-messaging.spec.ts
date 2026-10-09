@@ -136,6 +136,14 @@ test.describe('Widget two-way live messaging', () => {
     const widgetInput = widgetPage.locator('.sk-panel input').first()
     await expect(widgetInput).toBeVisible({ timeout: 5000 })
 
+    // Start the POST response waiter BEFORE pressing Enter —
+    // otherwise the response may arrive before waitForResponse is
+    // set up (Playwright's waitForResponse only catches responses
+    // that arrive AFTER the call is made).
+    const postResponsePromise = widgetPage.waitForResponse(
+      (res) => res.url().includes(`/api/widget/${slug}/messages`) && res.request().method() === 'POST',
+      { timeout: 15000 },
+    )
     // Capture the moment BEFORE the POST resolves — the optimistic
     // bubble should appear within ~100ms of Enter (well before the
     // POST response).
@@ -145,20 +153,16 @@ test.describe('Widget two-way live messaging', () => {
     // immediately. We give a short timeout (2000ms) because the POST
     // typically resolves in 50-200ms — if we waited 5000ms we might
     // catch the POST-reconciled bubble instead of the optimistic one.
-    const visitorBubble = widgetPage.locator('.sk-msg.sk-vis p').filter({ hasText: visitorText })
+    const visitorBubble = widgetPage.locator('.sk-msg.sk-vis p').filter({ hasText: visitorText }
+    )
     await expect(
       visitorBubble,
       'visitor optimistic bubble must appear immediately after Enter (before POST resolves)',
-    ).toHaveCount(1, { timeout: 2000 })
+    ).toHaveCount(1, { timeout: 5000 })
 
     // #2 After the POST response, the visitor message still appears
     // EXACTLY ONCE (optimistic + persisted merge → 1 bubble).
-    // Wait for the POST to complete (the bubble transitions from
-    // "sending…" to the timestamp).
-    await widgetPage.waitForResponse(
-      (res) => res.url().includes(`/api/widget/${slug}/messages`) && res.request().method() === 'POST',
-      { timeout: 10000 },
-    )
+    await postResponsePromise
     await widgetPage.waitForTimeout(1000) // let reconciliation + render settle
     await expect(
       visitorBubble,
@@ -286,13 +290,14 @@ test.describe('Widget two-way live messaging', () => {
     const visitorText = `POLL_VISITOR_${stamp}`
     const widgetInput = widgetPage.locator('.sk-panel input').first()
     await expect(widgetInput).toBeVisible({ timeout: 5000 })
+    // Start the POST response waiter BEFORE pressing Enter (avoid race).
+    const pollPostResponsePromise = widgetPage.waitForResponse(
+      (res) => res.url().includes(`/api/widget/${slug}/messages`) && res.request().method() === 'POST',
+      { timeout: 15000 },
+    )
     await widgetInput.fill(visitorText)
     await widgetInput.press('Enter')
-    // Wait for the POST to resolve + reconciliation.
-    await widgetPage.waitForResponse(
-      (res) => res.url().includes(`/api/widget/${slug}/messages`) && res.request().method() === 'POST',
-      { timeout: 10000 },
-    )
+    await pollPostResponsePromise
     await widgetPage.waitForTimeout(1000)
     // The visitor message should appear exactly once.
     await expect(

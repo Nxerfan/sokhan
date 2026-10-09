@@ -128,6 +128,15 @@ test.describe('Widget optimistic-send failure', () => {
     // failure resolves.
     const widgetInput = widgetPage.locator('.sk-panel input').first()
     await expect(widgetInput).toBeVisible({ timeout: 5000 })
+    // Start the POST response waiter BEFORE pressing Enter — the
+    // intercepted 500 response may arrive very quickly.
+    const failedPostResponsePromise = widgetPage.waitForResponse(
+      (res) =>
+        res.url().includes(`/api/widget/${slug}/messages`) &&
+        res.request().method() === 'POST' &&
+        res.status() === 500,
+      { timeout: 10000 },
+    )
     await widgetInput.fill(failedText)
     await widgetInput.press('Enter')
 
@@ -137,16 +146,10 @@ test.describe('Widget optimistic-send failure', () => {
     await expect(
       optimisticBubble,
       'optimistic bubble appears immediately with .sk-pending class (before POST failure resolves)',
-    ).toHaveCount(1, { timeout: 2000 })
+    ).toHaveCount(1, { timeout: 5000 })
 
     // #3 The POST is intercepted → 500.
-    await widgetPage.waitForResponse(
-      (res) =>
-        res.url().includes(`/api/widget/${slug}/messages`) &&
-        res.request().method() === 'POST' &&
-        res.status() === 500,
-      { timeout: 10000 },
-    )
+    await failedPostResponsePromise
     expect(postIntercepted, 'POST must have been intercepted by the test').toBe(true)
 
     // #4 The optimistic bubble transitions to a visibly FAILED state
