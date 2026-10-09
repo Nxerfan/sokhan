@@ -87,6 +87,10 @@ test.describe('Golden path smoke test', () => {
     const nav = page.getByRole('navigation', { name: 'primary' })
     await nav.getByRole('button', { name: /^ویجت$|^Widget$/ }).click()
 
+    // The widget panel defaults to the Installation tab. Switch to the
+    // Customization tab — the accent-color input lives there.
+    await page.getByRole('button', { name: /^سفارشی‌سازی$|^Customization$/ }).click()
+
     // Widget panel renders — accent color input (type=color) appears.
     const colorInput = page.locator('input[type=color]')
     await expect(colorInput).toBeVisible({ timeout: 5000 })
@@ -107,6 +111,8 @@ test.describe('Golden path smoke test', () => {
     // Navigate back to widget panel and verify accent persisted.
     const nav2 = page.getByRole('navigation', { name: 'primary' })
     await nav2.getByRole('button', { name: /^ویجت$|^Widget$/ }).click()
+    // Switch to Customization again (panel defaults to Installation).
+    await page.getByRole('button', { name: /^سفارشی‌سازی$|^Customization$/ }).click()
     await expect(page.locator('input[type=color]')).toHaveValue(/#1f8f8f/i, { timeout: 5000 })
   })
 })

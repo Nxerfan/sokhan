@@ -51,11 +51,11 @@ export function DashboardShell() {
           {view === 'analytics' && <AnalyticsPanel />}
           {view === 'automation' && <RoutingRulesPanel departments={departments} />}
           {view === 'integrations' && (
-            <ComingSoonView icon={Plug} title={t('nav.integrations')} hint={t('dashboard.comingSoonHint')} />
+            <ComingSoonView icon={Plug} title={t('nav.integrations')} hint={t('dashboard.integrationsHint')} />
           )}
           {view === 'members' && <MembersPanel />}
           {view === 'departments' && <DepartmentsPanel />}
-          {view === 'widget' && tenant && <WidgetPanel slug={tenant.slug} />}
+          {view === 'widget' && tenant && <WidgetPanel slug={tenant.slug} tenantId={tenant.id} />}
           {view === 'general' && <GeneralPanel />}
           {view === 'billing' && <BillingPanel />}
           {view === 'faq' && <FaqPanel />}

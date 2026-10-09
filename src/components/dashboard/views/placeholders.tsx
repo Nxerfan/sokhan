@@ -3,7 +3,7 @@
 import { useTranslations } from 'next-intl'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { Inbox, Users, BarChart3, Workflow, Plug, CreditCard } from 'lucide-react'
+import { Inbox, Users, BarChart3 } from 'lucide-react'
 
 /** Placeholder view for Module-2 features. */
 export function ComingSoonView({
@@ -52,7 +52,6 @@ export function InboxPlaceholder() {
       <div className="mx-4 mb-4 flex-1 sm:mx-6 sm:mb-6">
         <ComingSoonView icon={Inbox} title={t('nav.inbox')} hint={t('dashboard.comingSoonHint')} />
       </div>
-      <ModuleStrip />
     </div>
   )
 }
@@ -81,25 +80,3 @@ function StatCard({
   )
 }
 
-function ModuleStrip() {
-  const t = useTranslations()
-  const modules = [
-    { icon: Workflow, label: t('nav.automation') },
-    { icon: Plug, label: t('nav.integrations') },
-    { icon: BarChart3, label: t('nav.analytics') },
-    { icon: CreditCard, label: t('nav.billing') },
-  ]
-  return (
-    <div className="border-t border-border bg-card/40 px-4 py-3 sm:px-6">
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground">
-        <span>{t('dashboard.comingSoon')}:</span>
-        {modules.map((m) => (
-          <span key={m.label} className="inline-flex items-center gap-1.5">
-            <m.icon className="h-3.5 w-3.5" />
-            {m.label}
-          </span>
-        ))}
-      </div>
-    </div>
-  )
-}
