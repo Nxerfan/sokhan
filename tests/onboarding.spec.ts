@@ -124,7 +124,16 @@ test.describe('Widget Installation & Onboarding UX', () => {
     ).toMatch(/<script\s+async\s+defer\s+src=.*\/api\/widget\/[^/]+\/script/)
 
     // 6. NPM instructions render with the real tenant identifier. The
-    //    NPM init snippet must contain `apiKey: '<slug>'`.
+    //    install command (`bun add sukhan-widget`) is in its own <pre>;
+    //    the init snippet (with the apiKey) is in another <pre>.
+    const npmInstallPre = page.locator('pre').filter({ hasText: 'bun add sukhan-widget' }).first()
+    await expect(npmInstallPre).toBeVisible({ timeout: 10_000 })
+    const npmInstallText = (await npmInstallPre.textContent()) ?? ''
+    expect(
+      npmInstallText,
+      `NPM install snippet must contain the sukhan-widget package; got: ${npmInstallText}`,
+    ).toContain('bun add sukhan-widget')
+
     const npmInitPre = page.locator('pre').filter({ hasText: 'initSukhan' }).first()
     await expect(npmInitPre).toBeVisible({ timeout: 10_000 })
     const npmInitText = (await npmInitPre.textContent()) ?? ''
@@ -132,7 +141,6 @@ test.describe('Widget Installation & Onboarding UX', () => {
       npmInitText,
       `NPM init snippet must reference the tenant slug as apiKey; got: ${npmInitText}`,
     ).toContain(`apiKey: '${slug}'`)
-    expect(npmInitText).toContain('bun add sukhan-widget')
 
     // 7. Add an allowed domain through the UI. Use a unique, clearly
     //    valid hostname so the strict domain validator accepts it.
