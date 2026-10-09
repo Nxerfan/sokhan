@@ -246,31 +246,39 @@ test.describe('Widget two-way live messaging', () => {
     ).catch(() => {})
     await dashboardPage.waitForTimeout(2000)
 
-    // === Visitor widget page — intercept the Socket.IO connection
-    // so the widget can NEVER establish a realtime connection. This
-    // deterministically forces the polling fallback path. ===
+    // === Visitor widget page — set up Socket.IO route interception
+    // BEFORE the widget script loads so the socket.io.min.js load
+    // itself is blocked. This deterministically forces the polling
+    // fallback path from the very start (the widget can NEVER
+    // establish a realtime connection). ===
     const widgetCtx = await browser.newContext()
-    const widgetPage = await setupWidgetPage(widgetCtx, slug)
-
-    // Intercept the Socket.IO handshake (engine.io) + the
-    // socket.io.min.js script load — return a 502 for both so the
-    // widget's socket never connects. The widget should fall back
-    // to polling (which it already started after identify + restarts
-    // on the disconnect event).
+    const widgetPage = await widgetCtx.newPage()
+    // Block the socket.io-client script load — the widget can never
+    // call io(). This simulates realtime unavailability (proxy block,
+    // Vercel-no-Redis degraded mode, etc.).
     await widgetPage.route('**/socket.io.min.js', (route) => {
-      // Block the socket.io-client script — the widget can never
-      // call io(). This deterministically simulates realtime
-      // unavailability (proxy block, Vercel-no-Redis degraded, etc.).
       route.fulfill({ status: 502, body: 'blocked by test' })
     })
-    // Also block engine.io handshake requests (in case the script
-    // was already loaded before the route took effect).
+    // Also block any engine.io / socket.io handshake attempts.
     await widgetPage.route('**/socket.io/**', (route) => {
       route.fulfill({ status: 502, body: 'blocked by test' })
     })
     await widgetPage.route('**/?XTransformPort=3003**', (route) => {
       route.fulfill({ status: 502, body: 'blocked by test' })
     })
+
+    // Now navigate to the customer page + load the widget script.
+    // The widget will mount + identify but the socket will NEVER
+    // connect (socket.io.min.js is blocked). Polling starts after
+    // identify (conversationId exists) and after sendMessage.
+    await widgetPage.goto(`${CUSTOMER_ORIGIN}/customer.html`)
+    await widgetPage.waitForLoadState('domcontentloaded')
+    await widgetPage.addScriptTag({ url: WIDGET_SCRIPT_URL(slug) })
+    await widgetPage.waitForTimeout(3000)
+    const launcher = widgetPage.locator('.sk-launcher')
+    await expect(launcher).toBeVisible({ timeout: 10000 })
+    await launcher.click()
+    await widgetPage.waitForTimeout(2000)
 
     // Send a visitor message to create the conversation. The POST
     // should succeed (it's REST, not realtime). The polling fallback

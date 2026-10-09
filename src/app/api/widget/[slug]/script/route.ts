@@ -173,103 +173,126 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
   // unit-tested if we ever extract the widget logic into a shared
   // module. Returns a NEW array; does NOT mutate inputs.
   function mergeMessageArrays(existing, incoming){
+    // Build a Map of persisted messages by id (from both existing
+    // and incoming). Persisted messages have real ids (NOT starting
+    // with __local_).
     var byId = {};
-    var optimisticByText = {};
-    // Index existing messages by id. Track optimistic entries by
-    // their text content (so an incoming persisted message with the
-    // same text can reconcile with the optimistic placeholder).
+    // Track optimistic entries (id starts with __local_) by their
+    // senderType+text key, so an incoming persisted message with the
+    // same text can reconcile (supersede) the optimistic placeholder.
+    var optimisticByKey = {};
+    var optimisticOrder = []; // preserve insertion order
+
+    // Index existing messages.
     for (var i = 0; i < existing.length; i++) {
       var m = existing[i];
-      if (m.id && String(m.id).indexOf('__local_') === 0) {
+      if (!m || !m.id) continue;
+      if (String(m.id).indexOf('__local_') === 0) {
         // Optimistic placeholder — key by text+senderType so the
         // persisted response can find it.
         var key = (m.senderType || '') + '\u0001' + (m.content && m.content.text || '');
-        optimisticByText[key] = m;
-      } else if (m.id) {
+        if (!optimisticByKey[key]) {
+          optimisticByKey[key] = m;
+          optimisticOrder.push(key);
+        }
+      } else {
         byId[m.id] = m;
       }
     }
-    // Merge in incoming messages.
+
+    // Process incoming messages.
     for (var j = 0; j < incoming.length; j++) {
       var im = incoming[j];
       if (!im || !im.id) continue;
-      if (String(im.id).indexOf('__local_') === 0) continue; // never re-add optimistic
+      if (String(im.id).indexOf('__local_') === 0) {
+        // Incoming optimistic message (from sendMessage). Add it to
+        // the optimistic set — it's a NEW placeholder that should
+        // appear in the output.
+        var ikey = (im.senderType || '') + '\u0001' + (im.content && im.content.text || '');
+        if (!optimisticByKey[ikey]) {
+          optimisticByKey[ikey] = im;
+          optimisticOrder.push(ikey);
+        }
+        continue;
+      }
+      // Persisted incoming message.
       var cur = byId[im.id];
       if (!cur) {
         // New persisted message. Check if there's an optimistic
         // placeholder with the same text+senderType that should be
-        // reconciled (replaced) by this persisted one.
-        var ikey = (im.senderType || '') + '\u0001' + (im.content && im.content.text || '');
-        if (optimisticByText[ikey]) {
-          // Replace the optimistic placeholder with the persisted
-          // message — keep the same array slot to preserve visual
-          // position (the visitor's bubble stays where it was).
-          // Find the slot index of the optimistic entry and replace
-          // it in 'byId' 's eventual output (we track the replacement
-          // by marking the optimistic entry as "superseded").
-          optimisticByText[ikey]._supersededBy = im.id;
-          // Also remove from optimisticByText so a second incoming
-          // message with the same text doesn't re-match (unlikely
-          // but defensive).
-          delete optimisticByText[ikey];
+        // reconciled (superseded).
+        var pkey = (im.senderType || '') + '\u0001' + (im.content && im.content.text || '');
+        if (optimisticByKey[pkey]) {
+          // Mark the optimistic entry as superseded by this persisted id.
+          optimisticByKey[pkey]._supersededBy = im.id;
         }
         byId[im.id] = im;
       } else {
         // Same id — keep the newer copy (by createdAt). On a tie,
-        // the incoming copy wins (lets server-edited content replace
-        // a stale local copy).
+        // the incoming copy wins.
         if (!cur.createdAt || (im.createdAt && im.createdAt >= cur.createdAt)) {
           byId[im.id] = im;
         }
       }
     }
-    // Build the output: walk existing in order, replacing optimistic
-    // entries that were superseded with their persisted counterpart,
-    // dropping optimistic entries that have NO persisted counterpart
-    // ONLY if they are marked failed (failed optimistic entries are
-    // kept for the failed-state UI — see sendMessage).
+
+    // Build the output: walk existing in order. For each entry:
+    //   - If optimistic + superseded → emit the persisted counterpart.
+    //   - If optimistic + NOT superseded → keep the optimistic entry
+    //     (pending or failed — the UI shows the appropriate state).
+    //   - If persisted → emit the latest copy from byId.
+    // Then append any incoming messages (persisted OR optimistic) that
+    // weren't already in existing.
     var out = [];
-    var seenIds = {};
+    var seenPersistedIds = {};
+    var seenOptimisticKeys = {};
     for (var k = 0; k < existing.length; k++) {
       var em = existing[k];
-      if (em.id && String(em.id).indexOf('__local_') === 0) {
-        // Optimistic entry — keep it if it's still pending or failed
-        // AND has no persisted counterpart. If it was superseded,
-        // emit the persisted message instead.
+      if (!em || !em.id) continue;
+      if (String(em.id).indexOf('__local_') === 0) {
+        // Optimistic entry.
+        var ekey = (em.senderType || '') + '\u0001' + (em.content && em.content.text || '');
+        seenOptimisticKeys[ekey] = true;
         if (em._supersededBy && byId[em._supersededBy]) {
+          // Superseded — emit the persisted counterpart.
           var persisted = byId[em._supersededBy];
-          if (!seenIds[persisted.id]) {
+          if (!seenPersistedIds[persisted.id]) {
             out.push(persisted);
-            seenIds[persisted.id] = true;
+            seenPersistedIds[persisted.id] = true;
           }
         } else {
-          // Pending or failed optimistic entry — keep it (the UI shows
-          // a pending spinner or a failed/retry affordance).
+          // Pending or failed — keep it.
           out.push(em);
         }
-      } else if (em.id) {
-        // Persisted entry — emit the latest copy from byId (which may
-        // have been replaced by a newer incoming version).
+      } else {
+        // Persisted entry — emit the latest copy from byId.
         var latest = byId[em.id];
-        if (latest && !seenIds[latest.id]) {
+        if (latest && !seenPersistedIds[latest.id]) {
           out.push(latest);
-          seenIds[latest.id] = true;
+          seenPersistedIds[latest.id] = true;
         }
       }
     }
-    // Append any incoming messages that weren't already in existing.
+    // Append incoming messages not already emitted.
     for (var l = 0; l < incoming.length; l++) {
       var im2 = incoming[l];
       if (!im2 || !im2.id) continue;
-      if (String(im2.id).indexOf('__local_') === 0) continue;
-      if (!seenIds[im2.id]) {
-        out.push(im2);
-        seenIds[im2.id] = true;
+      if (String(im2.id).indexOf('__local_') === 0) {
+        // Incoming optimistic message (from sendMessage). If it
+        // wasn't already in existing, add it now.
+        var ikey2 = (im2.senderType || '') + '\u0001' + (im2.content && im2.content.text || '');
+        if (!seenOptimisticKeys[ikey2]) {
+          out.push(im2);
+          seenOptimisticKeys[ikey2] = true;
+        }
+      } else {
+        if (!seenPersistedIds[im2.id]) {
+          out.push(im2);
+          seenPersistedIds[im2.id] = true;
+        }
       }
     }
     // Sort chronologically by createdAt ASC, id ASC tie-break.
-    // Optimistic entries (id starts with __local_) sort by their
-    // local createdAt (the time the user pressed send).
     out.sort(function(a, b){
       var ca = a.createdAt || '';
       var cb = b.createdAt || '';
