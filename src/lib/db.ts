@@ -45,8 +45,28 @@ export class TenantContextRequiredError extends Error {
   }
 }
 
-/** Models that carry a `tenantId` column and therefore REQUIRE a tenant scope. */
-const TENANT_SCOPED_MODELS = new Set<string>([
+/**
+ * Canonical, immutable list of Prisma model names that carry a
+ * `tenantId` scalar field and therefore REQUIRE a tenant scope.
+ *
+ * This is the SINGLE SOURCE OF TRUTH for the tenant-scoping
+ * registry. The internal `TENANT_SCOPED_DELEGATES` Set + the
+ * `makeTenantQueryHandlers` loop both derive from this list, so a
+ * future model addition only needs to be added here.
+ *
+ * Exposed (read-only) so the automated tenant-model-registry test
+ * (`tests/unit/tenant-model-registry.test.ts`) can compare this list
+ * against the structured Prisma DMMF — proving every Prisma model
+ * with a scalar `tenantId` field is in this registry (and the
+ * reverse: every model in this registry actually has a scalar
+ * `tenantId` in the schema).
+ *
+ * The list is intentionally a frozen `readonly string[]` — it cannot
+ * be mutated at runtime by application code. The internal Sets are
+ * derived from it; they are NOT exported, so they cannot be
+ * accidentally modified either.
+ */
+export const TENANT_SCOPED_MODEL_NAMES: readonly string[] = Object.freeze([
   'Membership',
   'Department',
   'WidgetConfig',
@@ -63,6 +83,9 @@ const TENANT_SCOPED_MODELS = new Set<string>([
   'ConnectorConfig',
   'WidgetDomain',
 ])
+
+/** Models that carry a `tenantId` column and therefore REQUIRE a tenant scope. */
+const TENANT_SCOPED_MODELS = new Set<string>(TENANT_SCOPED_MODEL_NAMES)
 
 /** Prisma delegate keys (camelCase) for tenant-scoped models. */
 const TENANT_SCOPED_DELEGATES = new Set<string>(
