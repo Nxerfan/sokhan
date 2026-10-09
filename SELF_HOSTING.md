@@ -101,7 +101,22 @@ See `.env.docker.example` for the full list with comments. Key variables:
 
 Both `docker-compose.yml` and `docker-compose.lite.yml` use the `${VAR:?error}` syntax for `NEXTAUTH_SECRET` and `POSTGRES_PASSWORD`. If these are missing or empty, `docker compose up` refuses to start and prints a clear error.
 
-The Docker entrypoint (`docker-entrypoint.sh`) re-validates `NEXTAUTH_SECRET` at container startup. If the env var somehow slips through (e.g. someone runs `docker run` directly without compose), the container exits with a clear error message.
+The Docker entrypoint (`docker-entrypoint.sh`) re-validates `NEXTAUTH_SECRET` (for both web and realtime modes) and `POSTGRES_PASSWORD` (for web mode only) at container startup. If the env var somehow slips through (e.g. someone runs `docker run` directly without compose), the container exits with a clear error message.
+
+### Reject placeholder/default secrets
+
+Required secret fields in `.env.docker.example` ship BLANK (not with usable-looking `CHANGE_ME_...` values). A fresh `cp .env.docker.example .env` therefore cannot start the stack until the operator pastes real values.
+
+In addition to the empty/missing guard, the Docker entrypoint rejects known-bad placeholder values for `NEXTAUTH_SECRET` (in both web and realtime modes) and `POSTGRES_PASSWORD` (in web mode):
+
+- `NEXTAUTH_SECRET`: the historical `.env.docker.example` placeholder (`CHANGE_ME_generate_with_openssl_rand_base64_32`), the deterministic dev-secret fallback documented in the realtime service (`sukhan-dev-secret-DO-NOT-USE-IN-PRODUCTION-...`), and any value starting with `CHANGE_ME`.
+- `POSTGRES_PASSWORD`: the historical `CHANGE_ME_strong_password_here` placeholder and any `CHANGE_ME`-prefixed value. This is a RUNTIME check (not just compose `${VAR:?...}` — a non-empty placeholder value would otherwise pass the compose guard). `POSTGRES_PASSWORD` is passed to the `app` service as a STANDALONE env var (NOT parsed back out of `DATABASE_URL`) so the entrypoint can validate it directly.
+
+The runtime validator (`scripts/validate-secrets.ts`) imports the SAME canonical validators (`validateNextAuthSecret`, `validatePostgresPassword`) from `src/lib/secret-validation.ts` that the unit tests exercise. There is no mirrored/duplicated validation logic — the runtime path stays synchronized with the tested module by construction.
+
+Startup fails closed: a copied `.env` left at the template defaults, or an `.env` where someone left a documented placeholder in place, cannot reach a running state.
+
+Secret values are NEVER echoed. Failure messages mention the variable NAME only (e.g. `NEXTAUTH_SECRET is set to a known placeholder value`). The actual secret value is never interpolated into any echo, log, or error message.
 
 ---
 
@@ -277,7 +292,7 @@ Test the cron job by running the commands manually first.
 
 ### Container won't start: "NEXTAUTH_SECRET is required"
 
-The container exits immediately if `NEXTAUTH_SECRET` is not set. Generate a value and set it in your `.env`:
+The container exits immediately if `NEXTAUTH_SECRET` is not set, is empty, or is set to a known placeholder value (any `CHANGE_ME_...` value or the realtime dev-secret fallback). Generate a real value and set it in your `.env`:
 
 ```bash
 echo "NEXTAUTH_SECRET=$(openssl rand -base64 32)" >> .env
@@ -286,7 +301,7 @@ docker compose up -d
 
 ### Container won't start: "POSTGRES_PASSWORD is required" (both editions)
 
-Same pattern — set a strong password in `.env`:
+Same pattern — set a strong password in `.env`. Placeholder values (any `CHANGE_ME_...` value, including the historical `CHANGE_ME_strong_password_here`) are rejected by the runtime secret validator:
 
 ```bash
 echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)" >> .env

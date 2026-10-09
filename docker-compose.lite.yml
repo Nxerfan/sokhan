@@ -44,6 +44,12 @@ services:
     environment:
       NEXTAUTH_SECRET: '${NEXTAUTH_SECRET:?NEXTAUTH_SECRET is required (generate with: openssl rand -base64 32)}'
       NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost}
+      # Postgres password — passed as a STANDALONE env var so the Docker
+      # entrypoint can validate it against missing/empty/placeholder values
+      # (in addition to compose ${VAR:?...} which catches missing/empty).
+      # docker-entrypoint.sh runs `bun /app/scripts/validate-secrets.ts postgres`
+      # to reject known-bad placeholders like `CHANGE_ME_strong_password_here`.
+      POSTGRES_PASSWORD: '${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (generate with: openssl rand -hex 24)}'
       DATABASE_URL: postgresql://${POSTGRES_USER:-sukhan}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-sukhan}?schema=public
       DIRECT_URL: postgresql://${POSTGRES_USER:-sukhan}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-sukhan}?schema=public
       REALTIME_INTERNAL_URL: http://realtime:3004

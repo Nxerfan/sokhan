@@ -54,10 +54,18 @@ test('shell scripts do NOT echo secret variable VALUES', () => {
       for (const secret of SECRET_VARS) {
         // The line must NOT reference the secret's VALUE via $SECRET or ${SECRET}.
         // (Referencing the NAME in a string like "FATAL: SECRET is not set" is OK.)
-        const valueRef = `$${secret}`
-        const valueRefBraced = `${'${'}${secret}${'}'}`
+        //
+        // Use word-boundary matching so a longer variable name like
+        // `$NEXTAUTH_SECRET_FAILURE` (which holds the failure MESSAGE
+        // text, not the secret value) does NOT match `$NEXTAUTH_SECRET`
+        // as a substring. The pattern requires the secret name to be
+        // followed by end-of-line, whitespace, or a non-word character
+        // (NOT a letter/digit/underscore — those would be part of a
+        // longer variable name).
+        const bareRef = new RegExp(`\\$${secret}(?![A-Za-z0-9_])`)
+        const bracedRef = new RegExp(`\\$\\{${secret}\\}`)
         expect(
-          line.includes(valueRef) || line.includes(valueRefBraced),
+          bareRef.test(line) || bracedRef.test(line),
           `${script}: echo line must NOT reference the VALUE of ${secret} (line: ${trimmed})`,
         ).toBe(false)
       }
@@ -73,8 +81,13 @@ test('docker-entrypoint.sh only echoes secret NAMES (not values)', () => {
       return (t.startsWith('echo ') || t.startsWith('echo\t')) && t.toLowerCase().includes(secret.toLowerCase())
     })
     for (const ln of echoLines) {
+      // Word-boundary matching — see the test above for the rationale.
+      // A longer variable name like `$NEXTAUTH_SECRET_FAILURE` (the
+      // failure message text variable) must NOT match the bare
+      // `$NEXTAUTH_SECRET` pattern.
+      const bareRef = new RegExp(`\\$${secret}(?![A-Za-z0-9_])`)
       expect(
-        ln.includes(`$${secret}`),
+        bareRef.test(ln),
         `docker-entrypoint.sh: echo line must not print ${secret} value (line: ${ln.trim()})`,
       ).toBe(false)
     }

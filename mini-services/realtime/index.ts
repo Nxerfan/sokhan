@@ -53,6 +53,29 @@ loadEnvFile(resolve(parentDir, '.env.local'), true)
 const SOCKET_PORT = 3003
 const INTERNAL_PORT = 3004
 
+/**
+ * Known-bad NEXTAUTH_SECRET values that must NEVER be accepted in
+ * production. Kept in sync with src/lib/secret-validation.ts.
+ *
+ * This is duplicated here (rather than imported) because the realtime
+ * service is a standalone Bun process that runs from
+ * /app/mini-services/realtime — it must NOT depend on the Next.js
+ * app's runtime / TypeScript toolchain at boot time. The shared
+ * src/lib/secret-validation.ts module is the canonical source; this
+ * is the runtime's mirror.
+ */
+const KNOWN_BAD_NEXTAUTH_SECRETS: ReadonlySet<string> = new Set([
+  'CHANGE_ME_generate_with_openssl_rand_base64_32',
+  'sukhan-dev-secret-DO-NOT-USE-IN-PRODUCTION-a7f3b2c1', // documented dev fallback
+])
+const PLACEHOLDER_PREFIX = 'CHANGE_ME'
+
+function isKnownPlaceholder(v: string): boolean {
+  if (KNOWN_BAD_NEXTAUTH_SECRETS.has(v)) return true
+  if (v.startsWith(PLACEHOLDER_PREFIX)) return true
+  return false
+}
+
 const DEV_SECRET = 'sukhan-dev-secret-DO-NOT-USE-IN-PRODUCTION-a7f3b2c1'
 if (!process.env.NEXTAUTH_SECRET) {
   if (process.env.NODE_ENV === 'production') {
@@ -66,6 +89,35 @@ if (!process.env.NEXTAUTH_SECRET) {
       '\n⚠️  NEXTAUTH_SECRET not set — using deterministic dev secret.\n' +
       '   This is NOT secure. Set NEXTAUTH_SECRET in production.\n'
     )
+  }
+} else {
+  // A value IS set — validate it against known-bad placeholders. Even
+  // in dev, a placeholder value is almost certainly a copy-paste
+  // mistake from .env.docker.example. Reject it the same way the
+  // Docker web entrypoint does.
+  const v = String(process.env.NEXTAUTH_SECRET).trim()
+  if (v === '') {
+    if (process.env.NODE_ENV === 'production') {
+      console.error('\n❌ FATAL: NEXTAUTH_SECRET is empty.')
+      console.error('   Generate one with: openssl rand -base64 32\n')
+      process.exit(1)
+    } else {
+      process.env.NEXTAUTH_SECRET = DEV_SECRET
+      console.warn(
+        '\n⚠️  NEXTAUTH_SECRET is empty — using deterministic dev secret.\n' +
+        '   This is NOT secure. Set NEXTAUTH_SECRET in production.\n'
+      )
+    }
+  } else if (isKnownPlaceholder(v)) {
+    // Reject placeholders in BOTH dev and production — a placeholder
+    // is never what the operator intended. The dev fallback does NOT
+    // kick in here (the operator set an explicit value), so we exit
+    // with a clear message rather than silently using the dev secret.
+    const env = process.env.NODE_ENV === 'production' ? 'production' : 'dev'
+    console.error(`\n❌ FATAL: NEXTAUTH_SECRET is set to a known placeholder value in ${env} mode.`)
+    console.error('   Generate a real secret with: openssl rand -base64 32')
+    console.error('   The placeholder value is NEVER printed here.\n')
+    process.exit(1)
   }
 }
 const SECRET = process.env.NEXTAUTH_SECRET
