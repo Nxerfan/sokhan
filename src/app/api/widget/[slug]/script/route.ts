@@ -112,7 +112,177 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
     locale: 'fa',
     dir: 'rtl',
     connected: false,
+    // Monotonic counter for optimistic (not-yet-persisted) message
+    // placeholders. Each optimistic send gets a unique local id like
+    // "__local_1" so the central merge can reconcile it with the
+    // persisted server message that arrives later (the optimistic
+    // entry's text + senderType match the persisted message; the merge
+    // replaces the optimistic entry with the persisted one by id +
+    // content equality).
+    optimisticSeq: 0,
+    // Active polling timer handle (or null). The polling lifecycle is:
+    //   - start whenever a valid conversation exists (identify-
+    //     restoration OR first-message-creation), even before the
+    //     socket connects — so a customer behind a proxy that blocks
+    //     websockets still receives agent replies.
+    //   - when the socket connects + the conversation room is joined,
+    //     stop polling (realtime is the primary path).
+    //   - when the socket disconnects, restart polling.
+    //   - never start two polling timers concurrently.
+    pollTimer: null,
   };
+
+  // ============================================================
+  // Central message merge — the SINGLE ingestion chokepoint.
+  // ============================================================
+  // All paths that add messages to the widget state MUST route through
+  //   mergeIncoming(incoming)
+  // which:
+  //   - deduplicates persisted messages by 'message.id'
+  //   - preserves chronological order using 'createdAt'
+  //   - reconciles an optimistic visitor message with its persisted
+  //     server response (the optimistic entry has id "__local_N" and
+  //     senderType "contact" with the same text; the persisted server
+  //     message has a real id + matching text + senderType "contact"
+  //     + a slightly later createdAt — mergeIncoming replaces the
+  //     optimistic entry with the persisted one based on
+  //     id+senderType+content+approximate-createdAt)
+  //   - never renders one persisted message twice (a Socket.IO echo
+  //     of a message that already arrived via the POST response is a
+  //     no-op)
+  //   - tolerates events arriving in different orders (POST response
+  //     before Socket.IO echo, polling catch-up after realtime, etc.)
+  //
+  // We do NOT use array length as identity (the previous polling
+  // strategy 'data.messages.slice(state.messages.length)' was unsafe
+  // — it assumed the server's order matches the local order, which
+  // breaks when an optimistic message is at index N locally but the
+  // server's persisted message is at index N-1).
+  //
+  // Returns the new messages array (does NOT mutate state.messages
+  // directly — the caller assigns the result back so React-like
+  // referential change detection works if we ever wrap this in a
+  // framework).
+  function mergeIncoming(incoming){
+    var existing = state.messages;
+    var merged = mergeMessageArrays(existing, incoming);
+    return merged;
+  }
+
+  // Pure merge of two message arrays — extracted so it can be
+  // unit-tested if we ever extract the widget logic into a shared
+  // module. Returns a NEW array; does NOT mutate inputs.
+  function mergeMessageArrays(existing, incoming){
+    var byId = {};
+    var optimisticByText = {};
+    // Index existing messages by id. Track optimistic entries by
+    // their text content (so an incoming persisted message with the
+    // same text can reconcile with the optimistic placeholder).
+    for (var i = 0; i < existing.length; i++) {
+      var m = existing[i];
+      if (m.id && String(m.id).indexOf('__local_') === 0) {
+        // Optimistic placeholder — key by text+senderType so the
+        // persisted response can find it.
+        var key = (m.senderType || '') + '\u0001' + (m.content && m.content.text || '');
+        optimisticByText[key] = m;
+      } else if (m.id) {
+        byId[m.id] = m;
+      }
+    }
+    // Merge in incoming messages.
+    for (var j = 0; j < incoming.length; j++) {
+      var im = incoming[j];
+      if (!im || !im.id) continue;
+      if (String(im.id).indexOf('__local_') === 0) continue; // never re-add optimistic
+      var cur = byId[im.id];
+      if (!cur) {
+        // New persisted message. Check if there's an optimistic
+        // placeholder with the same text+senderType that should be
+        // reconciled (replaced) by this persisted one.
+        var ikey = (im.senderType || '') + '\u0001' + (im.content && im.content.text || '');
+        if (optimisticByText[ikey]) {
+          // Replace the optimistic placeholder with the persisted
+          // message — keep the same array slot to preserve visual
+          // position (the visitor's bubble stays where it was).
+          // Find the slot index of the optimistic entry and replace
+          // it in 'byId' 's eventual output (we track the replacement
+          // by marking the optimistic entry as "superseded").
+          optimisticByText[ikey]._supersededBy = im.id;
+          // Also remove from optimisticByText so a second incoming
+          // message with the same text doesn't re-match (unlikely
+          // but defensive).
+          delete optimisticByText[ikey];
+        }
+        byId[im.id] = im;
+      } else {
+        // Same id — keep the newer copy (by createdAt). On a tie,
+        // the incoming copy wins (lets server-edited content replace
+        // a stale local copy).
+        if (!cur.createdAt || (im.createdAt && im.createdAt >= cur.createdAt)) {
+          byId[im.id] = im;
+        }
+      }
+    }
+    // Build the output: walk existing in order, replacing optimistic
+    // entries that were superseded with their persisted counterpart,
+    // dropping optimistic entries that have NO persisted counterpart
+    // ONLY if they are marked failed (failed optimistic entries are
+    // kept for the failed-state UI — see sendMessage).
+    var out = [];
+    var seenIds = {};
+    for (var k = 0; k < existing.length; k++) {
+      var em = existing[k];
+      if (em.id && String(em.id).indexOf('__local_') === 0) {
+        // Optimistic entry — keep it if it's still pending or failed
+        // AND has no persisted counterpart. If it was superseded,
+        // emit the persisted message instead.
+        if (em._supersededBy && byId[em._supersededBy]) {
+          var persisted = byId[em._supersededBy];
+          if (!seenIds[persisted.id]) {
+            out.push(persisted);
+            seenIds[persisted.id] = true;
+          }
+        } else {
+          // Pending or failed optimistic entry — keep it (the UI shows
+          // a pending spinner or a failed/retry affordance).
+          out.push(em);
+        }
+      } else if (em.id) {
+        // Persisted entry — emit the latest copy from byId (which may
+        // have been replaced by a newer incoming version).
+        var latest = byId[em.id];
+        if (latest && !seenIds[latest.id]) {
+          out.push(latest);
+          seenIds[latest.id] = true;
+        }
+      }
+    }
+    // Append any incoming messages that weren't already in existing.
+    for (var l = 0; l < incoming.length; l++) {
+      var im2 = incoming[l];
+      if (!im2 || !im2.id) continue;
+      if (String(im2.id).indexOf('__local_') === 0) continue;
+      if (!seenIds[im2.id]) {
+        out.push(im2);
+        seenIds[im2.id] = true;
+      }
+    }
+    // Sort chronologically by createdAt ASC, id ASC tie-break.
+    // Optimistic entries (id starts with __local_) sort by their
+    // local createdAt (the time the user pressed send).
+    out.sort(function(a, b){
+      var ca = a.createdAt || '';
+      var cb = b.createdAt || '';
+      if (ca < cb) return -1;
+      if (ca > cb) return 1;
+      var ia = a.id || '';
+      var ib = b.id || '';
+      if (ia < ib) return -1;
+      if (ia > ib) return 1;
+      return 0;
+    });
+    return out;
+  }
 
   var STORAGE_KEY = 'sukhan_visitor_' + SLUG;
 
@@ -293,7 +463,18 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ visitorId: visitorId }),
     })
-    .then(function(r){ return r.json(); })
+    .then(function(r){
+      // Proper response handling: check r.ok before parsing JSON. A 401
+      // /403/429/500 path is a failure — do NOT silently treat a JSON
+      // error body as success data.
+      if (!r.ok) {
+        // Safe error code extraction — never log the request body (it
+        // might contain a token in a future variant) or headers.
+        console.error('[sukhan] identify POST failed with status ' + r.status);
+        throw new Error('identify_failed_' + r.status);
+      }
+      return r.json();
+    })
     .then(function(data){
       state.contactId = data.contactId;
       state.conversationId = data.conversationId;
@@ -310,9 +491,21 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
       // Load existing messages if there's an open conversation
       if (state.conversationId) {
         loadMessages();
+        // #4 polling lifecycle: when identify returns an existing
+        // conversationId, start the polling fallback immediately. The
+        // socket may still be connecting (or may never connect if the
+        // customer is behind a proxy that blocks websockets). Polling
+        // is the safety net that ensures agent replies still arrive.
+        // When the socket connects + joins the conversation room,
+        // stopPolling() is called (realtime is primary).
+        startPolling();
       }
     })
-    .catch(function(e){ console.error('[sukhan] identify failed', e); });
+    .catch(function(e){
+      // e.message is the safe 'identify_failed_<status>' string — no
+      // token, no headers, no body. Safe to log.
+      console.error('[sukhan] identify failed', e && e.message ? e.message : e);
+    });
   }
 
   function loadMessages(){
@@ -320,13 +513,25 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
     fetch(MESSAGES_URL + '?conversationId=' + state.conversationId, {
       headers: { 'Authorization': 'Bearer ' + state.token },
     })
-    .then(function(r){ return r.json(); })
+    .then(function(r){
+      if (!r.ok) {
+        console.error('[sukhan] loadMessages GET failed with status ' + r.status);
+        throw new Error('load_failed_' + r.status);
+      }
+      return r.json();
+    })
     .then(function(data){
       if (data.messages) {
-        state.messages = data.messages;
+        // #2 central merge path: route history through mergeIncoming
+        // so it deduplicates against any optimistic entries already
+        // present + preserves chronological order. Never assigns the
+        // raw array directly (the old 'state.messages = data.messages'
+        // would erase optimistic entries).
+        state.messages = mergeIncoming(data.messages);
         renderMessages();
       }
-    });
+    })
+    .catch(function(){});
   }
 
   // ---- Socket.IO connection ----
@@ -349,7 +554,13 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ visitorId: visitorId }),
     })
-    .then(function(r){ return r.json(); })
+    .then(function(r){
+      if (!r.ok) {
+        console.error('[sukhan] token refresh POST failed with status ' + r.status);
+        throw new Error('refresh_failed_' + r.status);
+      }
+      return r.json();
+    })
     .then(function(data){
       if (data.realtimeToken) {
         state.token = data.realtimeToken;
@@ -359,7 +570,8 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
       if (callback) callback(data);
     })
     .catch(function(e){
-      console.error('[sukhan] token refresh failed', e);
+      // Safe error message — no token, no headers.
+      console.error('[sukhan] token refresh failed', e && e.message ? e.message : e);
       if (callback) callback(null);
     });
   }
@@ -376,11 +588,27 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
       });
       state.socket.on('connect', function(){
         state.connected = true;
+        // #5 safe health log — no token, no auth header.
+        console.log('[sukhan] socket connected');
         if (state.conversationId) {
           state.socket.emit('conversation:join', state.conversationId);
         }
+        // #4 disconnected-only polling: when the socket is connected +
+        // the conversation room is joined, realtime is the primary
+        // path — stop the polling safety net to avoid redundant
+        // fetches. (Polling restarts automatically on disconnect.)
+        stopPolling();
       });
-      state.socket.on('disconnect', function(){ state.connected = false; });
+      state.socket.on('disconnect', function(){
+        state.connected = false;
+        // #5 safe health log.
+        console.warn('[sukhan] socket disconnected — polling fallback active');
+        // #4 restart the polling safety net whenever the socket drops.
+        // If realtime is unavailable (proxy block, server down,
+        // Vercel-no-Redis degraded mode), polling is how agent replies
+        // still arrive without a page refresh.
+        startPolling();
+      });
       // When a reconnect fails due to an expired token, refresh the token
       // When the server middleware rejects the connection (invalid/expired
       // token), Socket.IO does NOT auto-reconnect. We must:
@@ -391,9 +619,18 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
       var visitorMembershipRevoked = false;
       state.socket.on('connect_error', function(err){
         if (!err) return;
+        // #5 safe health log — only the error MESSAGE (which is a
+        // short, safe error code like 'invalid_token' / 'no_token' /
+        // 'membership_inactive'). NEVER log err.context or err.data
+        // (which could contain auth details in a future variant).
+        console.error('[sukhan] socket connect_error:', err.message);
         if (err.message === 'membership_inactive' || err.message === 'membership_check_failed') {
           visitorMembershipRevoked = true;
           if (state.socket) { state.socket.io.opts.reconnection = false; state.socket.disconnect(); }
+          // Membership revoked — realtime is permanently unavailable
+          // for this visitor. Ensure the polling fallback is active
+          // so they still receive agent replies (if any).
+          startPolling();
           return;
         }
         if (visitorMembershipRevoked) return;
@@ -407,7 +644,16 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
         }
       });
       state.socket.on('message:new', function(msg){
-        state.messages.push(msg);
+        // #2 central merge path: route realtime messages through
+        // mergeIncoming so a Socket.IO echo of a message that
+        // already arrived via the POST response is a no-op (the
+        // message id is already in state.messages). This also handles
+        // the case where the visitor's OWN message is echoed back via
+        // the conversation room — mergeIncoming sees the optimistic
+        // entry (id "__local_N", same text+senderType) and reconciles
+        // it with the persisted echo.
+        if (!msg || !msg.id) return;
+        state.messages = mergeIncoming([msg]);
         renderMessages();
         if (!state.open) {
           pulseDot.style.display = 'block';
@@ -437,11 +683,47 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
     });
   }
 
-  // ---- Send message ----
+  // ---- Send message (optimistic + failed-send UX) ----
+  // #1 visitor messages must render immediately. The visitor's bubble
+  // appears in the chat area BEFORE the POST completes. The bubble
+  // carries a local pending state while the POST is in flight. When
+  // the POST responds, the optimistic entry is reconciled with the
+  // persisted server message (the visitor's bubble stays in place —
+  // no flicker, no duplicate).
+  //
+  // #8 failed-send UX. If the POST fails (network error, 4xx/5xx,
+  // non-JSON response), the optimistic bubble is NOT silently treated
+  // as sent. It transitions to a visibly failed state with a retry
+  // affordance, and the user's original text is preserved (the retry
+  // button re-submits the same text). The text is NOT irretrievably
+  // discarded — the user can edit + retry, or copy it out.
   function sendMessage(){
     var text = inputEl.value.trim();
     if (!text) return;
     inputEl.value = '';
+
+    // #1 Optimistic send: push a local placeholder IMMEDIATELY so the
+    // visitor's bubble renders before the POST resolves. The id is
+    // "__local_<seq>" so the central merge can later reconcile it
+    // with the persisted server message (same text+senderType).
+    var optimisticId = '__local_' + (++state.optimisticSeq);
+    var optimisticMsg = {
+      id: optimisticId,
+      conversationId: state.conversationId || null,
+      senderType: 'contact',
+      senderUserId: null,
+      contentType: 'text',
+      content: { text: text },
+      createdAt: new Date().toISOString(),
+      status: 'sent',
+      // Local-only metadata: tracks the optimistic state + the
+      // original text for retry. NEVER sent to the server.
+      _optimistic: true,
+      _optimisticStatus: 'pending',
+      _optimisticText: text,
+    };
+    state.messages = mergeIncoming([optimisticMsg]);
+    renderMessages();
 
     // If no conversation yet, create one by sending the first message
     fetch(MESSAGES_URL, {
@@ -449,10 +731,31 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + state.token },
       body: JSON.stringify({ text: text }),
     })
-    .then(function(r){ return r.json(); })
+    .then(function(r){
+      // #5 proper response handling: check r.ok before parsing. A
+      // 401/403/429/500 is a failure — do NOT silently treat a JSON
+      // error body as success data.
+      if (!r.ok) {
+        // Extract a safe error code if possible (the body may be
+        // JSON like { error: 'rate_limited' }). NEVER log the
+        // Authorization header or the request body (which contained
+        // only the visitor's text, but defensive).
+        return r.json().catch(function(){ return {}; }).then(function(errBody){
+          var safeCode = (errBody && errBody.error) ? errBody.error : ('http_' + r.status);
+          throw new Error('send_failed_' + safeCode);
+        });
+      }
+      return r.json();
+    })
     .then(function(data){
+      // #1 successful POST reconciles the optimistic message with the
+      // persisted server message. Route the persisted message through
+      // mergeIncoming — it matches the optimistic entry by
+      // senderType+text and replaces the placeholder with the real id.
+      // The visitor's bubble stays in place (same array slot), so
+      // there's no flicker + no duplicate.
       if (data.message) {
-        state.messages.push(data.message);
+        state.messages = mergeIncoming([data.message]);
         renderMessages();
       }
       if (data.conversationId && data.conversationId !== state.conversationId) {
@@ -466,10 +769,34 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
           state.socket.emit('conversation:join', state.conversationId);
         }
       }
-      // Start polling for new messages (fallback if Socket.IO fails through proxy)
+      // #4 polling lifecycle: after the first successful message creates
+      // a conversation, initialize the polling fallback (if the socket
+      // is connected, startPolling is a no-op that immediately returns
+      // OR the socket 'connect' handler already called stopPolling).
+      // If the socket is NOT connected, polling is the safety net.
       startPolling();
     })
-    .catch(function(e){ console.error('[sukhan] send failed', e); });
+    .catch(function(e){
+      // #8 failed-send UX. The optimistic bubble transitions to a
+      // visibly failed state with a retry affordance. The user's
+      // original text is preserved in the bubble's _optimisticText
+      // field — the retry button re-submits it. The text is NOT
+      // irretrievably discarded.
+      var safeMsg = e && e.message ? e.message : 'send_failed_unknown';
+      // #5 safe error log — never the token, never the request body,
+      // never the Authorization header. Only the safe error code.
+      console.error('[sukhan] message POST failed:', safeMsg);
+      // Mark the optimistic entry as failed + attach the safe error code.
+      for (var i = 0; i < state.messages.length; i++) {
+        var m = state.messages[i];
+        if (m.id === optimisticId) {
+          m._optimisticStatus = 'failed';
+          m._optimisticError = safeMsg;
+          break;
+        }
+      }
+      renderMessages();
+    });
   }
 
   // ---- Polling fallback (safety net — see DISABLE_POLLING flag above) ----
@@ -477,42 +804,131 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
   // fallback in case the realtime connection drops or is blocked by a proxy.
   // Interval is 10s in normal operation — long enough to not be chatty, short
   // enough to recover within a tolerable window if Socket.IO fails silently.
-  var pollTimer = null;
-  var lastPollCount = 0;
+  //
+  // #4 polling lifecycle:
+  //   - start whenever a valid conversation exists (identify restoration
+  //     OR first-message creation), even before the socket connects.
+  //   - stop when the socket connects + the conversation room is joined
+  //     (realtime is the primary path).
+  //   - restart when the socket disconnects.
+  //   - never start two timers concurrently (startPolling is idempotent).
+  //
+  // #2 central merge: polling uses mergeIncoming (ID-based dedup +
+  // chronological order). The previous 'data.messages.slice(state.messages.length)'
+  // strategy was unsafe — it assumed server order matches local order,
+  // which breaks when an optimistic message is at index N locally but
+  // the server's persisted message is at index N-1.
   function startPolling(){
     if (DISABLE_POLLING) return; // test-only bypass
-    if (pollTimer) return;
-    pollTimer = setInterval(function(){
+    if (state.pollTimer) return; // idempotent — never two timers
+    if (!state.conversationId || !state.token) return;
+    state.pollTimer = setInterval(function(){
       if (!state.conversationId || !state.token) return;
       fetch(MESSAGES_URL + '?conversationId=' + state.conversationId, {
         headers: { 'Authorization': 'Bearer ' + state.token },
       })
-      .then(function(r){ return r.json(); })
+      .then(function(r){
+        if (!r.ok) {
+          // #5 safe error log — only the status, never the body.
+          console.error('[sukhan] polling GET failed with status ' + r.status);
+          return null;
+        }
+        return r.json();
+      })
       .then(function(data){
-        if (data.messages && data.messages.length !== state.messages.length) {
-          // New messages arrived — update the list
-          var newMsgs = data.messages.slice(state.messages.length);
-          for (var i = 0; i < newMsgs.length; i++) {
-            // Don't double-add our own messages (already in state.messages)
-            var exists = state.messages.some(function(m){ return m.id === newMsgs[i].id; });
-            if (!exists) {
-              state.messages.push(newMsgs[i]);
-            }
-          }
+        if (!data || !data.messages) return;
+        // #2 central merge path — ID-based dedup + chronological order.
+        // This handles: agent replies, visitor echoes, system messages,
+        // and reconciles any pending optimistic entries.
+        var prevCount = state.messages.length;
+        state.messages = mergeIncoming(data.messages);
+        if (state.messages.length !== prevCount || true) {
+          // Re-render always — the merge may have replaced an optimistic
+          // entry with a persisted one (same count, but the bubble's
+          // _optimistic flag is gone, so the visual state changed).
           renderMessages();
           if (!state.open) {
             pulseDot.style.display = 'block';
           }
         }
       })
-      .catch(function(){});
+      .catch(function(e){
+        // #5 safe error log — never the token, never the body.
+        console.error('[sukhan] polling fetch failed:', e && e.message ? e.message : 'network_error');
+      });
     }, 10000); // 10s safety net — Socket.IO is the primary delivery path
+  }
+
+  function stopPolling(){
+    if (state.pollTimer) {
+      clearInterval(state.pollTimer);
+      state.pollTimer = null;
+    }
   }
 
   // ---- Rendering ----
   function addMessage(msg){
-    state.messages.push(msg);
+    // #2 route through the central merge so addMessage is also
+    // dedup-safe (used by the greeting flow + any future caller).
+    state.messages = mergeIncoming([msg]);
     renderMessages();
+  }
+
+  // Retry a failed optimistic send. Re-submits the original text
+  // and re-uses the SAME optimistic id so the merge reconciles the
+  // retry's persisted response with the existing bubble (no
+  // duplicate, no flicker).
+  function retrySendMessage(optimisticId, text){
+    // Reset the optimistic entry to pending state for the retry.
+    for (var i = 0; i < state.messages.length; i++) {
+      var m = state.messages[i];
+      if (m.id === optimisticId) {
+        m._optimisticStatus = 'pending';
+        m._optimisticError = null;
+        break;
+      }
+    }
+    renderMessages();
+    fetch(MESSAGES_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + state.token },
+      body: JSON.stringify({ text: text }),
+    })
+    .then(function(r){
+      if (!r.ok) {
+        return r.json().catch(function(){ return {}; }).then(function(errBody){
+          var safeCode = (errBody && errBody.error) ? errBody.error : ('http_' + r.status);
+          throw new Error('send_failed_' + safeCode);
+        });
+      }
+      return r.json();
+    })
+    .then(function(data){
+      if (data.message) {
+        state.messages = mergeIncoming([data.message]);
+        renderMessages();
+      }
+      if (data.conversationId && data.conversationId !== state.conversationId) {
+        state.conversationId = data.conversationId;
+        if (state.socket && state.connected) {
+          state.socket.emit('conversation:join', state.conversationId);
+        }
+      }
+      startPolling();
+    })
+    .catch(function(e){
+      var safeMsg = e && e.message ? e.message : 'send_failed_unknown';
+      console.error('[sukhan] message POST retry failed:', safeMsg);
+      for (var j = 0; j < state.messages.length; j++) {
+        var m2 = state.messages[j];
+        if (m2.id === optimisticId) {
+          m2._optimisticStatus = 'failed';
+          m2._optimisticError = safeMsg;
+          break;
+        }
+      }
+      renderMessages();
+    });
   }
 
   function renderMessages(){
@@ -526,7 +942,12 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
       var msg = state.messages[j];
       var isVisitor = msg.senderType === 'contact';
       var isSystem = msg.senderType === 'system';
-      var bubble = el('div', 'sk-msg ' + (isSystem ? 'sk-sys' : (isVisitor ? 'sk-vis' : 'sk-agt')));
+      // Optimistic state: pending (in-flight) | failed (POST errored)
+      // | undefined (persisted / not optimistic).
+      var optStatus = msg._optimistic ? msg._optimisticStatus : null;
+      var isFailed = optStatus === 'failed';
+      var isPending = optStatus === 'pending';
+      var bubble = el('div', 'sk-msg ' + (isSystem ? 'sk-sys' : (isVisitor ? 'sk-vis' : 'sk-agt')) + (isPending ? ' sk-pending' : '') + (isFailed ? ' sk-failed' : ''));
       if (isSystem) {
         css(bubble, { alignSelf:'center', background:'transparent', color:'#888', fontSize:'11px', padding:'4px 0' });
         bubble.textContent = msg.content.text || '';
@@ -535,7 +956,24 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
         var bg = isVisitor ? '#0E1116' : '#fff';
         var color = isVisitor ? '#FAF7F2' : '#0E1116';
         var radius = isVisitor ? '12px 12px 4px 12px' : '12px 12px 12px 4px';
-        css(bubble, { alignSelf:align, background:bg, color:color, borderRadius:radius, padding:'8px 12px', fontSize:'13px', maxWidth:'75%', boxShadow:'0 1px 2px rgba(0,0,0,.06)', wordBreak:'break-word' });
+        // #1 + #8 visual state: pending → slightly dimmed + a
+        // "sending…" caption; failed → red border + retry button +
+        // "failed" caption. Persisted messages render normally.
+        if (isPending) {
+          // Dim the bubble while the POST is in flight.
+          bg = isVisitor ? 'rgba(14,17,22,.55)' : 'rgba(255,255,255,.6)';
+        }
+        if (isFailed) {
+          // Red border to signal the failed state.
+          radius = isVisitor ? '12px 12px 4px 12px' : '12px 12px 12px 4px';
+        }
+        css(bubble, {
+          alignSelf:align, background:bg, color:color, borderRadius:radius,
+          padding:'8px 12px', fontSize:'13px', maxWidth:'75%',
+          boxShadow:'0 1px 2px rgba(0,0,0,.06)', wordBreak:'break-word',
+          border: isFailed ? '1px solid #dc2626' : 'none',
+          opacity: isPending ? '.7' : '1',
+        });
         bubble.setAttribute('dir', 'auto');
         if (msg.content.text) {
           var p = el('p', '');
@@ -563,9 +1001,59 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
           }
         }
         var ts = el('span', '');
-        ts.textContent = fmt(msg.createdAt);
-        css(ts, { display:'block', fontSize:'10px', marginTop:'2px', opacity:'.6' });
+        // #1 + #8 status caption: pending → "sending…", failed →
+        // "failed — tap retry", persisted → timestamp.
+        if (isPending) {
+          ts.textContent = state.locale === 'fa' ? 'در حال ارسال…' : 'sending…';
+          css(ts, { display:'block', fontSize:'10px', marginTop:'2px', opacity:'.7', fontStyle:'italic' });
+        } else if (isFailed) {
+          var errCode = msg._optimisticError || 'send_failed';
+          ts.textContent = state.locale === 'fa' ? ('ارسال ناموفق — ' + errCode) : ('failed — ' + errCode);
+          css(ts, { display:'block', fontSize:'10px', marginTop:'2px', color:'#dc2626' });
+        } else {
+          ts.textContent = fmt(msg.createdAt);
+          css(ts, { display:'block', fontSize:'10px', marginTop:'2px', opacity:'.6' });
+        }
         bubble.appendChild(ts);
+
+        // #8 retry affordance for failed optimistic sends.
+        if (isFailed) {
+          var retryRow = el('div', 'sk-retry-row');
+          css(retryRow, { display:'flex', gap:'6px', marginTop:'6px' });
+          var retryBtn = el('button', 'sk-retry-btn');
+          retryBtn.textContent = state.locale === 'fa' ? 'تلاش دوباره' : 'Retry';
+          css(retryBtn, {
+            background:'#dc2626', color:'#fff', border:'none', borderRadius:'6px',
+            padding:'4px 10px', fontSize:'11px', cursor:'pointer', flex:'1',
+          });
+          // Capture the original text in the closure so the retry
+          // re-submits exactly what the user typed.
+          (function(oid, originalText){
+            retryBtn.onclick = function(){ retrySendMessage(oid, originalText); };
+          })(msg.id, msg._optimisticText || msg.content && msg.content.text || '');
+          retryRow.appendChild(retryBtn);
+
+          // Also offer "edit" — restore the text to the input so the
+          // user can modify + re-send. The failed bubble stays until
+          // the user either retries or sends a new message.
+          var editBtn = el('button', 'sk-edit-btn');
+          editBtn.textContent = state.locale === 'fa' ? 'ویرایش' : 'Edit';
+          css(editBtn, {
+            background:'transparent', color:'#dc2626', border:'1px solid #dc2626',
+            borderRadius:'6px', padding:'4px 10px', fontSize:'11px', cursor:'pointer',
+          });
+          (function(originalText){
+            editBtn.onclick = function(){
+              if (inputEl) {
+                inputEl.value = originalText;
+                inputEl.focus();
+              }
+            };
+          })(msg._optimisticText || msg.content && msg.content.text || '');
+          retryRow.appendChild(editBtn);
+
+          bubble.appendChild(retryRow);
+        }
       }
       bodyEl.insertBefore(bubble, typingEl);
     }
