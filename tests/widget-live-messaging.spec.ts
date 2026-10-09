@@ -136,34 +136,26 @@ test.describe('Widget two-way live messaging', () => {
     const widgetInput = widgetPage.locator('.sk-panel input').first()
     await expect(widgetInput).toBeVisible({ timeout: 5000 })
 
-    // Start the POST response waiter BEFORE pressing Enter —
-    // otherwise the response may arrive before waitForResponse is
-    // set up (Playwright's waitForResponse only catches responses
-    // that arrive AFTER the call is made).
-    const postResponsePromise = widgetPage.waitForResponse(
-      (res) => res.url().includes(`/api/widget/${slug}/messages`) && res.request().method() === 'POST',
-      { timeout: 15000 },
-    )
-    // Capture the moment BEFORE the POST resolves — the optimistic
-    // bubble should appear within ~100ms of Enter (well before the
-    // POST response).
     await widgetInput.fill(visitorText)
     await widgetInput.press('Enter')
-    // The optimistic bubble (with "sending…" caption) must appear
-    // immediately. We give a short timeout (2000ms) because the POST
-    // typically resolves in 50-200ms — if we waited 5000ms we might
-    // catch the POST-reconciled bubble instead of the optimistic one.
-    const visitorBubble = widgetPage.locator('.sk-msg.sk-vis p').filter({ hasText: visitorText }
-    )
+    // The optimistic bubble (with .sk-pending class) must appear
+    // immediately — BEFORE the POST resolves. The visitor's bubble
+    // renders in the DOM the moment Enter is pressed.
+    const visitorBubble = widgetPage.locator('.sk-msg.sk-vis p').filter({ hasText: visitorText })
     await expect(
       visitorBubble,
       'visitor optimistic bubble must appear immediately after Enter (before POST resolves)',
     ).toHaveCount(1, { timeout: 5000 })
 
     // #2 After the POST response, the visitor message still appears
-    // EXACTLY ONCE (optimistic + persisted merge → 1 bubble).
-    await postResponsePromise
-    await widgetPage.waitForTimeout(1000) // let reconciliation + render settle
+    // EXACTLY ONCE (optimistic + persisted merge → 1 bubble). The
+    // .sk-pending class transitions away (replaced by the persisted
+    // message's timestamp). Wait for the pending state to clear,
+    // which proves the POST reconciled the optimistic entry.
+    await expect(
+      widgetPage.locator('.sk-msg.sk-vis.sk-pending p').filter({ hasText: visitorText }),
+      'pending class must be cleared after POST reconciliation (persisted message has no .sk-pending)',
+    ).toHaveCount(0, { timeout: 15000 })
     await expect(
       visitorBubble,
       'visitor message must appear EXACTLY ONCE after POST reconciliation (no duplicate from optimistic + persisted)',
@@ -290,18 +282,20 @@ test.describe('Widget two-way live messaging', () => {
     const visitorText = `POLL_VISITOR_${stamp}`
     const widgetInput = widgetPage.locator('.sk-panel input').first()
     await expect(widgetInput).toBeVisible({ timeout: 5000 })
-    // Start the POST response waiter BEFORE pressing Enter (avoid race).
-    const pollPostResponsePromise = widgetPage.waitForResponse(
-      (res) => res.url().includes(`/api/widget/${slug}/messages`) && res.request().method() === 'POST',
-      { timeout: 15000 },
-    )
     await widgetInput.fill(visitorText)
     await widgetInput.press('Enter')
-    await pollPostResponsePromise
-    await widgetPage.waitForTimeout(1000)
+    // The optimistic bubble appears immediately, then transitions to
+    // persisted when the POST resolves. Wait for the .sk-pending class
+    // to clear (proves the POST succeeded + reconciliation happened).
+    const visitorBubble = widgetPage.locator('.sk-msg.sk-vis p').filter({ hasText: visitorText })
+    await expect(visitorBubble, 'visitor bubble appears').toHaveCount(1, { timeout: 5000 })
+    await expect(
+      widgetPage.locator('.sk-msg.sk-vis.sk-pending p').filter({ hasText: visitorText }),
+      'pending class clears after POST (no socket — POST still works via REST)',
+    ).toHaveCount(0, { timeout: 15000 })
     // The visitor message should appear exactly once.
     await expect(
-      widgetPage.locator('.sk-msg.sk-vis p').filter({ hasText: visitorText }),
+      visitorBubble,
       'visitor message appears once (optimistic + POST merge)',
     ).toHaveCount(1)
 

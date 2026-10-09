@@ -128,15 +128,6 @@ test.describe('Widget optimistic-send failure', () => {
     // failure resolves.
     const widgetInput = widgetPage.locator('.sk-panel input').first()
     await expect(widgetInput).toBeVisible({ timeout: 5000 })
-    // Start the POST response waiter BEFORE pressing Enter — the
-    // intercepted 500 response may arrive very quickly.
-    const failedPostResponsePromise = widgetPage.waitForResponse(
-      (res) =>
-        res.url().includes(`/api/widget/${slug}/messages`) &&
-        res.request().method() === 'POST' &&
-        res.status() === 500,
-      { timeout: 10000 },
-    )
     await widgetInput.fill(failedText)
     await widgetInput.press('Enter')
 
@@ -148,23 +139,18 @@ test.describe('Widget optimistic-send failure', () => {
       'optimistic bubble appears immediately with .sk-pending class (before POST failure resolves)',
     ).toHaveCount(1, { timeout: 5000 })
 
-    // #3 The POST is intercepted → 500.
-    await failedPostResponsePromise
-    expect(postIntercepted, 'POST must have been intercepted by the test').toBe(true)
-
-    // #4 The optimistic bubble transitions to a visibly FAILED state
-    // (the .sk-pending class is replaced by .sk-failed).
-    await widgetPage.waitForTimeout(1000) // let the catch handler run + re-render
-    const failedBubble = widgetPage.locator('.sk-msg.sk-vis.sk-failed p').filter({ hasText: failedText })
+    // #3 + #4 The POST is intercepted → 500. The optimistic bubble
+    // transitions from .sk-pending to .sk-failed (red border).
     await expect(
-      failedBubble,
-      'failed optimistic bubble must have .sk-failed class (visible failed state)',
-    ).toHaveCount(1)
+      widgetPage.locator('.sk-msg.sk-vis.sk-failed p').filter({ hasText: failedText }),
+      'failed optimistic bubble must have .sk-failed class (visible failed state) after the 500 response',
+    ).toHaveCount(1, { timeout: 15000 })
     // The .sk-pending class must be GONE (replaced by .sk-failed).
     await expect(
       widgetPage.locator('.sk-msg.sk-vis.sk-pending p').filter({ hasText: failedText }),
       '.sk-pending must be replaced by .sk-failed after the POST rejects',
     ).toHaveCount(0)
+    expect(postIntercepted, 'POST must have been intercepted by the test').toBe(true)
     // The "failed" caption must be visible.
     await expect(
       widgetPage.locator('.sk-msg.sk-vis.sk-failed span').filter({ hasText: /failed|ارسال ناموفق/ }),
@@ -197,16 +183,14 @@ test.describe('Widget optimistic-send failure', () => {
     // click retry — the retry POST should succeed + the bubble should
     // transition from failed → persisted (exactly once, no duplicate).
     await widgetPage.unroute(`**/api/widget/${slug}/messages`)
-    const retryPostPromise = widgetPage.waitForResponse(
-      (res) =>
-        res.url().includes(`/api/widget/${slug}/messages`) &&
-        res.request().method() === 'POST' &&
-        res.status() === 200,
-      { timeout: 10000 },
-    )
     await widgetPage.locator('.sk-retry-btn').click()
-    await retryPostPromise
-    await widgetPage.waitForTimeout(1000) // let reconciliation settle
+    // Wait for the .sk-failed class to clear (proves the retry POST
+    // succeeded + reconciliation replaced the failed optimistic entry
+    // with the persisted server message).
+    await expect(
+      widgetPage.locator('.sk-msg.sk-vis.sk-failed p').filter({ hasText: failedText }),
+      '.sk-failed class must be gone after successful retry',
+    ).toHaveCount(0, { timeout: 15000 })
 
     // After the successful retry, the message should appear EXACTLY
     // ONCE (the optimistic entry is reconciled with the persisted
@@ -219,10 +203,6 @@ test.describe('Widget optimistic-send failure', () => {
     await expect(
       widgetPage.locator('.sk-retry-btn'),
       'retry button must be gone after successful retry',
-    ).toHaveCount(0)
-    await expect(
-      widgetPage.locator('.sk-msg.sk-vis.sk-failed p').filter({ hasText: failedText }),
-      '.sk-failed class must be gone after successful retry',
     ).toHaveCount(0)
     await expect(
       widgetPage.locator('.sk-msg.sk-vis.sk-pending p').filter({ hasText: failedText }),
