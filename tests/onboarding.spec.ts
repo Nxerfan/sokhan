@@ -28,6 +28,13 @@ import { otpSignupPlaywright } from './helpers/otp-signup'
  *   12. Stale Module-2 wording is not displayed in the relevant UI.
  *
  * The test is part of BOTH the Full and Lite Docker regression suites.
+ *
+ * ORDERING NOTE: The Free plan allows exactly 1 widget domain. After
+ * the first valid domain is added, the Add button becomes DISABLED
+ * (UI plan-limit enforcement). Therefore the invalid-domain test MUST
+ * run BEFORE the valid-add test (so the Add button is still enabled),
+ * and the plan-limit test asserts the button is disabled + the API
+ * rejects a 2nd add via direct request.
  */
 
 const BASE = 'http://127.0.0.1:81'        // Sukhan origin via gateway
@@ -142,11 +149,23 @@ test.describe('Widget Installation & Onboarding UX', () => {
       `NPM init snippet must reference the tenant slug as apiKey; got: ${npmInitText}`,
     ).toContain(`apiKey: '${slug}'`)
 
+    // 8. Invalid domain shows a user-visible failure. MUST run BEFORE
+    //    step 7 because the Free plan allows exactly 1 domain — after
+    //    the first valid add, the Add button becomes disabled. With
+    //    count=0 the Add button is enabled; the strict domain validator
+    //    rejects a path-bearing string and the user sees a toast.
+    const domainInput = page.getByPlaceholder('example.com')
+    await expect(domainInput).toBeVisible({ timeout: 10_000 })
+    await domainInput.fill('bad.example.com/path')
+    await page.getByRole('button', { name: /^افزودن$|^Add$/ }).click()
+    await expect(
+      page.getByText(/Invalid domain|دامنه نامعتبر است/).first(),
+      `invalid domain must produce a user-visible error toast`,
+    ).toBeVisible({ timeout: 10_000 })
+
     // 7. Add an allowed domain through the UI. Use a unique, clearly
     //    valid hostname so the strict domain validator accepts it.
     const uniqueDomain = `onb-${Date.now()}.example.com`
-    const domainInput = page.getByPlaceholder('example.com')
-    await expect(domainInput).toBeVisible({ timeout: 10_000 })
     await domainInput.fill(uniqueDomain)
     await page.getByRole('button', { name: /^افزودن$|^Add$/ }).click()
     // The domain must appear in the list.
@@ -155,29 +174,23 @@ test.describe('Widget Installation & Onboarding UX', () => {
       `added domain ${uniqueDomain} must appear in the authorized-domains list`,
     ).toBeVisible({ timeout: 10_000 })
 
-    // 8. Invalid domain shows a user-visible failure. The strict
-    //    domain validator rejects strings with paths, schemes, control
-    //    chars, etc. A path-bearing string like "bad.example.com/path"
-    //    must be rejected and the user must see a visible error.
-    await domainInput.fill('bad.example.com/path')
-    await page.getByRole('button', { name: /^افزودن$|^Add$/ }).click()
-    // The error toast must be visible (English or Persian).
-    await expect(
-      page.getByText(/Invalid domain|دامنه نامعتبر است/).first(),
-      `invalid domain must produce a user-visible error toast`,
-    ).toBeVisible({ timeout: 10_000 })
-
     // 9. Existing website/domain plan limit behavior remains enforced.
-    //    The signup plan is Free (limit = 1 domain). The first add
-    //    succeeded above; attempting to add a SECOND distinct domain
-    //    must fail with the limit_reached error toast.
+    //    The signup plan is Free (limit = 1 domain). After the first
+    //    add, the Add button is DISABLED in the UI (count=1, limit=1).
+    //    The API also rejects a 2nd add with limit_reached — verify
+    //    both layers of enforcement.
+    const addButton = page.getByRole('button', { name: /^افزودن$|^Add$/ })
+    await expect(addButton, `Add button must be disabled after the Free plan limit is reached`).toBeDisabled({ timeout: 10_000 })
+    // Also verify the API rejects a 2nd add (defense-in-depth, even if
+    // a user bypasses the disabled button).
     const secondDomain = `onb-second-${Date.now()}.example.com`
-    await domainInput.fill(secondDomain)
-    await page.getByRole('button', { name: /^افزودن$|^Add$/ }).click()
-    await expect(
-      page.getByText(/Domain limit reached|حداکثر دامنه‌های مجاز استفاده شده/).first(),
-      `second domain on Free plan must hit the plan limit`,
-    ).toBeVisible({ timeout: 10_000 })
+    const apiRes = await page.request.post(`${BASE}/api/widget-domains`, {
+      data: { domain: secondDomain },
+      headers: { 'Content-Type': 'application/json' },
+    })
+    expect(apiRes.status(), `2nd domain add via API must be rejected (HTTP 400)`).toBe(400)
+    const apiJson = await apiRes.json()
+    expect(apiJson.error, `2nd domain add must fail with limit_reached`).toBe('limit_reached')
     // The second domain must NOT have been added to the list.
     await expect(
       page.locator('span.font-medium').filter({ hasText: secondDomain }),
