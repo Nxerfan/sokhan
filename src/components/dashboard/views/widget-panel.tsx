@@ -9,7 +9,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Check, Copy, MessageSquareText, Globe, Plus, Trash2, Lock, Code2, Package, ShieldCheck, CheckCircle2, Circle, ExternalLink } from 'lucide-react'
+import { Check, Copy, MessageSquareText, Globe, Plus, Trash2, Lock, Code2, Package, ShieldCheck, CheckCircle2, Circle, ExternalLink, ServerCog } from 'lucide-react'
 import { toast } from 'sonner'
 import { PanelHeader } from './members-panel'
 import { cn } from '@/lib/utils'
@@ -25,6 +25,26 @@ type WidgetConfig = {
 }
 
 type Domain = { id: string; domain: string; createdAt: string }
+
+/**
+ * Conversation summary as returned by GET /api/conversations.
+ *
+ * IMPORTANT: `firstResponseAt` is the canonical, server-authoritative
+ * flag for "an agent has actually replied to this conversation" — it is
+ * set once on the first agent message POST to
+ * /api/conversations/[id]/messages and never modified afterward. It is
+ * NOT inferred from `lastMessagePreview` (which is also populated by
+ * visitor messages and would incorrectly mark a conversation as
+ * "agent replied" the moment a visitor sends their first message).
+ */
+type ConversationSummary = {
+  id: string
+  status: string
+  lastMessagePreview: string
+  lastMessageAt: string
+  firstResponseAt: string | null
+}
+
 type ConvInfo = { hasConversations: boolean; hasAgentReply: boolean }
 
 const SHAPES = ['tab', 'rounded', 'pill']
@@ -45,7 +65,11 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
   const [domains, setDomains] = useState<Domain[]>([])
   const [domainLimit, setDomainLimit] = useState(0)
   const [newDomain, setNewDomain] = useState('')
-  const [verifyStatus, setVerifyStatus] = useState<'idle' | 'checking' | 'ok' | 'fail'>('idle')
+  // "Check Widget Backend" — an authenticated, internal-only Sukhan-side
+  // readiness check. NOT a "verify installation" check. The state name
+  // is intentionally `backendStatus` (not `verifyStatus`) to make the
+  // intent unambiguous.
+  const [backendStatus, setBackendStatus] = useState<'idle' | 'checking' | 'ok' | 'fail'>('idle')
   const [convInfo, setConvInfo] = useState<ConvInfo>({ hasConversations: false, hasAgentReply: false })
   const [checklistDismissed, setChecklistDismissedDismissed] = useState(false)
 
@@ -55,7 +79,13 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
     const [cfgRes, domRes, convRes] = await Promise.all([
       fetch('/api/widget-config'),
       fetch('/api/widget-domains'),
-      fetch('/api/conversations?take=1').catch(() => null),
+      // /api/conversations returns up to 100 most-recent conversations.
+      // We read the existing response as-is — no `?take=` query param
+      // is implemented by the endpoint, so we deliberately do not send
+      // one. We only need to know whether the tenant has any
+      // conversation whose `firstResponseAt` is set (i.e. an agent has
+      // actually replied).
+      fetch('/api/conversations').catch(() => null),
     ])
     const cfgData = await cfgRes.json()
     if (cfgData.config) setConfig(cfgData.config)
@@ -64,8 +94,11 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
     setDomainLimit(domData.limit ?? 0)
     if (convRes && convRes.ok) {
       const convJson = await convRes.json()
-      const convs = convJson.conversations ?? []
-      const hasAgent = convs.some((c: any) => c.lastMessagePreview && c.lastMessagePreview.length > 0 && c.status !== 'closed')
+      const convs: ConversationSummary[] = convJson.conversations ?? []
+      // Truthful derivation of "agent replied" — using the canonical
+      // server-authoritative `firstResponseAt` field, NOT the preview
+      // text (a visitor message also produces a non-empty preview).
+      const hasAgent = convs.some((c) => c.firstResponseAt != null)
       setConvInfo({ hasConversations: convs.length > 0, hasAgentReply: hasAgent })
     }
   }, [])
@@ -94,19 +127,35 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
   const npmInstall = `bun add sukhan-widget`
   const npmInit = `import { initSukhan } from 'sukhan-widget'
 
-initSukhan({ apiKey: '${slug}' })`
+initSukhan({ apiKey: '${slug}'${apiUrl !== HOSTED_API_URL ? `, apiUrl: '${apiUrl}'` : ''} })`
+
+  // Copy actions are TRUTHFULLY tracked as "code copied" — they do NOT
+  // imply the user has installed the widget on a customer website. The
+  // checklist item below uses the label "Installation code copied"
+  // (not "Install widget") to match the actual action the user
+  // performed. We persist this bit so the checklist survives reload,
+  // but it never claims installation was done.
+  function markCodeCopied(which: 'html' | 'npm') {
+    try {
+      localStorage.setItem('sukhan_widget_code_copied_' + slug, '1')
+      if (which === 'html') setCopiedHtml(true)
+      else setCopiedNpm(true)
+      setTimeout(() => {
+        if (which === 'html') setCopiedHtml(false)
+        else setCopiedNpm(false)
+      }, 2000)
+    } catch {
+      // ignore localStorage failures (private mode, etc.)
+    }
+  }
 
   function copy(text: string, which: 'html' | 'npm' | 'key') {
     navigator.clipboard.writeText(text)
-    if (which === 'html') {
-      setCopiedHtml(true); toast.success(locale === 'fa' ? 'کپی شد' : 'Copied')
-      localStorage.setItem('sukhan_widget_installed_' + slug, '1')
-      setTimeout(() => setCopiedHtml(false), 2000)
-    } else if (which === 'npm') {
-      setCopiedNpm(true); toast.success(locale === 'fa' ? 'کپی شد' : 'Copied')
-      setTimeout(() => setCopiedNpm(false), 2000)
+    toast.success(locale === 'fa' ? 'کپی شد' : 'Copied')
+    if (which === 'html' || which === 'npm') {
+      markCodeCopied(which)
     } else {
-      setCopiedKey(true); toast.success(locale === 'fa' ? 'کپی شد' : 'Copied')
+      setCopiedKey(true)
       setTimeout(() => setCopiedKey(false), 2000)
     }
   }
@@ -120,7 +169,9 @@ initSukhan({ apiKey: '${slug}' })`
         ? (locale === 'fa' ? 'حداکثر دامنه‌های مجاز استفاده شده' : 'Domain limit reached')
         : data.error === 'already_exists'
           ? (locale === 'fa' ? 'این دامنه قبلاً اضافه شده' : 'Domain already exists')
-          : data.error)
+          : data.error === 'invalid_domain'
+            ? (locale === 'fa' ? 'دامنه نامعتبر است' : 'Invalid domain')
+            : data.error)
       return
     }
     toast.success(locale === 'fa' ? 'ذخیره شد' : 'Saved')
@@ -140,43 +191,72 @@ initSukhan({ apiKey: '${slug}' })`
     setDomainLimit(domData.limit ?? 0)
   }
 
-  async function verifyWidget() {
-    setVerifyStatus('checking')
+  // "Check Widget Backend" — an authenticated internal-safe Sukhan-side
+  // readiness check via /api/widget-status. This:
+  //   - does NOT call the public /api/widget/<slug>/config endpoint
+  //     (which performs WidgetDomain validation against request
+  //     Origin/Referer — a Sukhan-dashboard-origin request would be
+  //     incorrectly rejected as `domain_not_allowed`);
+  //   - does NOT fetch arbitrary customer URLs (no SSRF);
+  //   - does NOT bypass or weaken WidgetDomain validation on the public
+  //     widget-config endpoint;
+  //   - returns a truthful "backend ready" status, NOT a "verified
+  //     installation" status. The UI copy explains it does NOT prove
+  //     the script is installed on the customer website.
+  async function checkWidgetBackend() {
+    setBackendStatus('checking')
     try {
-      const res = await fetch(`/api/widget/${slug}/config`)
+      const res = await fetch('/api/widget-status')
       if (res.ok) {
         const data = await res.json()
-        if (data.slug) {
-          setVerifyStatus('ok')
-          localStorage.setItem('sukhan_widget_verified_' + slug, '1')
-          toast.success(locale === 'fa' ? 'بک‌اند ویجت فعال است' : 'Widget backend is live')
+        if (data.ready && data.slug === slug) {
+          setBackendStatus('ok')
+          toast.success(locale === 'fa' ? 'بک‌اند ویجت آماده است' : 'Widget backend is ready')
         } else {
-          setVerifyStatus('fail')
+          setBackendStatus('fail')
+          toast.error(locale === 'fa' ? 'بک‌اند ویجت هنوز پیکربندی نشده' : 'Widget backend not configured yet')
         }
       } else {
-        setVerifyStatus('fail')
-        toast.error(locale === 'fa' ? 'بک‌اند ویجت در دسترس نیست' : 'Widget backend not reachable')
+        setBackendStatus('fail')
+        toast.error(locale === 'fa' ? 'بررسی بک‌اند ناموفق بود' : 'Backend check failed')
       }
     } catch {
-      setVerifyStatus('fail')
-      toast.error(locale === 'fa' ? 'بک‌اند ویجت در دسترس نیست' : 'Widget backend not reachable')
+      setBackendStatus('fail')
+      toast.error(locale === 'fa' ? 'بررسی بک‌اند ناموفق بود' : 'Backend check failed')
     }
   }
 
   const isDomainLimitLocked = domainLimit === 0
   const domainCount = domains.length
   const hasWebsite = domainCount > 0
-  const isInstalled = typeof window !== 'undefined' && localStorage.getItem('sukhan_widget_installed_' + slug) === '1'
-  const isVerified = verifyStatus === 'ok' || (typeof window !== 'undefined' && localStorage.getItem('sukhan_widget_verified_' + slug) === '1')
+  // Truthful checklist source: "installation code copied" comes from
+  // the user's actual copy action (HTML or NPM snippet) — never from a
+  // passive page visit. It does NOT mean the script was installed on a
+  // customer website; the label below reflects that.
+  const codeCopied = typeof window !== 'undefined'
+    ? localStorage.getItem('sukhan_widget_code_copied_' + slug) === '1'
+    : false
+  // "Backend ready" comes from the authenticated internal check. It is
+  // NOT a "verified installation" status — the label below reflects that.
+  const backendReady = backendStatus === 'ok'
 
   const fa = locale === 'fa'
 
   const checklistItems = [
     { done: true, label: fa ? 'فضای کاری ایجاد شد' : 'Workspace created' },
     { done: hasWebsite, label: fa ? 'وب‌سایت اضافه شد' : 'Add your website' },
-    { done: isInstalled, label: fa ? 'ویجت نصب شد' : 'Install widget' },
-    { done: isVerified, label: fa ? 'ویجت تایید شد' : 'Verify widget' },
+    // TRUTHFUL: this item reflects "the user copied the installation
+    // snippet" — not that the widget is installed on a customer site.
+    { done: codeCopied, label: fa ? 'کد نصب کپی شد' : 'Installation code copied' },
+    // TRUTHFUL: this item reflects "the Sukhan backend readiness check
+    // succeeded" — not that the script was verified on the customer
+    // site. The UI explains the limitation next to the button.
+    { done: backendReady, label: fa ? 'بک‌اند ویجت آماده است' : 'Backend ready' },
     { done: convInfo.hasConversations, label: fa ? 'پیام تست دریافت شد' : 'Receive a test message' },
+    // TRUTHFUL: an agent has actually replied — derived from the
+    // canonical Conversation.firstResponseAt field (set once on the
+    // first agent message POST), NOT from `lastMessagePreview` (which a
+    // visitor message also populates).
     { done: convInfo.hasAgentReply, label: fa ? 'از صندوق ورودی پاسخ دادید' : 'Reply from Inbox' },
   ]
 
@@ -190,7 +270,7 @@ initSukhan({ apiKey: '${slug}' })`
 
   return (
     <div className="flex flex-1 flex-col gap-4 p-4 sm:p-6">
-      <PanelHeader title={fa ? 'ویجت' : 'Widget'} hint={fa ? 'نصب، سفارشی‌سازی و تایید ویجت گفت‌وگو' : 'Install, customize, and verify your chat widget'} />
+      <PanelHeader title={fa ? 'ویجت' : 'Widget'} hint={fa ? 'نصب، سفارشی‌سازی و آماده‌سازی ویجت گفت‌وگو' : 'Install, customize, and prepare your chat widget'} />
 
       {/* Tab switcher */}
       <div className="flex gap-1 rounded-lg border border-border bg-muted/30 p-1 w-fit">
@@ -333,44 +413,46 @@ initSukhan({ apiKey: '${slug}' })`
               </CardContent>
             </Card>
 
-            {/* Verification */}
+            {/* Backend readiness check (NOT installation verification) */}
             <Card>
               <CardHeader>
                 <CardTitle className="font-display text-base flex items-center gap-2">
-                  <CheckCircle2 className="h-4 w-4 text-saffron" />
-                  {fa ? 'تایید نصب' : 'Verify Installation'}
+                  <ServerCog className="h-4 w-4 text-saffron" />
+                  {fa ? 'بررسی بک‌اند ویجت' : 'Check Widget Backend'}
                 </CardTitle>
                 <CardDescription>
-                  {fa ? 'بررسی دسترس‌پذیری بک‌اند ویجت' : 'Check widget backend reachability'}
+                  {fa ? 'آمادگی بک‌اند Sukhan را برای ویجت شما تأیید می‌کند' : 'Verifies Sukhan backend readiness for your widget'}
                 </CardDescription>
               </CardHeader>
               <CardContent>
-                <Button onClick={verifyWidget} disabled={verifyStatus === 'checking'} className="gap-2" variant="outline">
-                  {verifyStatus === 'checking' ? (
+                <Button onClick={checkWidgetBackend} disabled={backendStatus === 'checking'} className="gap-2" variant="outline">
+                  {backendStatus === 'checking' ? (
                     <>{fa ? 'در حال بررسی...' : 'Checking...'}</>
-                  ) : verifyStatus === 'ok' ? (
-                    <><Check className="h-4 w-4 text-turquoise" /> {fa ? 'تایید شد' : 'Verified'}</>
-                  ) : verifyStatus === 'fail' ? (
+                  ) : backendStatus === 'ok' ? (
+                    <><Check className="h-4 w-4 text-turquoise" /> {fa ? 'بک‌اند آماده' : 'Backend ready'}</>
+                  ) : backendStatus === 'fail' ? (
                     <><ExternalLink className="h-4 w-4 text-destructive" /> {fa ? 'دوباره بررسی کنید' : 'Retry'}</>
                   ) : (
-                    <><ShieldCheck className="h-4 w-4" /> {fa ? 'بررسی نصب' : 'Check installation'}</>
+                    <><ServerCog className="h-4 w-4" /> {fa ? 'بررسی بک‌اند' : 'Check backend'}</>
                   )}
                 </Button>
-                {verifyStatus === 'ok' && (
+                {backendStatus === 'ok' && (
                   <p className="mt-3 text-xs text-turquoise">
-                    {fa ? 'بک‌اند ویجت فعال است. برای تایید کامل، اسکریپت را در سایت خود قرار دهید.' : 'Widget backend is live. To fully verify, ensure the script tag is on your website.'}
+                    {fa
+                      ? 'بک‌اند ویجت آماده است. این بررسی فقط آمادگی سمت Sukhan را تأیید می‌کند و وجود اسکریپت در سایت مشتری را اثبات نمی‌کند. برای نصب واقعی، اسکریپت را در سایت خود قرار دهید.'
+                      : 'Widget backend is ready. This check confirms Sukhan-side readiness only — it does NOT prove the script is installed on your customer website. To actually install, place the script on your site.'}
                   </p>
                 )}
-                {verifyStatus === 'fail' && (
+                {backendStatus === 'fail' && (
                   <p className="mt-3 text-xs text-destructive">
-                    {fa ? 'بک‌اند ویجت در دسترس نیست. کلید ویجت و دامنه‌های مجاز را بررسی کنید.' : 'Widget backend not reachable. Check your Widget Key and allowed domains.'}
+                    {fa ? 'بررسی بک‌اند ناموفق بود. ویجت خود را در تب سفارشی‌سازی پیکربندی کنید.' : 'Backend check failed. Configure your widget in the Customization tab.'}
                   </p>
                 )}
-                {verifyStatus === 'idle' && (
+                {backendStatus === 'idle' && (
                   <p className="mt-3 text-xs text-muted-foreground">
                     {fa
-                      ? 'این بررسی دسترس‌پذیری بک‌اند Sukhan را تایید می‌کند (بدون ریسک SSRF). برای تایید نصب کامل، اسکریپت را در سایت خود قرار دهید.'
-                      : 'This verifies Sukhan backend reachability (no SSRF risk). To fully verify installation, place the script on your website.'}
+                      ? 'این بررسی فقط دسترس‌پذیری و پیکربندی بک‌اند Sukhan را تأیید می‌کند (بدون SSRF و بدون دور زدن امنیت دامنه‌های مجاز). این بررسی وجود اسکریپت در سایت مشتری را اثبات نمی‌کند.'
+                      : 'This verifies Sukhan backend reachability and configuration only (no SSRF, no bypass of allowed-domain security). It does NOT prove the script is installed on your customer website.'}
                   </p>
                 )}
               </CardContent>
