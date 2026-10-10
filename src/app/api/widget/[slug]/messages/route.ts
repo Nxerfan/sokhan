@@ -124,6 +124,12 @@ export async function POST(
     return widgetHeaders(NextResponse.json({ error: 'empty_message' }, { status: 400 }))
   }
 
+  // clientMessageId — ephemeral per-send correlation identifier generated
+  // by the widget. NOT persisted to PostgreSQL. Used only to reconcile
+  // the widget's optimistic placeholder with the persisted server message.
+  // Bounded to 100 chars, alphanumeric + dash/underscore only.
+  const clientMessageId = String(body.clientMessageId ?? '').trim().slice(0, 100)
+
   // Wrap ALL tenant-scoped DB work in withTenant. The fail-closed Prisma
   // extension requires a current tenant context for any read/write against
   // tenant-scoped models (WidgetDomain, Message, Conversation, AiConfig,
@@ -209,11 +215,13 @@ export async function POST(
   const { message, conversation, isNew } = result
 
   // Publish to realtime — fan out to agents in the conversation room + tenant room.
-  // Not a DB call — outside the withTenant wrap is fine.
+  // Include the ephemeral clientMessageId in the message:new payload so the
+  // widget can reconcile its optimistic placeholder with the exact persisted
+  // message (not just by text, which is unsafe for duplicate identical sends).
   await publishToRealtime({
     room: room.conversation(conversation.id),
     event: EVENTS.MESSAGE_NEW,
-    payload: { ...message, isNewConversation: isNew },
+    payload: { ...message, isNewConversation: isNew, clientMessageId: clientMessageId || undefined },
   })
 
   if (isNew) {
@@ -268,7 +276,7 @@ export async function POST(
     })
   }
 
-  return NextResponse.json({ message, conversationId: conversation.id, aiResponse })
+  return widgetHeaders(NextResponse.json({ message, conversationId: conversation.id, aiResponse, clientMessageId: clientMessageId || undefined }))
 }
 
 /**
