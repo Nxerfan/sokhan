@@ -43,11 +43,17 @@ const CUSTOMER_ORIGIN = `http://127.0.0.1:${CUSTOMER_PORT}`
 const WIDGET_SCRIPT_URL = (slug: string) => `${SUKHAN_ORIGIN}/api/widget/${slug}/script`
 
 let customerServer: Server | null = null
+let currentSlug = ''
 
 test.beforeAll(async () => {
   customerServer = createServer((req, res) => {
+    // Serve a customer HTML page with the widget <script> tag embedded
+    // in the markup — so reload naturally re-loads the widget script.
+    // A dynamically injected script via page.addScriptTag() disappears
+    // on reload, which is a test-harness issue, not a product failure.
+    const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Customer Website</title></head><body><h1>Customer Website</h1><script async defer src="${WIDGET_SCRIPT_URL(currentSlug)}"></script></body></html>`
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
-    res.end('<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Customer Website</title></head><body><h1>Customer Website</h1></body></html>')
+    res.end(html)
   })
   await new Promise<void>((resolve) => customerServer!.listen(CUSTOMER_PORT, '127.0.0.1', resolve))
 })
@@ -99,6 +105,7 @@ test.describe('Widget two-way live messaging — real external origin', () => {
     const dashboardCtx = await browser.newContext()
     const dashboardPage = await dashboardCtx.newPage()
     const slug = await signupAndGetSlug(dashboardPage, email, workspace)
+    currentSlug = slug  // so the customer server serves HTML with the right script tag
     const nav = dashboardPage.getByRole('navigation', { name: 'primary' })
     await nav.getByRole('button', { name: /صندوق ورودی|Inbox/ }).click()
     await dashboardPage.waitForResponse(
@@ -108,6 +115,8 @@ test.describe('Widget two-way live messaging — real external origin', () => {
     await dashboardPage.waitForTimeout(2000)
 
     // === Visitor widget page — GENUINELY DIFFERENT origin (port 8085) ===
+    // The customer HTML page includes the widget <script> tag in its
+    // markup, so reload naturally re-loads the widget script.
     const widgetCtx = await browser.newContext()
     const widgetPage = await widgetCtx.newPage()
 
@@ -140,11 +149,10 @@ test.describe('Widget two-way live messaging — real external origin', () => {
     })
 
     // #1 Load the customer page (different origin from Sukhan).
+    // The HTML markup contains the widget <script> tag, so the widget
+    // loads automatically — no need for page.addScriptTag().
     await widgetPage.goto(`${CUSTOMER_ORIGIN}/customer.html`)
     await widgetPage.waitForLoadState('domcontentloaded')
-
-    // #1 Load the REAL generated widget script from the Sukhan origin.
-    await widgetPage.addScriptTag({ url: WIDGET_SCRIPT_URL(slug) })
     await widgetPage.waitForTimeout(3000)
 
     // Open the widget.
