@@ -246,15 +246,25 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
       var cur = byId[im.id];
       if (!cur) {
         // New persisted message. Try _clientMessageId first
-        // (authoritative match), then fall back to FIFO queue.
+        // (authoritative match — the ONLY way to supersede a modern
+        // correlated optimistic placeholder).
         if (im._clientMessageId && optimisticByCmid[im._clientMessageId]) {
           optimisticByCmid[im._clientMessageId]._supersededBy = im.id;
         } else {
+          // Fallback: text/FIFO queue. This is ONLY for LEGACY
+          // optimistic entries that have NO _clientMessageId.
+          // Modern correlated entries (which DO have _clientMessageId)
+          // must NEVER be reconciled by text guessing — they wait
+          // for their exact clientMessageId match (from the POST
+          // response or the realtime echo).
           var pkey = (im.senderType || '') + '\u0001' + (im.content && im.content.text || '');
           if (optimisticQueues[pkey]) {
             var queue = optimisticQueues[pkey];
             for (var qj = 0; qj < queue.length; qj++) {
-              if (!queue[qj]._supersededBy) {
+              // Guard: only match LEGACY optimistic entries (no
+              // _clientMessageId). Modern entries must only be
+              // superseded by exact clientMessageId match above.
+              if (!queue[qj]._supersededBy && !queue[qj]._clientMessageId) {
                 queue[qj]._supersededBy = im.id;
                 break;
               }
@@ -701,13 +711,26 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
         // #2 central merge path: route realtime messages through
         // mergeIncoming so a Socket.IO echo of a message that
         // already arrived via the POST response is a no-op (the
-        // message id is already in state.messages). This also handles
-        // the case where the visitor's OWN message is echoed back via
-        // the conversation room — mergeIncoming sees the optimistic
-        // entry (id "__local_N", same text+senderType) and reconciles
-        // it with the persisted echo.
+        // message id is already in state.messages).
+        //
+        // Normalize clientMessageId: the realtime payload carries
+        // the PUBLIC field 'clientMessageId' (from the backend's
+        // publishToRealtime call). The merge looks for the INTERNAL
+        // field '_clientMessageId'. Copy without mutating the
+        // original Socket.IO payload object — create a shallow copy
+        // so the merge receives one consistent internal correlation
+        // shape regardless of whether the message came from the POST
+        // response or the Socket.IO realtime event.
         if (!msg || !msg.id) return;
-        state.messages = mergeIncoming([msg]);
+        var normalized;
+        if (msg.clientMessageId && !msg._clientMessageId) {
+          normalized = {};
+          for (var k in msg) { if (msg.hasOwnProperty(k)) normalized[k] = msg[k]; }
+          normalized._clientMessageId = msg.clientMessageId;
+        } else {
+          normalized = msg;
+        }
+        state.messages = mergeIncoming([normalized]);
         renderMessages();
         if (!state.open) {
           pulseDot.style.display = 'block';

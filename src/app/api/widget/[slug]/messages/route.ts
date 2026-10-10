@@ -127,7 +127,8 @@ export async function POST(
   // clientMessageId — ephemeral per-send correlation identifier generated
   // by the widget. NOT persisted to PostgreSQL. Used only to reconcile
   // the widget's optimistic placeholder with the persisted server message.
-  // Bounded to 100 chars, alphanumeric + dash/underscore only.
+  // Bounded to 100 chars (trimmed). No character-set validation — the
+  // widget generates 'cmsg_<seq>_<timestamp>' which is safe ASCII.
   const clientMessageId = String(body.clientMessageId ?? '').trim().slice(0, 100)
 
   // Wrap ALL tenant-scoped DB work in withTenant. The fail-closed Prisma
