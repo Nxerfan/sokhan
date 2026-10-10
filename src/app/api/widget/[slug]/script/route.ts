@@ -178,46 +178,45 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
   // are not subject to dedup (there's nothing to dedup against).
   //
   // DUPLICATE IDENTICAL MESSAGES: a user may legitimately send the
-  // same text twice ("hello" / "hello"). Each optimistic placeholder
-  // has a unique __local_<seq> id. The merge maintains an ORDERED
-  // QUEUE of optimistic candidates per senderType+text key — when a
-  // persisted message arrives, it reconciles the OLDEST unmatched
-  // candidate in the queue. This ensures:
-  //   - two identical optimistic messages both render (distinct ids)
-  //   - each persisted POST response reconciles exactly one optimistic
-  //   - after both responses, exactly two persisted bubbles remain
-  //   - Socket.IO echoes don't create duplicates (id-based dedup)
-  //   - failure/retry of one doesn't mutate the other (distinct ids)
+  // same text twice ('hello' / 'hello'). Each optimistic placeholder
+  // has a unique __local_<seq> id AND a unique _clientMessageId. The
+  // merge reconciles persisted messages to the exact optimistic
+  // placeholder using _clientMessageId (NOT text, which is unsafe).
+  //
+  // Reconciliation priority (for each incoming persisted message):
+  //   1. If the incoming message has a _clientMessageId, find the
+  //      optimistic entry with the SAME _clientMessageId and supersede
+  //      it. This is the authoritative match — works regardless of
+  //      identical text, concurrent requests, or response ordering.
+  //   2. If no _clientMessageId match, fall back to the ordered queue
+  //      (FIFO) per senderType+text — the oldest unmatched candidate
+  //      is superseded. This handles polling/history (which don't
+  //      carry _clientMessageId) and the legacy case where the server
+  //      doesn't return a clientMessageId.
   function mergeMessageArrays(existing, incoming){
-    // Build a Map of persisted messages by id (from both existing
-    // and incoming). Persisted messages have real ids (NOT starting
-    // with __local_).
     var byId = {};
-    // Track optimistic entries (id starts with __local_) by their
-    // senderType+text key. Use an ORDERED QUEUE (array) per key so
-    // multiple identical in-flight optimistic messages are all kept
-    // and each is matched against the oldest persisted response.
+    // Track optimistic entries by _clientMessageId for authoritative
+    // reconciliation.
+    var optimisticByCmid = {};
+    // Track optimistic entries by senderType+text as a FALLBACK FIFO
+    // queue (used when the incoming persisted message has no
+    // _clientMessageId — e.g. from polling or history).
     var optimisticQueues = {};
-    // Track all optimistic entries by their __local_ id (for the
-    // output-walk phase — we need to know if each one was superseded).
-    var optimisticById = {};
 
     // Index existing messages.
     for (var i = 0; i < existing.length; i++) {
       var m = existing[i];
       if (!m) continue;
       if (m.id && String(m.id).indexOf('__local_') === 0) {
-        // Optimistic placeholder — add to the ordered queue for its
-        // senderType+text key.
+        if (m._clientMessageId) {
+          optimisticByCmid[m._clientMessageId] = m;
+        }
         var key = (m.senderType || '') + '\u0001' + (m.content && m.content.text || '');
         if (!optimisticQueues[key]) optimisticQueues[key] = [];
         optimisticQueues[key].push(m);
-        optimisticById[m.id] = m;
       } else if (m.id) {
         byId[m.id] = m;
       }
-      // Messages without an id are NOT indexed — they pass through
-      // the output phase unchanged (kept as-is).
     }
 
     // Process incoming messages.
@@ -226,7 +225,10 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
       if (!im) continue;
       if (im.id && String(im.id).indexOf('__local_') === 0) {
         // Incoming optimistic message (from sendMessage). Add it to
-        // the ordered queue — it's a NEW placeholder.
+        // the indexes.
+        if (im._clientMessageId) {
+          optimisticByCmid[im._clientMessageId] = im;
+        }
         var ikey = (im.senderType || '') + '\u0001' + (im.content && im.content.text || '');
         if (!optimisticQueues[ikey]) optimisticQueues[ikey] = [];
         // Don't add duplicates (same __local_ id already in queue).
@@ -236,7 +238,6 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
         }
         if (!alreadyInQueue) {
           optimisticQueues[ikey].push(im);
-          optimisticById[im.id] = im;
         }
         continue;
       }
@@ -244,42 +245,34 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
       // Persisted incoming message.
       var cur = byId[im.id];
       if (!cur) {
-        // New persisted message. Check if there's an unmatched
-        // optimistic placeholder with the same text+senderType that
-        // should be reconciled (superseded). Use the OLDEST unmatched
-        // candidate (FIFO — the first optimistic in the queue that
-        // hasn't been superseded yet).
-        var pkey = (im.senderType || '') + '\u0001' + (im.content && im.content.text || '');
-        if (optimisticQueues[pkey]) {
-          var queue = optimisticQueues[pkey];
-          for (var qj = 0; qj < queue.length; qj++) {
-            if (!queue[qj]._supersededBy) {
-              // Found the oldest unmatched candidate — mark it as
-              // superseded by this persisted message's id.
-              queue[qj]._supersededBy = im.id;
-              break;
+        // New persisted message. Try _clientMessageId first
+        // (authoritative match), then fall back to FIFO queue.
+        if (im._clientMessageId && optimisticByCmid[im._clientMessageId]) {
+          optimisticByCmid[im._clientMessageId]._supersededBy = im.id;
+        } else {
+          var pkey = (im.senderType || '') + '\u0001' + (im.content && im.content.text || '');
+          if (optimisticQueues[pkey]) {
+            var queue = optimisticQueues[pkey];
+            for (var qj = 0; qj < queue.length; qj++) {
+              if (!queue[qj]._supersededBy) {
+                queue[qj]._supersededBy = im.id;
+                break;
+              }
             }
           }
         }
         byId[im.id] = im;
       } else {
-        // Same id — keep the newer copy (by createdAt). On a tie,
-        // the incoming copy wins.
         if (!cur.createdAt || (im.createdAt && im.createdAt >= cur.createdAt)) {
           byId[im.id] = im;
         }
       }
     }
 
-    // Build the output: walk existing in order. For each entry:
-    //   - No id → keep as-is (greeting).
-    //   - Optimistic + superseded → emit the persisted counterpart.
-    //   - Optimistic + NOT superseded → keep the optimistic entry.
-    //   - Persisted → emit the latest copy from byId.
-    // Then append any incoming messages not already emitted.
+    // Build the output.
     var out = [];
     var seenPersistedIds = {};
-    var seenOptimisticIds = {}; // dedup by __local_ id (not by text)
+    var seenOptimisticIds = {};
     var seenNoIdKeys = {};
     for (var k = 0; k < existing.length; k++) {
       var em = existing[k];
@@ -291,8 +284,6 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
           seenNoIdKeys[nkey] = true;
         }
       } else if (String(em.id).indexOf('__local_') === 0) {
-        // Optimistic entry — dedup by __local_ id (NOT by text, so
-        // two identical optimistic messages both appear).
         if (seenOptimisticIds[em.id]) continue;
         seenOptimisticIds[em.id] = true;
         if (em._supersededBy && byId[em._supersededBy]) {
@@ -312,7 +303,6 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
         }
       }
     }
-    // Append incoming messages not already emitted.
     for (var l = 0; l < incoming.length; l++) {
       var im2 = incoming[l];
       if (!im2) continue;
@@ -323,7 +313,6 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
           seenNoIdKeys[nkey2] = true;
         }
       } else if (String(im2.id).indexOf('__local_') === 0) {
-        // Incoming optimistic — dedup by __local_ id.
         if (!seenOptimisticIds[im2.id]) {
           out.push(im2);
           seenOptimisticIds[im2.id] = true;
@@ -335,7 +324,6 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
         }
       }
     }
-    // Sort chronologically by createdAt ASC, id ASC tie-break.
     out.sort(function(a, b){
       var ca = a.createdAt || '';
       var cb = b.createdAt || '';
@@ -768,11 +756,20 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
     if (!text) return;
     inputEl.value = '';
 
+    // clientMessageId — explicit per-send correlation identifier.
+    // Generated by the widget, sent in the POST body, and returned
+    // (ephemerally — not persisted) in the POST response + realtime
+    // message:new payload. This allows the merge to reconcile the
+    // EXACT optimistic placeholder with its persisted counterpart,
+    // regardless of identical text, concurrent requests, or response
+    // ordering. Text+FIFO alone is NOT sufficient (if send A fails
+    // and send B succeeds with identical text, FIFO would match B's
+    // response to A's failed placeholder).
+    var clientMessageId = 'cmsg_' + (++state.optimisticSeq) + '_' + Date.now();
+
     // #1 Optimistic send: push a local placeholder IMMEDIATELY so the
-    // visitor's bubble renders before the POST resolves. The id is
-    // "__local_<seq>" so the central merge can later reconcile it
-    // with the persisted server message (same text+senderType).
-    var optimisticId = '__local_' + (++state.optimisticSeq);
+    // visitor's bubble renders before the POST resolves.
+    var optimisticId = '__local_' + state.optimisticSeq;
     var optimisticMsg = {
       id: optimisticId,
       conversationId: state.conversationId || null,
@@ -783,10 +780,14 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
       createdAt: new Date().toISOString(),
       status: 'sent',
       // Local-only metadata: tracks the optimistic state + the
-      // original text for retry. NEVER sent to the server.
+      // original text for retry + the clientMessageId for
+      // deterministic reconciliation. NEVER sent to the server
+      // (the clientMessageId IS sent to the server, but the other
+      // _optimistic* fields are widget-local only).
       _optimistic: true,
       _optimisticStatus: 'pending',
       _optimisticText: text,
+      _clientMessageId: clientMessageId,
     };
     state.messages = mergeIncoming([optimisticMsg]);
     renderMessages();
@@ -795,7 +796,7 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
     fetch(MESSAGES_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + state.token },
-      body: JSON.stringify({ text: text }),
+      body: JSON.stringify({ text: text, clientMessageId: clientMessageId }),
     })
     .then(function(r){
       // #5 proper response handling: check r.ok before parsing. A
@@ -815,13 +816,21 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
     })
     .then(function(data){
       // #1 successful POST reconciles the optimistic message with the
-      // persisted server message. Route the persisted message through
-      // mergeIncoming — it matches the optimistic entry by
-      // senderType+text and replaces the placeholder with the real id.
-      // The visitor's bubble stays in place (same array slot), so
-      // there's no flicker + no duplicate.
+      // persisted server message. The POST response includes the
+      // ephemeral clientMessageId — the merge uses it to find the
+      // EXACT optimistic placeholder (not just by text, which is
+      // unsafe for duplicate identical sends). The visitor's bubble
+      // stays in place (same array slot), so there's no flicker +
+      // no duplicate.
       if (data.message) {
-        state.messages = mergeIncoming([data.message]);
+        // Attach the clientMessageId to the persisted message so
+        // mergeMessageArrays can match it against the optimistic
+        // entry's _clientMessageId.
+        var msgWithCmid = data.message;
+        if (data.clientMessageId) {
+          msgWithCmid._clientMessageId = data.clientMessageId;
+        }
+        state.messages = mergeIncoming([msgWithCmid]);
         renderMessages();
       }
       if (data.conversationId && data.conversationId !== state.conversationId) {
@@ -941,16 +950,23 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
   }
 
   // Retry a failed optimistic send. Re-submits the original text
-  // and re-uses the SAME optimistic id so the merge reconciles the
-  // retry's persisted response with the existing bubble (no
-  // duplicate, no flicker).
+  // with a NEW clientMessageId so the merge can reconcile the retry's
+  // persisted response with the exact failed placeholder (not just
+  // by text — the old failed placeholder's _clientMessageId is
+  // replaced with the new one so the merge matches correctly).
   function retrySendMessage(optimisticId, text){
-    // Reset the optimistic entry to pending state for the retry.
+    // Generate a new clientMessageId for the retry.
+    var retryCmid = 'cmsg_retry_' + (++state.optimisticSeq) + '_' + Date.now();
+    // Reset the optimistic entry to pending state + update its
+    // _clientMessageId so the retry's persisted response matches THIS
+    // specific placeholder (not a different one with the same text).
     for (var i = 0; i < state.messages.length; i++) {
       var m = state.messages[i];
       if (m.id === optimisticId) {
         m._optimisticStatus = 'pending';
         m._optimisticError = null;
+        m._supersededBy = null;
+        m._clientMessageId = retryCmid;
         break;
       }
     }
@@ -958,7 +974,7 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
     fetch(MESSAGES_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + state.token },
-      body: JSON.stringify({ text: text }),
+      body: JSON.stringify({ text: text, clientMessageId: retryCmid }),
     })
     .then(function(r){
       if (!r.ok) {
@@ -971,7 +987,11 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
     })
     .then(function(data){
       if (data.message) {
-        state.messages = mergeIncoming([data.message]);
+        var msgWithCmid = data.message;
+        if (data.clientMessageId) {
+          msgWithCmid._clientMessageId = data.clientMessageId;
+        }
+        state.messages = mergeIncoming([msgWithCmid]);
         renderMessages();
       }
       if (data.conversationId && data.conversationId !== state.conversationId) {
