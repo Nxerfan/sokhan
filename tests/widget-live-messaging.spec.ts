@@ -87,6 +87,11 @@ async function signupAndGetSlug(page: Page, email: string, workspace: string): P
 
 test.describe('Widget two-way live messaging — real external origin', () => {
   test('Healthy realtime: visitor optimistic send + agent reply via Socket.IO — both appear exactly once without reload', async ({ browser }) => {
+    // This test covers the full two-way loop: signup, dashboard, widget
+    // setup on external origin, optimistic send, POST reconciliation,
+    // Socket.IO delivery, agent reply from dashboard, reload + history.
+    // It needs more than the default 60s timeout in the CI Docker env.
+    test.setTimeout(120000)
     const { email, workspace } = creds('healthy')
     const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
 
@@ -236,10 +241,11 @@ test.describe('Widget two-way live messaging — real external origin', () => {
     // #8 Reload/history restore still shows both messages.
     await widgetPage.reload()
     await widgetPage.waitForLoadState('networkidle')
-    await widgetPage.waitForTimeout(3000)
+    await widgetPage.waitForTimeout(5000)
     const launcher2 = widgetPage.locator('.sk-launcher')
+    await expect(launcher2, 'launcher reappears after reload').toBeVisible({ timeout: 15000 })
     await launcher2.click()
-    await widgetPage.waitForTimeout(2000)
+    await widgetPage.waitForTimeout(3000)
     await expect(
       widgetPage.locator('.sk-msg.sk-vis p').filter({ hasText: visitorText }),
       'visitor message remains after reload',
