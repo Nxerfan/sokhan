@@ -176,27 +176,43 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
   // Messages WITHOUT an id (e.g. the greeting system message, which
   // is created locally and never persisted) are ALWAYS kept — they
   // are not subject to dedup (there's nothing to dedup against).
+  //
+  // DUPLICATE IDENTICAL MESSAGES: a user may legitimately send the
+  // same text twice ("hello" / "hello"). Each optimistic placeholder
+  // has a unique __local_<seq> id. The merge maintains an ORDERED
+  // QUEUE of optimistic candidates per senderType+text key — when a
+  // persisted message arrives, it reconciles the OLDEST unmatched
+  // candidate in the queue. This ensures:
+  //   - two identical optimistic messages both render (distinct ids)
+  //   - each persisted POST response reconciles exactly one optimistic
+  //   - after both responses, exactly two persisted bubbles remain
+  //   - Socket.IO echoes don't create duplicates (id-based dedup)
+  //   - failure/retry of one doesn't mutate the other (distinct ids)
   function mergeMessageArrays(existing, incoming){
     // Build a Map of persisted messages by id (from both existing
     // and incoming). Persisted messages have real ids (NOT starting
     // with __local_).
     var byId = {};
     // Track optimistic entries (id starts with __local_) by their
-    // senderType+text key, so an incoming persisted message with the
-    // same text can reconcile (supersede) the optimistic placeholder.
-    var optimisticByKey = {};
+    // senderType+text key. Use an ORDERED QUEUE (array) per key so
+    // multiple identical in-flight optimistic messages are all kept
+    // and each is matched against the oldest persisted response.
+    var optimisticQueues = {};
+    // Track all optimistic entries by their __local_ id (for the
+    // output-walk phase — we need to know if each one was superseded).
+    var optimisticById = {};
 
     // Index existing messages.
     for (var i = 0; i < existing.length; i++) {
       var m = existing[i];
       if (!m) continue;
       if (m.id && String(m.id).indexOf('__local_') === 0) {
-        // Optimistic placeholder — key by text+senderType so the
-        // persisted response can find it.
+        // Optimistic placeholder — add to the ordered queue for its
+        // senderType+text key.
         var key = (m.senderType || '') + '\u0001' + (m.content && m.content.text || '');
-        if (!optimisticByKey[key]) {
-          optimisticByKey[key] = m;
-        }
+        if (!optimisticQueues[key]) optimisticQueues[key] = [];
+        optimisticQueues[key].push(m);
+        optimisticById[m.id] = m;
       } else if (m.id) {
         byId[m.id] = m;
       }
@@ -210,11 +226,17 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
       if (!im) continue;
       if (im.id && String(im.id).indexOf('__local_') === 0) {
         // Incoming optimistic message (from sendMessage). Add it to
-        // the optimistic set — it's a NEW placeholder that should
-        // appear in the output.
+        // the ordered queue — it's a NEW placeholder.
         var ikey = (im.senderType || '') + '\u0001' + (im.content && im.content.text || '');
-        if (!optimisticByKey[ikey]) {
-          optimisticByKey[ikey] = im;
+        if (!optimisticQueues[ikey]) optimisticQueues[ikey] = [];
+        // Don't add duplicates (same __local_ id already in queue).
+        var alreadyInQueue = false;
+        for (var qi = 0; qi < optimisticQueues[ikey].length; qi++) {
+          if (optimisticQueues[ikey][qi].id === im.id) { alreadyInQueue = true; break; }
+        }
+        if (!alreadyInQueue) {
+          optimisticQueues[ikey].push(im);
+          optimisticById[im.id] = im;
         }
         continue;
       }
@@ -222,13 +244,22 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
       // Persisted incoming message.
       var cur = byId[im.id];
       if (!cur) {
-        // New persisted message. Check if there's an optimistic
-        // placeholder with the same text+senderType that should be
-        // reconciled (superseded).
+        // New persisted message. Check if there's an unmatched
+        // optimistic placeholder with the same text+senderType that
+        // should be reconciled (superseded). Use the OLDEST unmatched
+        // candidate (FIFO — the first optimistic in the queue that
+        // hasn't been superseded yet).
         var pkey = (im.senderType || '') + '\u0001' + (im.content && im.content.text || '');
-        if (optimisticByKey[pkey]) {
-          // Mark the optimistic entry as superseded by this persisted id.
-          optimisticByKey[pkey]._supersededBy = im.id;
+        if (optimisticQueues[pkey]) {
+          var queue = optimisticQueues[pkey];
+          for (var qj = 0; qj < queue.length; qj++) {
+            if (!queue[qj]._supersededBy) {
+              // Found the oldest unmatched candidate — mark it as
+              // superseded by this persisted message's id.
+              queue[qj]._supersededBy = im.id;
+              break;
+            }
+          }
         }
         byId[im.id] = im;
       } else {
@@ -245,41 +276,35 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
     //   - Optimistic + superseded → emit the persisted counterpart.
     //   - Optimistic + NOT superseded → keep the optimistic entry.
     //   - Persisted → emit the latest copy from byId.
-    // Then append any incoming messages (persisted OR optimistic OR
-    // no-id) that weren't already in existing.
+    // Then append any incoming messages not already emitted.
     var out = [];
     var seenPersistedIds = {};
-    var seenOptimisticKeys = {};
-    var seenNoIdKeys = {}; // dedup no-id messages by a composite key
+    var seenOptimisticIds = {}; // dedup by __local_ id (not by text)
+    var seenNoIdKeys = {};
     for (var k = 0; k < existing.length; k++) {
       var em = existing[k];
       if (!em) continue;
       if (!em.id) {
-        // No-id message (greeting) — keep it. Dedup by a composite key
-        // so the same greeting doesn't appear twice if merge is called
-        // multiple times with the greeting in both existing and incoming.
         var nkey = (em.senderType || '') + '\u0001' + (em.content && em.content.text || '') + '\u0001' + (em.createdAt || '');
         if (!seenNoIdKeys[nkey]) {
           out.push(em);
           seenNoIdKeys[nkey] = true;
         }
       } else if (String(em.id).indexOf('__local_') === 0) {
-        // Optimistic entry.
-        var ekey = (em.senderType || '') + '\u0001' + (em.content && em.content.text || '');
-        seenOptimisticKeys[ekey] = true;
+        // Optimistic entry — dedup by __local_ id (NOT by text, so
+        // two identical optimistic messages both appear).
+        if (seenOptimisticIds[em.id]) continue;
+        seenOptimisticIds[em.id] = true;
         if (em._supersededBy && byId[em._supersededBy]) {
-          // Superseded — emit the persisted counterpart.
           var persisted = byId[em._supersededBy];
           if (!seenPersistedIds[persisted.id]) {
             out.push(persisted);
             seenPersistedIds[persisted.id] = true;
           }
         } else {
-          // Pending or failed — keep it.
           out.push(em);
         }
       } else {
-        // Persisted entry — emit the latest copy from byId.
         var latest = byId[em.id];
         if (latest && !seenPersistedIds[latest.id]) {
           out.push(latest);
@@ -292,19 +317,16 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
       var im2 = incoming[l];
       if (!im2) continue;
       if (!im2.id) {
-        // No-id incoming message (e.g. greeting via addMessage).
         var nkey2 = (im2.senderType || '') + '\u0001' + (im2.content && im2.content.text || '') + '\u0001' + (im2.createdAt || '');
         if (!seenNoIdKeys[nkey2]) {
           out.push(im2);
           seenNoIdKeys[nkey2] = true;
         }
       } else if (String(im2.id).indexOf('__local_') === 0) {
-        // Incoming optimistic message (from sendMessage). If it
-        // wasn't already in existing, add it now.
-        var ikey2 = (im2.senderType || '') + '\u0001' + (im2.content && im2.content.text || '');
-        if (!seenOptimisticKeys[ikey2]) {
+        // Incoming optimistic — dedup by __local_ id.
+        if (!seenOptimisticIds[im2.id]) {
           out.push(im2);
-          seenOptimisticKeys[ikey2] = true;
+          seenOptimisticIds[im2.id] = true;
         }
       } else {
         if (!seenPersistedIds[im2.id]) {
@@ -314,7 +336,6 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
       }
     }
     // Sort chronologically by createdAt ASC, id ASC tie-break.
-    // No-id messages (greeting) sort by their createdAt too.
     out.sort(function(a, b){
       var ca = a.createdAt || '';
       var cb = b.createdAt || '';
