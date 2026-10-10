@@ -84,6 +84,12 @@ test.describe('Widget optimistic-send failure', () => {
     await widgetPage.route(`**/api/widget/${slug}/messages`, async (route) => {
       if (route.request().method() === 'POST') {
         postIntercepted = true
+        // Delay the 500 response by 1s so the .sk-pending bubble has
+        // time to render before the catch handler transitions it to
+        // .sk-failed. Without this delay, route.fulfill is synchronous
+        // and the 500 response arrives before the test can see the
+        // .sk-pending state.
+        await new Promise(resolve => setTimeout(resolve, 1000))
         await route.fulfill({
           status: 500,
           contentType: 'application/json',

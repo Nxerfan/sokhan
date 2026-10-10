@@ -116,10 +116,13 @@ test.describe('Widget duplicate identical messages', () => {
     // #5 Reload the page.
     await widgetPage.reload()
     await widgetPage.waitForLoadState('networkidle')
-    await widgetPage.waitForTimeout(3000)
+    await widgetPage.waitForTimeout(5000)
+    // Wait for the launcher to reappear (the widget script needs time
+    // to re-mount after reload).
     const launcher2 = widgetPage.locator('.sk-launcher')
+    await expect(launcher2, 'launcher reappears after reload').toBeVisible({ timeout: 15000 })
     await launcher2.click()
-    await widgetPage.waitForTimeout(2000)
+    await widgetPage.waitForTimeout(3000)
 
     // #6 History still shows exactly 2.
     await expect(
@@ -201,7 +204,12 @@ test.describe('Widget duplicate identical messages', () => {
 
     // #10 Retry the first (failed) — unroute so the retry POST succeeds.
     await widgetPage.unroute(`**/api/widget/${slug}/messages`)
-    await widgetPage.locator('.sk-retry-btn').click()
+    // Re-query the retry button right before clicking — the widget
+    // may have re-rendered (e.g. from a polling fetch merge) between
+    // the initial assertion and this click, detaching the old button.
+    const retryBtn = widgetPage.locator('.sk-retry-btn').first()
+    await expect(retryBtn, 'retry button still present before click').toBeVisible({ timeout: 5000 })
+    await retryBtn.click()
     // Wait for the failed state to clear (the retry POST succeeds +
     // reconciles the failed optimistic entry into a persisted message).
     await expect(

@@ -106,6 +106,16 @@ test.describe('Widget two-way live messaging — real external origin', () => {
     const widgetCtx = await browser.newContext()
     const widgetPage = await widgetCtx.newPage()
 
+    // Capture console messages for diagnostics (safe — the widget
+    // only logs short safe codes, never tokens/secrets).
+    const widgetConsoleLogs: string[] = []
+    widgetPage.on('console', (msg) => {
+      const text = msg.text()
+      if (text.includes('[sukhan]')) {
+        widgetConsoleLogs.push(text)
+      }
+    })
+
     // Track all widget-related requests to PROVE they go to the Sukhan origin.
     const widgetRequests: string[] = []
     widgetPage.on('request', (req) => {
@@ -137,8 +147,10 @@ test.describe('Widget two-way live messaging — real external origin', () => {
     await expect(launcher, 'widget launcher should appear on customer page').toBeVisible({ timeout: 10000 })
     await launcher.click()
     // Give the socket time to connect (cross-origin WebSocket upgrade
-    // may take a few seconds in the CI Docker environment).
-    await widgetPage.waitForTimeout(3000)
+    // may take a few seconds in the CI Docker environment). The socket
+    // connects to the tenant room on connect; the conversation room join
+    // happens after the visitor sends the first message.
+    await widgetPage.waitForTimeout(5000)
 
     // #2 Config + contact REST calls went to the Sukhan origin.
     const configReq = widgetRequests.find((u) => u.includes(`/api/widget/${slug}/config`))
@@ -213,7 +225,7 @@ test.describe('Widget two-way live messaging — real external origin', () => {
     const replyBubble = widgetPage.locator('.sk-msg.sk-agt p').filter({ hasText: replyText })
     await expect(
       replyBubble,
-      'agent reply must appear in customer-origin widget via Socket.IO (no reload)',
+      `agent reply must appear in customer-origin widget via Socket.IO (no reload). Console logs: ${JSON.stringify(widgetConsoleLogs)}`,
     ).toHaveCount(1, { timeout: 20000 })
     await widgetPage.waitForTimeout(2000)
     await expect(
