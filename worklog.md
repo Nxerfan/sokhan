@@ -1612,3 +1612,52 @@ Next Actions:
 - If any test fails, the runDocker() helper surfaces the docker stdout/stderr in the test trace for diagnosis.
 - If the secret validator rejects `test-secret`/`test-password` (it should not, based on src/lib/secret-validation.ts — these are non-empty, non-`CHANGE_ME_…`, not in the KNOWN_BAD_* sets), update to stronger values.
 - If the caddy-public-boundary test (or any other existing test) still uses port 81 BASE/DASHBOARD, those should be migrated to port 80 in a follow-up (out of scope for QUAL-1).
+
+---
+Task ID: QUAL-2
+Agent: main (Self-host Release Qualification)
+Task: Rewrite tests/self-host-clean-install.spec.ts to mirror the backup/restore test's REST-driven approach (use REST APIs for ALL dashboard-side operations, widget UI only for the visitor side, all through http://127.0.0.1 port 80 production Caddy).
+
+Work Log:
+- Read prior context (worklog + tests/self-host-backup-restore.spec.ts + tests/self-host-clean-install.spec.ts + tests/helpers/otp-signup.ts + docker-compose.yml + docker-compose.lite.yml + src/app/api/conversations/route.ts + src/app/api/conversations/[id]/messages/route.ts + src/app/api/widget/[slug]/messages/route.ts + src/app/api/widget/[slug]/contact/route.ts + src/app/api/widget/[slug]/script/route.ts + prisma schema for Message/Conversation/Contact). Confirmed the agent-side REST endpoints (`/api/tenants/me`, `/api/conversations`, `/api/conversations/<id>/messages`) and the visitor-side widget endpoints (`/api/widget/<slug>/script`, `/api/widget/<slug>/contact`, `/api/widget/<slug>/messages`) — all reachable through Caddy at http://127.0.0.1, all cross-origin-friendly (`Access-Control-Allow-Origin: *` for widget endpoints).
+- Root cause of the previous flaky test: it drove the dashboard Inbox UI (clicking nav buttons, waiting for `loadConversations()` to re-fetch after reload, and waiting for Socket.IO CONVERSATION_NEW events through the production Caddy topology). The dashboard's React state machine is sensitive to the order of network responses and Socket.IO event delivery through Caddy, while the data layer (Postgres + REST endpoints) is the source of truth. The backup/restore test — which drives the agent side entirely through REST — passes reliably for the same reason.
+- Rewrote tests/self-host-clean-install.spec.ts to drive the agent side ENTIRELY through REST APIs:
+    * Signup via `otpSignupPlaywright(page.request, ORIGIN, …)` (the same helper the backup/restore test uses).
+    * Login via the NextAuth credentials callback (`POST /api/auth/callback/credentials`).
+    * Workspace check via `GET /api/tenants/me` (asserts 200 + name + slug).
+    * Widget script reachability via `GET /api/widget/<slug>/script` (asserts 200).
+    * Conversation discovery via `GET /api/conversations` (matches by `lastMessagePreview.includes(visitorText)` OR `contact.name === contactName`).
+    * Agent reply via `POST /api/conversations/<id>/messages` (asserts 200 + persisted `message.id`).
+    * Post-restart verification via the same REST endpoints + the widget messages endpoint.
+- Kept the VISITOR side on the real widget UI (the user-visible surface the test must validate):
+    * Customer HTTP server on port 8088 serves HTML with `<script async defer src="http://127.0.0.1/api/widget/<slug>/script">` — same production embed pattern as before.
+    * Visitor clicks `.sk-launcher`, types into `.sk-panel input`, presses Enter.
+    * Asserts the optimistic `.sk-msg.sk-vis p` bubble appears immediately (count = 1).
+    * Asserts the `.sk-pending` class clears after the POST `/api/widget/<slug>/messages` reconciles (count = 0).
+    * Asserts the agent reply appears in `.sk-msg.sk-agt p` without reload (count = 1, EXACTLY ONCE — no Socket.IO echo duplicate).
+- For Step 17 (verify messages exist via `GET /api/widget/<slug>/messages?conversationId=<id>` with Bearer token): the widget stores its `visitorId` in localStorage under key `sukhan_visitor_<slug>` (confirmed in src/app/api/widget/[slug]/script/route.ts line 351). The test reads this visitorId via `widgetPage.evaluate(() => localStorage.getItem(...))` and re-issues `POST /api/widget/<slug>/contact` with it after the restart — this returns a fresh `realtimeToken` bound to the same contact + conversation (the contact lookup is keyed by `(tenantId, visitorId)` per src/app/api/widget/[slug]/contact/route.ts). The token is then used as the Bearer for the messages endpoint. This avoids reaching into the widget's in-memory `state.token` (which is in a closure and not accessible from outside).
+- Mirrored the backup/restore test's Docker-management approach exactly:
+    * `REPO_ROOT = process.cwd()` (NOT `__dirname`).
+    * `runDocker(spec, args)` shells out to `docker compose -f <file> -p <projectName> <args>` with `COMPOSE_ENV` (NIXIFY_MOCK=true, NEXTAUTH_SECRET=test-secret, POSTGRES_PASSWORD=test-password) merged into `process.env`.
+    * `waitForCaddy(maxMs = 120000)` polls `http://127.0.0.1/api` until 200 (Next.js catch-all route responding through the production reverse proxy).
+    * `loginViaCaddy(request, email, password)` GETs `/api/auth/csrf` then POSTs `/api/auth/callback/credentials` form-encoded.
+    * `creds(label)` mints a per-process per-timestamp email + workspace + password.
+    * `EDITIONS` array with `sukhan-clean-full` / `sukhan-clean-lite` project names (different from `sukhan-bakres-*` so the two test files never collide on Docker daemon volumes even if run interleaved).
+    * `try/finally` guarantees `docker compose down -v --remove-orphans` runs even if the test fails mid-way.
+    * Per-test `test.setTimeout(300000)` (5 minutes per edition).
+- Removed all dashboard UI navigation/clicking (Inbox tab, Widget Installation tab, conversation item click, reply input fill + Enter). The dashboard `Page` is created ONLY for its `APIRequestContext` (so the OTP signup + NextAuth login cookies ride on the same context); the dashboard UI itself is never loaded.
+- Preserved the customer HTTP server `beforeAll`/`afterAll` lifecycle (one shared server on port 8088 across both editions; `currentSlug` is mutated before each test loads the widget page).
+- Lint: `bun run lint` → clean (no warnings, no errors).
+- Typecheck: `bun run typecheck` (`tsc --noEmit`) → clean (no errors).
+
+Files changed:
+- tests/self-host-clean-install.spec.ts — full rewrite (489 → ~330 lines). Removed all dashboard UI navigation/clicking/reply-input code; replaced with REST calls. Kept widget UI visitor flow + customer HTTP server. Added localStorage-based visitorId extraction + fresh contact call for the post-restart messages endpoint Bearer token.
+
+Why this fixes the test:
+- The dashboard Inbox UI was the only flaky surface in the previous test — it depended on (a) the React Zustand store's default-view state after reload, (b) the InboxView's `loadConversations()` completing before the assertion timed out, and (c) Socket.IO CONVERSATION_NEW events arriving through the production Caddy gateway in time. None of those are deterministic through Caddy.
+- The new test depends ONLY on the data layer (Postgres + REST endpoints) for the agent side, which is the same surface the backup/restore test exercises successfully. The visitor side keeps the real widget UI (the only surface that genuinely needs to demonstrate Socket.IO realtime delivery end-to-end through Caddy).
+
+Notes for downstream agents:
+- This test does NOT exercise the dashboard Inbox UI's conversation-list rendering at all. If the release qualification also needs to prove the dashboard UI renders the conversation list through Caddy (the original failing assertion), that should be a SEPARATE test (`tests/dashboard-inbox-render.spec.ts` or similar) — not bundled into the clean-install qualification. The clean-install test's job is to prove the deployment is healthy end-to-end; UI rendering correctness is a different concern.
+- The test still depends on the customer HTTP server on port 8088 — operators running this in environments where 8088 is taken should override `CUSTOMER_PORT`. (Same constraint as the previous version of the test.)
+- Runtime estimate: ~3-4 minutes per edition (Docker `up -d` + `restart app realtime` + 2× `down -v`), so ~6-8 minutes total. Matches the previous test's runtime.
