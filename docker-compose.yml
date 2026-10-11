@@ -51,6 +51,13 @@ services:
       # Payment gateway credentials (optional — empty if not configured).
       ZARINPAL_MERCHANT_ID: ${ZARINPAL_MERCHANT_ID:-}
       IDPAY_API_KEY: ${IDPAY_API_KEY:-}
+      # Nixify OTP/email verification — REQUIRED for production signup.
+      # The operator MUST set NIXIFY_API_KEY in .env for real OTP delivery.
+      # NIXIFY_MOCK=true is for CI/local testing ONLY — it bypasses the
+      # real Nixify API and uses a deterministic mock OTP code (123456).
+      # Never set NIXIFY_MOCK=true in production.
+      NIXIFY_API_KEY: ${NIXIFY_API_KEY:-}
+      NIXIFY_MOCK: ${NIXIFY_MOCK:-false}
       # Public branding.
       NEXT_PUBLIC_APP_NAME: ${NEXT_PUBLIC_APP_NAME:-Sukhan}
     volumes:

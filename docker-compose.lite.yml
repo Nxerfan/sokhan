@@ -55,6 +55,11 @@ services:
       REALTIME_INTERNAL_URL: http://realtime:3004
       ZARINPAL_MERCHANT_ID: ${ZARINPAL_MERCHANT_ID:-}
       IDPAY_API_KEY: ${IDPAY_API_KEY:-}
+      # Nixify OTP/email verification — REQUIRED for production signup.
+      # The operator MUST set NIXIFY_API_KEY in .env for real OTP delivery.
+      # NIXIFY_MOCK=true is for CI/local testing ONLY.
+      NIXIFY_API_KEY: ${NIXIFY_API_KEY:-}
+      NIXIFY_MOCK: ${NIXIFY_MOCK:-false}
       NEXT_PUBLIC_APP_NAME: ${NEXT_PUBLIC_APP_NAME:-Sukhan}
     volumes:
       - uploads:/app/uploads

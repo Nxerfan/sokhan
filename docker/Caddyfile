@@ -7,6 +7,11 @@
 # talking to Docker services — they just use relative URLs with
 # ?XTransformPort=3003 for Socket.IO handshakes.
 #
+# SECURITY: only XTransformPort=3003 (the public Socket.IO port) is
+# accepted. The internal realtime HTTP service on port 3004 (which
+# exposes /health and /internal/publish) is NEVER publicly routable
+# through this mechanism. Arbitrary port values are NOT proxied.
+#
 # Set DOMAIN env var to your domain (e.g. chat.example.com) for auto-HTTPS
 # via Let's Encrypt. Leave empty for HTTP-only on port 80 (local/testing).
 # ============================================================
@@ -23,14 +28,16 @@
 # Site address: if DOMAIN is set, use it (enables auto-HTTPS on 80+443).
 # Otherwise fall back to :80 (HTTP only, for local testing).
 {$DOMAIN::80} {
-    # Socket.IO traffic — identified by ?XTransformPort=<port> query.
-    # The widget + dashboard connect with ?XTransformPort=3003 to reach
-    # the realtime Socket.IO server (instead of going to the Next.js app).
-    @transform_port_query {
-        query XTransformPort=*
+    # Socket.IO traffic — identified by the EXACT query param
+    # ?XTransformPort=3003. This is the ONLY public realtime port.
+    # The matcher uses an exact value (not a wildcard) so that
+    # ?XTransformPort=3004 (internal HTTP) or any other port value
+    # is NOT proxied to the realtime container.
+    @realtime_3003 {
+        query XTransformPort=3003
     }
-    handle @transform_port_query {
-        reverse_proxy realtime:{query.XTransformPort} {
+    handle @realtime_3003 {
+        reverse_proxy realtime:3003 {
             header_up Host {host}
             header_up X-Forwarded-For {remote_host}
             header_up X-Forwarded-Proto {scheme}
@@ -39,6 +46,11 @@
     }
 
     # Everything else → Next.js app.
+    # This includes: REST API, dashboard, widget script, config,
+    # and any request without ?XTransformPort=3003.
+    # Requests with ?XTransformPort=3004 or arbitrary values
+    # fall through to this handler (→ Next.js app) which will
+    # NOT serve realtime endpoints — they are simply ignored.
     handle {
         reverse_proxy app:3000 {
             header_up Host {host}

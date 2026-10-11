@@ -8,7 +8,7 @@
  * by `createdAt` then `id` as a deterministic tiebreaker.
  */
 
-import type { Message } from './types'
+import type { Message } from './types.js'
 
 function ts(m: Message): number {
   if (!m || !m.createdAt) return 0
