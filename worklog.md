@@ -1561,3 +1561,54 @@ Stage Summary:
   6. Real-domain HTTPS — release-gate banner placed in Caddy HTTPS troubleshooting section stating "MANUAL EXTERNAL RELEASE GATE — REAL-DOMAIN HTTPS/ACME NOT VERIFIED BY CI".
   7. Hard-coded Compose assumptions — cron section no longer references sukhan_uploads; now invokes scripts/self-host-backup.sh which uses Compose-aware operations (no hard-coded project name or volume name).
 - No code or config changes; documentation-only edit. No tests run (markdown-only).
+
+---
+Task ID: QUAL-1
+Agent: sub-agent (general-purpose, on branch test/self-host-release-qualification @ f069241)
+Task: Rewrite tests/self-host-backup-restore.spec.ts to production-shape (no test-override ports) + create new tests/self-host-clean-install.spec.ts for both Full and Lite editions.
+
+Work Log:
+- Read prior context: worklog.md, existing tests/self-host-backup-restore.spec.ts (used BASE=http://127.0.0.1:81 + DASHBOARD=http://127.0.0.1:3000 test-override ports), docker-compose.yml, docker-compose.lite.yml, scripts/self-host-backup.sh, scripts/self-host-restore.sh, tests/helpers/otp-signup.ts, tests/widget-external-origin.spec.ts, tests/widget-live-messaging.spec.ts, tests/onboarding.spec.ts (for Widget nav button + Installation tab patterns), src/lib/secret-validation.ts (confirm `test-secret`/`test-password` pass production validator — they are non-empty, non-`CHANGE_ME_…`), Dockerfile, docker/Caddyfile, .env.docker.example, eslint.config.mjs, tsconfig.json, playwright.config.ts.
+
+Rewrote tests/self-host-backup-restore.spec.ts (380 lines):
+- ALL HTTP traffic goes through `http://127.0.0.1` (port 80, production Caddy origin). NO direct app:3000 access from the host.
+- Uses ONLY the production compose file (docker-compose.yml for Full, docker-compose.lite.yml for Lite). NO test override compose.
+- NIXIFY_MOCK=true / NEXTAUTH_SECRET=test-secret / POSTGRES_PASSWORD=test-password passed as env vars when invoking `docker compose` (NOT via test override compose).
+- Uses the real operator scripts scripts/self-host-backup.sh + scripts/self-host-restore.sh.
+- The test manages Docker itself: `docker compose -f <file> -p <project> up -d`, `down -v --remove-orphans`, `restart app realtime`, `exec -T app sh -c "…"`.
+- For internal operations (sentinel file creation at /app/uploads/sentinel-<stamp>.txt, sentinel content verification via `cat`), uses `docker compose exec` inside the compose network — does NOT bypass Caddy by hitting the app container from the host.
+- Uses deterministic Compose project names (sukhan-bakres-full / sukhan-bakres-lite) so Full and Lite volumes never collide (their volumes overlap on uploads, logs, caddy-data, caddy-config). Both tests share host port 80 — they run sequentially (Playwright config: workers=1, fullyParallel=false), each `down -v`s at start AND end.
+- After `down -v`, verifies volumes are GENUINELY GONE using Compose project-aware inspection: `docker volume ls -q --filter "label=com.docker.compose.project=<projectName>"` — asserts the output is empty.
+- Uses the SAME public origin (http://127.0.0.1) BEFORE and AFTER restore — no port switching.
+- The real operator backup/restore scripts read COMPOSE_PROJECT_NAME from the env (set by the test) so all their internal `docker compose -f <file> …` calls operate on the same project the test spun up.
+- 15-step flow per edition: (1) fresh volumes, (2) start production compose, (3) wait for Caddy /api 200, (4) signup + login through Caddy, (5) create visitor + conversation + messages through Caddy (widget contact + widget messages + agent reply via conversations/<id>/messages), (6) create uploads sentinel via `docker compose exec`, (7) run backup script + assert metadata.json/database.sql/uploads.tar exist, (8) down -v + assert project volumes gone, (9) fresh volumes (up -d again), (10) run restore script with --force, (11) login as original user through Caddy, (12) verify workspace/conversation/messages through Caddy (tenants/me + conversations + widget messages with realtimeToken), (13) verify uploads sentinel exact content via `docker compose exec`+`cat`, (14) send post-restore message through Caddy (proves DB writable), (15) cleanup down -v.
+- Uses try/finally to guarantee cleanup runs even on test failure.
+- runDocker() helper captures stdout/stderr and prints them to the test console on failure (Playwright attaches console output to the test trace) so the operator can see WHY the docker command failed.
+
+Created tests/self-host-clean-install.spec.ts (438 lines):
+- Production-shape clean-install qualification test for BOTH Full and Lite — same env / port conventions as the backup/restore test (port 80 only, production compose files only, NIXIFY_MOCK + test secrets as env vars, deterministic project names sukhan-clean-full / sukhan-clean-lite).
+- 18-step flow per edition: (1) fresh volumes, (2) start production compose with NIXIFY_MOCK=true, (3) wait for Caddy /api 200, (4) signup through Caddy, (5) login through Caddy, (6) dashboard loads through Caddy (heading visible), (7) navigate to Widget panel + verify Installation tab + Widget Key card visible (uses the same patterns as tests/onboarding.spec.ts: nav button `/^ویجت$|^Widget$/`, Installation tab `/^نصب$|^Installation$/`), (8) widget script reachable through Caddy (/api/widget/<slug>/script returns 200), (9) external-origin widget loads — real customer HTTP server on port 8088 serves HTML with the Sukhan widget <script> tag using an ABSOLUTE URL pointing at http://127.0.0.1 (production embed pattern), (10) visitor sends a message through the widget (optimistic bubble + .sk-pending clears after POST), (11) conversation appears in Inbox (convItem button with visitor text), (12) agent sends a reply from the real Inbox UI (.border-t input[placeholder]), (13) visitor receives the reply without page reload (Socket.IO .sk-msg.sk-agt bubble appears EXACTLY ONCE), (14) restart app + realtime containers (`docker compose restart app realtime`), (15) wait for Caddy to respond again, (16) verify workspace + conversation still exist (tenants/me + reload inbox + convItem still visible), (17) verify widget still works (reload customer page, launcher reappears, both visitor + agent messages persist via history restore), (18) cleanup down -v.
+- Uses try/finally to guarantee cleanup of both browser contexts AND docker compose project even on test failure.
+
+Implementation details / design decisions:
+- The test files use `--project-name` (-p) flag on every `docker compose` invocation to make the project name deterministic. The backup/restore scripts do NOT take a -p flag — they read `COMPOSE_PROJECT_NAME` from the env, which the test sets when invoking them. So the scripts operate on the same project the test spun up.
+- waitForCaddy() helper polls `http://127.0.0.1/api` every 2s for up to 120s, returning once it gets HTTP 200. This correctly handles: Caddy not yet up (fetch throws → retry), Caddy up but app still starting (502 → retry), app ready (200 → return). Uses Node 18+ global fetch (Playwright runs on Node 18+).
+- After the restore script, the test calls waitForCaddy() again because the script stops app + realtime during restore, then restarts them. The script's own start commands return immediately, but the app needs a few seconds to come up before Caddy stops returning 502.
+- The customer HTTP server (port 8088) is started in test.beforeAll and torn down in test.afterAll — it's shared between Full and Lite tests. Each test sets the module-level `currentSlug` variable before loading the widget page, so the HTML the server serves contains the right script tag.
+- The signup helper otpSignupPlaywright() from tests/helpers/otp-signup.ts takes a `request` object that satisfies the structural type `{ post: (url, opts) => Promise<{ ok, status, json }> }`. Playwright's `APIRequestContext` (page.request) satisfies this, so we pass `page.request` directly with the Sukhan origin (http://127.0.0.1).
+- test.setTimeout(300000) — 5 minutes per edition. Matches the original test's timeout. Generous enough for cold-start Docker + migrations + 2 restarts.
+- The new test files are in tests/ which eslint ignores (eslint.config.mjs has `"tests/**"` in the ignores array), so `bun run lint` passes trivially for them. The test files ARE typechecked by `bun run typecheck` (tsconfig.json does not exclude tests/), so all type annotations are strict.
+
+Verification:
+- `bun run lint` → exit 0 (eslint . — passes; tests/** ignored per eslint.config.mjs).
+- `bun run typecheck` → exit 0 (tsc --noEmit — passes; both new test files typecheck cleanly).
+- Docker not available in this sandbox (docker command not found) — the tests cannot be RUN here. They will be executed by CI on the self-host-release-qualification branch. The tests are written defensively (tolerate `down -v` failure when project doesn't exist; capture+log docker stdout/stderr on failure; try/finally cleanup) to handle the CI environment.
+
+Next Actions:
+- CI: run the new tests on a runner with Docker available. The expected sequence:
+  1. CI builds the sukhan:latest image (one-time).
+  2. Playwright runs tests/self-host-backup-restore.spec.ts → 2 tests (full + lite), each ~3-4 min.
+  3. Playwright runs tests/self-host-clean-install.spec.ts → 2 tests (full + lite), each ~3-4 min.
+- If any test fails, the runDocker() helper surfaces the docker stdout/stderr in the test trace for diagnosis.
+- If the secret validator rejects `test-secret`/`test-password` (it should not, based on src/lib/secret-validation.ts — these are non-empty, non-`CHANGE_ME_…`, not in the KNOWN_BAD_* sets), update to stronger values.
+- If the caddy-public-boundary test (or any other existing test) still uses port 81 BASE/DASHBOARD, those should be migrated to port 80 in a follow-up (out of scope for QUAL-1).

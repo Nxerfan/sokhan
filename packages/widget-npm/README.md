@@ -109,18 +109,39 @@ initSukhan({
 
 ## Install
 
+> **⚠️ Not yet published to npm.** The `sukhan-widget` package has not yet
+> been published to the public npm registry. The commands below are the
+> *intended* installation path once publication is complete. Until then,
+> use the **script-tag installation** (below) which is always supported.
+
 ```bash
-bun add sukhan-widget
+# Will be available once published:
+# bun add sukhan-widget
 # or
-npm install sukhan-widget
+# npm install sukhan-widget
 ```
+
+### Script-tag installation (always supported)
+
+The official script-tag path works without npm. Embed this in your HTML:
+
+```html
+<script async defer src="https://your-sukhan-domain/api/widget/<slug>/script"></script>
+```
+
+Replace `<slug>` with your workspace's Widget Key (found in the Sukhan
+dashboard → Widget → Installation). No build step or package manager needed.
 
 ## Quick start (3 steps)
 
 ### 1. Install the package
 
+> Not yet published to npm. Use the script-tag installation above until
+> the package is available on the public registry.
+
 ```bash
-bun add sukhan-widget
+# Will be available once published:
+# bun add sukhan-widget
 ```
 
 ### 2. Set the environment variable

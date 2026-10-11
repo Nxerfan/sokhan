@@ -86,3 +86,5 @@ scripts/apply-final.sh
 /agent/skills/upstash-*/
 /skills-lock.json
 .zscripts/dev.pid
+packages/widget-npm/dist/
+packages/widget-npm/*.tgz

@@ -130,24 +130,15 @@ test.describe('Widget Installation & Onboarding UX', () => {
       `HTML snippet must be a <script> tag pointing at /api/widget/<slug>/script; got: ${snippetText}`,
     ).toMatch(/<script\s+async\s+defer\s+src=.*\/api\/widget\/[^/]+\/script/)
 
-    // 6. NPM instructions render with the real tenant identifier. The
-    //    install command (`bun add sukhan-widget`) is in its own <pre>;
-    //    the init snippet (with the apiKey) is in another <pre>.
-    const npmInstallPre = page.locator('pre').filter({ hasText: 'bun add sukhan-widget' }).first()
-    await expect(npmInstallPre).toBeVisible({ timeout: 10_000 })
-    const npmInstallText = (await npmInstallPre.textContent()) ?? ''
-    expect(
-      npmInstallText,
-      `NPM install snippet must contain the sukhan-widget package; got: ${npmInstallText}`,
-    ).toContain('bun add sukhan-widget')
-
-    const npmInitPre = page.locator('pre').filter({ hasText: 'initSukhan' }).first()
-    await expect(npmInitPre).toBeVisible({ timeout: 10_000 })
-    const npmInitText = (await npmInitPre.textContent()) ?? ''
-    expect(
-      npmInitText,
-      `NPM init snippet must reference the tenant slug as apiKey; got: ${npmInitText}`,
-    ).toContain(`apiKey: '${slug}'`)
+    // 6. NPM instructions are marked as "Coming Soon" (not yet published).
+    //    The package is NOT publicly available on npm — the UI must
+    //    show "Coming Soon" and must NOT provide a copyable working
+    //    install command.
+    const npmComingSoon = page.locator('pre').filter({ hasText: 'Not yet published to npm' }).first()
+    await expect(
+      npmComingSoon,
+      'NPM installation must show "Not yet published to npm" (Coming Soon state)',
+    ).toBeVisible({ timeout: 10_000 })
 
     // 8. Invalid domain shows a user-visible failure. MUST run BEFORE
     //    step 7 because the Free plan allows exactly 1 domain — after
