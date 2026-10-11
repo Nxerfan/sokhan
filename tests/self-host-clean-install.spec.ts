@@ -299,6 +299,7 @@ for (const spec of EDITIONS) {
 
       // ---- Step 10: Visitor sends a message through the widget. ----
       const visitorText = `CLEAN_VISITOR_${stamp}`
+      const contactName = `CleanTest-${stamp}`
       const widgetInput = widgetPage.locator('.sk-panel input').first()
       await expect(widgetInput).toBeVisible({ timeout: 5000 })
       await widgetInput.fill(visitorText)
@@ -316,7 +317,7 @@ for (const spec of EDITIONS) {
       await expect(visitorBubble, 'visitor message must appear EXACTLY ONCE').toHaveCount(1)
 
       // ---- Step 11: Conversation appears in Inbox. ----
-      const convItem = dashboardPage.locator('button').filter({ hasText: visitorText }).first()
+      const convItem = dashboardPage.locator('button').filter({ hasText: contactName }).first()
       await expect(
         convItem,
         'visitor conversation must appear in the agent inbox',
@@ -398,7 +399,7 @@ for (const spec of EDITIONS) {
         { timeout: 15000 },
       ).catch(() => {})
       await dashboardPage.waitForTimeout(3000)
-      const convItem2 = dashboardPage.locator('button').filter({ hasText: visitorText }).first()
+      const convItem2 = dashboardPage.locator('button').filter({ hasText: contactName }).first()
       await expect(
         convItem2,
         'visitor conversation should still be in the inbox after restart',
