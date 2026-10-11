@@ -49,7 +49,7 @@ import { otpSignupPlaywright } from './helpers/otp-signup'
  */
 
 const ORIGIN = 'http://127.0.0.1' // Caddy HTTP on port 80 (production).
-const REPO_ROOT = resolve(__dirname, '..')
+const REPO_ROOT = process.cwd()
 const BACKUP_SCRIPT = join(REPO_ROOT, 'scripts/self-host-backup.sh')
 const RESTORE_SCRIPT = join(REPO_ROOT, 'scripts/self-host-restore.sh')
 

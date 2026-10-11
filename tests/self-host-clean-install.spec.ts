@@ -46,7 +46,7 @@ import { otpSignupPlaywright } from './helpers/otp-signup'
  */
 
 const ORIGIN = 'http://127.0.0.1' // Caddy HTTP on port 80 (production).
-const REPO_ROOT = resolve(__dirname, '..')
+const REPO_ROOT = process.cwd()
 const CUSTOMER_PORT = 8088
 const CUSTOMER_ORIGIN = `http://127.0.0.1:${CUSTOMER_PORT}`
 
