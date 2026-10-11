@@ -1464,3 +1464,41 @@ Verification:
 Stage Summary:
 - The dashboard inbox now has a stable single-mount socket connection for the session, with all event handlers reading the LATEST state via refs (no stale closures), an owned-local socket that is properly disconnected on teardown (no zombies), true-fallback polling that skips work when realtime is up, race-safe conversation switching via a generation counter, typing-state cleanup on switch / unmount / disconnect, unread-count semantics that increment EXACTLY once per unique message ID and never for the selected conversation, and a central ID-based message merge that makes POST reply + Socket.IO echo + history fetch + polling collapse to a single render of each message.
 - All pure inbox logic is extracted to `src/lib/inbox-helpers.ts` (no React, no DOM, no fetch) and covered by 40 unit tests in `tests/unit/inbox-helpers.test.ts`. The realtime-client public API is unchanged.
+
+---
+Task ID: PR9-BLOCKER-FIX
+Agent: Z.ai Code (PR #9 external-origin CORS + clientMessageId + reload test-harness)
+Task: Fix three blockers: (1) real external-origin visitor POST fails with CORS "Failed to fetch"; (2) text/FIFO reconciliation is not safe for duplicate identical messages with mixed outcomes; (3) reload test-harness — page.addScriptTag() disappears on reload. Do NOT merge, do NOT enable auto-merge.
+
+Work Log:
+- Reset to PR head 3bfcca6. Analyzed the first successful Docker regression run (42/43 pass).
+- BLOCKER 1 (CORS): Found the root cause in src/app/api/widget/[slug]/messages/route.ts line 271: `return NextResponse.json(...)` — the POST SUCCESS response was missing `widgetHeaders()`. Every error path called `widgetHeaders()` but the success path did NOT. The browser received the cross-origin POST response without `Access-Control-Allow-Origin` → "Failed to fetch". Fixed: `return widgetHeaders(NextResponse.json({...}))`.
+- BLOCKER 2 (clientMessageId): The FIFO queue matched the oldest unmatched optimistic candidate by senderType+text. But if send A fails and send B succeeds with identical text, B's persisted response matches A (the oldest unmatched). Fix: implemented explicit per-send correlation via clientMessageId. Widget generates `cmsg_<seq>_<ts>` per send, stores it on the optimistic placeholder as `_clientMessageId`, sends it in the POST body. Backend reads it (bounded to 100 chars), returns it in the POST response + message:new realtime payload (ephemeral — NOT persisted). The merge now matches by `_clientMessageId` first (authoritative), falls back to FIFO queue for polling/history (which don't carry clientMessageId). Retry generates a NEW clientMessageId and updates the failed placeholder's `_clientMessageId` so the retry's persisted response matches the exact placeholder.
+- BLOCKER 3 (reload test-harness): page.addScriptTag() injects a script that disappears on reload — the launcher was missing after reload. Fix: both the healthy-realtime test (port 8085) and the duplicate-messages test (port 8086) now serve customer HTML with the `<script async defer src="...">` tag embedded in the markup. The slug is set via a mutable `currentSlug` variable before navigation. Reload naturally re-loads the widget script.
+- Iterated through 3 CI runs:
+  1. CORS fix + clientMessageId + embedded script tag: 42/43 pass — the healthy-realtime test timed out at 60s (too many steps for the default Playwright timeout).
+  2. test.setTimeout(120000) + toBeVisible(15s) on the launcher after reload: 42/43 pass — the launcher didn't reappear because page.addScriptTag() disappears on reload.
+  3. Embedded `<script>` tag in the customer HTML: 43/43 pass in BOTH Full and Lite Docker!
+- Final CI on SHA 4e48157: ci job success (515 unit tests), docker-regression job success (Full: 43 browser + 44 DB-boundary; Lite: 43 browser + 44 DB-boundary). Vercel: success.
+
+Stage Summary:
+- PR URL: https://github.com/Nxerfan/sokhan/pull/9
+- Final SHA: 4e4815772b60c0cd43b8b0f63c468908164d3d1e
+- Root cause of the external-origin "Failed to fetch": the messages POST success response (line 271) returned NextResponse.json() WITHOUT calling widgetHeaders() — no Access-Control-Allow-Origin header. The browser blocked the cross-origin response. The OPTIONS preflight was correct; only the actual POST success response was missing CORS headers.
+- CORS fix: `return widgetHeaders(NextResponse.json({...}))` — wrap the success response in widgetHeaders() just like every other response in the file.
+- Customer origin: http://127.0.0.1:8085 (real HTTP server, HTML with embedded <script> tag). Sukhan origin: http://127.0.0.1:81 (Caddy gateway → Next.js + realtime).
+- clientMessageId design: widget generates `cmsg_<seq>_<ts>` per send → sent in POST body → returned in POST response (ephemeral) + message:new realtime payload (ephemeral) → merge matches by _clientMessageId (authoritative) → fallback to FIFO queue for polling/history (no clientMessageId). No Prisma schema migration.
+- Two-identical-success result: both optimistic bubbles appear (distinct __local_ ids) → both POSTs succeed → each clientMessageId matches its exact optimistic placeholder → exactly 2 persisted bubbles. PASS.
+- Failed+success+retry result: first send fails (500) → .sk-failed state → second send succeeds → 1 persisted + 1 failed → retry first (new clientMessageId) → 2 persisted messages. PASS.
+- Agent live-reply result: agent replies from the real Inbox dashboard UI → visitor widget receives via Socket.IO message:new without reload → appears exactly once (merge dedup by persisted message.id). PASS.
+- Polling fallback result: socket blocked → agent replies → polling delivers within ~2 polling intervals (20s) → appears exactly once. PASS.
+- Failed-send/retry result: POST 500 → .sk-failed (red border) → .sk-retry-btn + .sk-edit-btn appear → text preserved → retry succeeds → exactly 1 persisted bubble. PASS.
+- Full Docker: 43 browser pass / 0 fail (6.3m) + 44 DB-boundary pass / 0 fail.
+- Lite Docker: 43 browser pass / 0 fail (6.2m) + 44 DB-boundary pass / 0 fail.
+- Unit test count: 515 pass / 0 fail across 18 files.
+- GitHub Actions run ID: 38068426394. ci: success. docker-regression: success. URL: https://github.com/Nxerfan/sokhan/actions/runs/38068426394
+- Vercel status on 4e48157: success.
+- Dependency changes: NONE.
+- Schema/migration changes: NONE (clientMessageId is ephemeral — not persisted to PostgreSQL).
+- PR merged state: NOT merged (state=open, merged=false, mergeable_state=clean).
+- Auto-merge state: NOT enabled (auto_merge=null).
