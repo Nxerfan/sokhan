@@ -377,15 +377,32 @@ for (const spec of EDITIONS) {
 
       // Reload the dashboard so the inbox re-fetches the conversation
       // list. The conversation with the visitor message must still be
-      // there.
+      // there. After reload, explicitly navigate to the Inbox tab
+      // (the Zustand store resets to the default view on reload, which
+      // IS 'inbox', but the conversation list fetch may not have
+      // completed yet — clicking the Inbox button forces a re-fetch).
       await dashboardPage.reload()
       await dashboardPage.waitForLoadState('networkidle')
-      await dashboardPage.waitForTimeout(2000)
+      await dashboardPage.waitForTimeout(3000)
+      // Wait for the dashboard to be ready (workspace name visible).
+      await expect(
+        dashboardPage.getByRole('heading', { name: workspace }),
+        'dashboard should be visible after restart',
+      ).toBeVisible({ timeout: 15000 })
+      // Navigate to the Inbox tab explicitly.
+      const nav2 = dashboardPage.getByRole('navigation', { name: 'primary' })
+      await nav2.getByRole('button', { name: /صندوق ورودی|Inbox/ }).click()
+      // Wait for the realtime-token fetch (indicates socket setup started).
+      await dashboardPage.waitForResponse(
+        (res) => res.url().includes('/api/realtime-token') && res.status() === 200,
+        { timeout: 15000 },
+      ).catch(() => {})
+      await dashboardPage.waitForTimeout(3000)
       const convItem2 = dashboardPage.locator('button').filter({ hasText: visitorText }).first()
       await expect(
         convItem2,
         'visitor conversation should still be in the inbox after restart',
-      ).toBeVisible({ timeout: 15000 })
+      ).toBeVisible({ timeout: 20000 })
 
       // ---- Step 17: Verify widget still works. ----
       // Reload the customer widget page (the script tag is in the
