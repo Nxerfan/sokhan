@@ -45,6 +45,12 @@ DOMAIN=chat.example.com
 
 # BOTH editions — strong Postgres password
 POSTGRES_PASSWORD=$(openssl rand -hex 24)
+
+# REQUIRED for production signup — Nixify OTP/email-verification API key.
+# Without a real key, new-account signup fails with nixify_configuration_error.
+# (Local/CI testing only: set NIXIFY_MOCK=true to bypass the real API with a
+#  deterministic mock OTP code of 123456 — NEVER enable in production.)
+NIXIFY_API_KEY=<your-nixify-api-key>
 ```
 
 ### 3. Choose your edition and start
@@ -95,6 +101,8 @@ See `.env.docker.example` for the full list with comments. Key variables:
 | `ACME_EMAIL` | No | `admin@example.com` | Email for Let's Encrypt notifications. |
 | `ZARINPAL_MERCHANT_ID` | No | empty | Zarinpal payment gateway merchant ID. |
 | `IDPAY_API_KEY` | No | empty | IDPay payment gateway API key. |
+| `NIXIFY_API_KEY` | **Yes (production signup)** | empty | Nixify API key for OTP/email-verification delivery. **Required for production self-host signup** — without a real key, new-account signup fails with `nixify_configuration_error`. Both compose files pass this into the app container. |
+| `NIXIFY_MOCK` | No | `false` | CI/dev testing ONLY. When `true`, the app bypasses the real Nixify API and accepts a deterministic mock OTP code (`123456`). **Never set `NIXIFY_MOCK=true` in production.** Defaults to `false` in both compose files. |
 | `NEXT_PUBLIC_APP_NAME` | No | `Sukhan` | Public-facing app name shown in the UI. |
 
 ### Fail-fast on missing required vars
@@ -117,6 +125,15 @@ The runtime validator (`scripts/validate-secrets.ts`) imports the SAME canonical
 Startup fails closed: a copied `.env` left at the template defaults, or an `.env` where someone left a documented placeholder in place, cannot reach a running state.
 
 Secret values are NEVER echoed. Failure messages mention the variable NAME only (e.g. `NEXTAUTH_SECRET is set to a known placeholder value`). The actual secret value is never interpolated into any echo, log, or error message.
+
+### Production signup requires a Nixify API key
+
+Account signup uses the Nixify service for OTP/email-verification code delivery. The application keys this off two environment variables, both of which are passed into the `app` container by `docker-compose.yml` and `docker-compose.lite.yml`:
+
+- **`NIXIFY_API_KEY`** — **Required for production self-host signup.** Without a real key, the signup flow fails with a `nixify_configuration_error` and no account is created. Set this in `.env` before bringing the stack up.
+- **`NIXIFY_MOCK`** — Defaults to `false`. When set to `true`, the app bypasses the real Nixify API and accepts a **deterministic mock OTP code of `123456`**. This exists for CI and local development only. **Never set `NIXIFY_MOCK=true` on a production deployment** — any visitor could complete signup by entering `123456`.
+
+There is no fallback path: production signup either calls the real Nixify API (with a valid `NIXIFY_API_KEY`) or fails closed. The mock exists solely so CI and local test harnesses can drive the signup flow without consuming real Nixify quota or hitting an external network.
 
 ---
 
@@ -215,6 +232,57 @@ The original Sukhan copyright notice and license must be preserved in all copies
 
 > Always back up before upgrading or making schema changes.
 
+### Scripted backup and restore (recommended)
+
+The repo ships two operator-facing scripts under `scripts/` that automate the entire backup/restore flow for both Full and Lite editions. They are Compose-aware (no hard-coded project name or volume name) and never echo secrets.
+
+- **`scripts/self-host-backup.sh`** — creates a versioned backup directory containing:
+  - `database.sql` — PostgreSQL logical dump (`pg_dump`)
+  - `uploads.tar` — tar of the app container's `/app/uploads` directory (message attachments, avatars, logos)
+  - `metadata.json` — backup format version (`backup_version=1`), edition (`full`/`lite`), timestamp, compose file, postgres user/db/version, public-schema table list + count, and the latest applied Prisma migration
+
+- **`scripts/self-host-restore.sh`** — destructive restore gated by an explicit `--force` flag.
+
+**What is NOT backed up (and why):**
+
+- **Redis** — holds only ephemeral realtime state (Socket.IO adapter + pub/sub channel). It is not authoritative; a fresh empty Redis is fine after restore because clients reconnect and re-establish state.
+- **Logs** — operational, not user data.
+
+**Backup:**
+
+```bash
+# Full edition
+scripts/self-host-backup.sh --compose-file docker-compose.yml --output-dir /var/backups/sukhan
+
+# Lite edition
+scripts/self-host-backup.sh --compose-file docker-compose.lite.yml --output-dir /var/backups/sukhan
+```
+
+The script writes a fresh timestamped subdirectory under `--output-dir` (default `./backups`). It auto-detects the edition from the compose file's declared services, derives the postgres user/db from the postgres container env (not hard-coded), and reaches the uploads directory via `docker compose exec app tar` (no hard-coded Docker volume name).
+
+**Restore:**
+
+```bash
+# Destructive — requires explicit --force. Refuses to run without it.
+scripts/self-host-restore.sh --force \
+  --backup-dir /var/backups/sukhan/<backup-timestamp> \
+  --compose-file docker-compose.yml
+```
+
+The restore flow:
+
+1. Stop `app` + `realtime` (so nothing writes during restore).
+2. Start only `postgres`, wait for `pg_isready`.
+3. `DROP SCHEMA public CASCADE; CREATE SCHEMA public;` then load the SQL dump via `psql` (or `pg_restore --clean --if-exists --no-owner` for a custom-format dump). Post-restore sanity check compares the table count against `metadata.json`.
+4. Find the Docker volume backing `/app/uploads` by inspecting the app container (NOT a hard-coded name), clear it, and extract `uploads.tar`.
+5. Restart `app` + `realtime`.
+
+The script validates `metadata.json` (backup version, edition match against the target compose file) before touching anything. On any mid-flow failure it attempts to restart `app`+`realtime` so the stack isn't left stopped. Edition mismatch (e.g. restoring a Full backup onto a Lite target) is rejected — restore fails closed.
+
+### Manual backup (advanced)
+
+The scripts above wrap the underlying `pg_dump` / `tar` / `psql` operations. If you need to perform them by hand, the equivalent commands are below.
+
 ### Full edition (Postgres + uploads)
 
 **Backup:**
@@ -277,14 +345,37 @@ docker compose -f docker-compose.lite.yml up -d
 
 ### Automated backups (cron)
 
+The cron job should invoke `scripts/self-host-backup.sh` rather than hand-rolling `pg_dump` + `tar`. The script is Compose-aware (no hard-coded project name or volume name), writes a versioned backup directory with `metadata.json`, and never echoes secrets.
+
 Create `/etc/cron.d/sukhan-backup`:
 
 ```cron
-0 3 * * *  root  cd /opt/sukhan && docker compose exec -T postgres pg_dump -U sukhan sukhan > /backups/sukhan/db-$(date +\%Y\%m\%d).sql
-15 3 * * *  root  cd /opt/sukhan && docker run --rm -v sukhan_uploads:/data -v /backups/sukhan:/backup alpine tar czf /backup/uploads-$(date +\%Y\%m\%d).tar.gz /data
+# Daily 03:00 — Full edition backup (use docker-compose.lite.yml for Lite)
+0 3 * * *  root  cd /opt/sukhan && scripts/self-host-backup.sh --compose-file docker-compose.yml --output-dir /var/backups/sukhan >> /var/log/sukhan-backup.log 2>&1
 ```
 
-Test the cron job by running the commands manually first.
+Test the cron job by running the command manually first.
+
+---
+
+## Self-host verification
+
+`scripts/verify-self-host.sh <public-origin>` is a non-destructive operator verification of a deployed Sukhan instance. It only makes `GET` requests — it never sends secrets and never requires admin or API credentials.
+
+```bash
+scripts/verify-self-host.sh https://chat.example.com
+# or for a local HTTP test:
+scripts/verify-self-host.sh http://localhost
+```
+
+The script runs four checks and exits `0` only if all pass (exit `1` on any failure, `2` on usage error):
+
+1. **Application responds** — `GET /` returns HTTP 200.
+2. **Widget script reachable** — `GET /api/widget/<probe-slug>/script` returns `200` (script served) or `404` (slug lookup miss). Either proves the app is alive and routing the widget-script path correctly.
+3. **Public realtime route (port 3003) reachable** — `GET /?XTransformPort=3003&EIO=4&transport=polling` returns HTTP 200 with a body matching the Engine.IO OPEN packet (starts with `0{`). This strictly confirms Socket.IO is reachable through Caddy's public matcher.
+4. **Internal port 3004 NOT exposed** — `GET /?XTransformPort=3004&path=/health` must NOT return the realtime `/health` JSON. If the body matches `{"ok":true,...}`, the internal health endpoint has leaked and the check FAILS.
+
+For `https://` origins the script validates normally (no `curl -k`) — a bad certificate correctly fails the checks.
 
 ---
 
@@ -341,7 +432,7 @@ docker compose exec app prisma migrate deploy
    docker compose ps realtime
    docker compose logs --tail 50 realtime
    ```
-2. Hit the health endpoint directly:
+2. Hit the health endpoint directly (from inside the realtime container — port 3004 is **internal-only**, NOT publicly routable):
    ```bash
    docker compose exec realtime wget -qO- http://localhost:3004/health
    # Should print: {"ok":true,"connections":N,"redis":true/false}
@@ -356,7 +447,20 @@ docker compose exec app prisma migrate deploy
    ```
 5. In the browser console, check the Socket.IO connection URL — it should be relative (`/?XTransformPort=3003`), not `http://localhost:3003`.
 
+#### Caddy realtime routing — exact matcher, not a wildcard
+
+The Docker `Caddyfile` uses an **exact matcher** for the `XTransformPort=3003` query param. Only `?XTransformPort=3003` is proxied to the realtime container's public Socket.IO port (3003). This is deliberate hardening, not a glob/wildcard:
+
+- **Port 3003** — the public realtime (Socket.IO) port. Reachable via `?XTransformPort=3003` through Caddy. This is the only realtime port a browser/widget/dashboard client ever needs.
+- **Port 3004** — the realtime service's internal HTTP port (serves `/health` and `/internal/publish`). Used only server-to-server (the app publishes message events to realtime over `REALTIME_INTERNAL_URL=http://realtime:3004`). It is **NOT publicly routable** — a request with `?XTransformPort=3004` falls through to the Next.js app handler, which does not serve realtime endpoints.
+- **Arbitrary `XTransformPort` values are NOT proxied.** Anything other than exactly `3003` falls through to the Next.js app. A client cannot reach the realtime container by inventing a port number.
+
+If realtime is unreachable from the browser, verify the request URL uses exactly `?XTransformPort=3003` and that the realtime container is up.
+
 ### Caddy can't get an HTTPS certificate
+
+> **Release gate — real-domain HTTPS not verified by CI.**
+> Setting `DOMAIN` in `.env` enables Caddy's automatic HTTPS via Let's Encrypt (ACME HTTP-01 challenge on ports 80 + 443). The Sukhan CI pipeline does NOT verify real-domain HTTPS end-to-end — there is no real DNS A record and no real ACME issuance in CI. CI only verifies HTTP-only local routing and the Caddyfile's exact `XTransformPort` matcher logic. **State: `MANUAL EXTERNAL RELEASE GATE — REAL-DOMAIN HTTPS/ACME NOT VERIFIED BY CI`.** Before declaring a self-hosted release production-ready against a real domain, an operator MUST manually confirm Caddy issued a Let's Encrypt certificate and that `https://<domain>` loads over a valid cert.
 
 - Ensure your domain's DNS **A record** points to your server's public IP:
   ```bash
@@ -427,6 +531,47 @@ The realtime service continues with the in-memory adapter if Redis is unavailabl
   - Output of `docker compose ps`
   - Output of `docker compose logs --tail 100 <problematic-service>`
   - Your `.env` file **with secrets redacted**
+
+---
+
+## Widget installation
+
+The chat widget is delivered to visitor pages directly from your self-hosted Sukhan instance — there is no separate CDN and no external package fetch required at runtime.
+
+### Script-tag installation (always supported)
+
+After creating a widget config in the dashboard, embed the widget on any visitor-facing page using a script tag that points back at your Sukhan origin:
+
+```html
+<script async defer src="https://your-sukhan-domain/api/widget/<slug>/script"></script>
+```
+
+Replace `<slug>` with the widget slug shown in the dashboard's Widget settings, and `https://your-sukhan-domain` with your Sukhan origin. The script tag is self-contained: it fetches the per-slug config from the same origin, injects the launcher + chat panel, and opens a Socket.IO connection back to `/?XTransformPort=3003` on your Sukhan origin.
+
+This installation method is **always supported** and is what the dashboard's Widget settings panel copy-snippet uses.
+
+### NPM package status — NOT YET PUBLISHED
+
+The repository also includes a buildable `sukhan-widget` NPM package (under `packages/widget-npm/`) for consumers who want to import the widget as an ES module from a bundler. The package is publication-ready:
+
+- A proper build step (`tsc` → `dist/*.js` + `*.d.ts`).
+- An `.npmignore` that excludes `src/`, `node_modules/`, `tsconfig.json`, tests, and `.env.example` from the published tarball.
+- A GitHub Actions publish workflow (`.github/workflows/publish-npm.yml`) triggered by a GitHub Release/tag publication or manual `workflow_dispatch` (with a dry-run option that packs and verifies without publishing).
+
+**The `sukhan-widget` package has NOT yet been published to the public NPM registry.** Until it is published, the following commands DO NOT work:
+
+```bash
+# THESE DO NOT WORK YET — the package is not on the public NPM registry:
+npm install sukhan-widget
+bun add sukhan-widget
+```
+
+The single remaining external action to make the package installable from NPM is for the repository owner to:
+
+1. Create an `NPM_TOKEN` GitHub Actions secret in the repository settings (an NPM access token with publish permission for the package scope).
+2. Trigger the publish workflow — either by publishing a GitHub Release (which fires the `release: published` trigger) or by manually running the "Publish NPM Package" workflow with `dry_run=false`.
+
+Until that happens, use the **script-tag installation** above. It is the always-supported alternative and works on any self-hosted Sukhan instance regardless of NPM publication status.
 
 ---
 
