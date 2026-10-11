@@ -331,9 +331,25 @@ for (const spec of EDITIONS) {
       const conversationId = conv?.id
       expect(conversationId, 'conversation must have an id').toBeTruthy()
 
-      // Navigate to the Inbox tab + reload to see the conversation.
+      // Navigate to the Inbox tab + reload the page to force a fresh
+      // loadConversations() call. The initial InboxView mount may have
+      // fetched the conversation list before the new conversation was
+      // committed, or the Socket.IO CONVERSATION_NEW event may not have
+      // arrived through the production Caddy topology. A reload forces
+      // a fresh fetch that includes the new conversation.
       const inboxNav = dashboardPage.getByRole('navigation', { name: 'primary' })
       await inboxNav.getByRole('button', { name: /صندوق ورودی|Inbox/ }).click()
+      await dashboardPage.waitForTimeout(1000)
+      await dashboardPage.reload()
+      await dashboardPage.waitForLoadState('networkidle')
+      await dashboardPage.waitForTimeout(3000)
+      // The dashboard reloads into the Inbox view (default view = 'inbox').
+      // Wait for the workspace name to confirm the dashboard is ready.
+      await expect(
+        dashboardPage.getByRole('heading', { name: workspace }),
+        'dashboard should be ready after reload',
+      ).toBeVisible({ timeout: 15000 })
+      // Give the InboxView's loadConversations() time to complete.
       await dashboardPage.waitForTimeout(3000)
       const convItem = dashboardPage.locator('button').filter({ hasText: contactName }).first()
       await expect(
