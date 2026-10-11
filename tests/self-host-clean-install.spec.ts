@@ -317,6 +317,17 @@ for (const spec of EDITIONS) {
       await expect(visitorBubble, 'visitor message must appear EXACTLY ONCE').toHaveCount(1)
 
       // ---- Step 11: Conversation appears in Inbox. ----
+      // Navigate to the Inbox tab — the dashboard is currently on the
+      // Widget Installation tab (which doesn't render the InboxView or
+      // its conversation list). The InboxView loads the conversation
+      // list + reconnects the socket on mount.
+      const inboxNav = dashboardPage.getByRole('navigation', { name: 'primary' })
+      await inboxNav.getByRole('button', { name: /صندوق ورودی|Inbox/ }).click()
+      await dashboardPage.waitForResponse(
+        (res) => res.url().includes('/api/realtime-token') && res.status() === 200,
+        { timeout: 15000 },
+      ).catch(() => {})
+      await dashboardPage.waitForTimeout(2000)
       const convItem = dashboardPage.locator('button').filter({ hasText: contactName }).first()
       await expect(
         convItem,
