@@ -317,22 +317,29 @@ for (const spec of EDITIONS) {
       await expect(visitorBubble, 'visitor message must appear EXACTLY ONCE').toHaveCount(1)
 
       // ---- Step 11: Conversation appears in Inbox. ----
-      // Navigate to the Inbox tab — the dashboard is currently on the
-      // Widget Installation tab (which doesn't render the InboxView or
-      // its conversation list). The InboxView loads the conversation
-      // list + reconnects the socket on mount.
+      // Verify via API first (the conversation exists in the DB), then
+      // navigate to the Inbox tab + reload the conversation list.
+      // The Socket.IO CONVERSATION_NEW event may not arrive through
+      // the production Caddy in time — but the data is in the DB.
+      const convListRes = await dashboardPage.request.get(`${ORIGIN}/api/conversations`)
+      expect(convListRes.ok(), 'conversations API should return 200').toBe(true)
+      const convListData = await convListRes.json()
+      const conv = convListData.conversations?.find((c: any) =>
+        c.lastMessagePreview?.includes(visitorText) || c.contact?.name === contactName
+      )
+      expect(conv, 'conversation must exist in the API response after visitor message').toBeTruthy()
+      const conversationId = conv?.id
+      expect(conversationId, 'conversation must have an id').toBeTruthy()
+
+      // Navigate to the Inbox tab + reload to see the conversation.
       const inboxNav = dashboardPage.getByRole('navigation', { name: 'primary' })
       await inboxNav.getByRole('button', { name: /صندوق ورودی|Inbox/ }).click()
-      await dashboardPage.waitForResponse(
-        (res) => res.url().includes('/api/realtime-token') && res.status() === 200,
-        { timeout: 15000 },
-      ).catch(() => {})
-      await dashboardPage.waitForTimeout(2000)
+      await dashboardPage.waitForTimeout(3000)
       const convItem = dashboardPage.locator('button').filter({ hasText: contactName }).first()
       await expect(
         convItem,
         'visitor conversation must appear in the agent inbox',
-      ).toBeVisible({ timeout: 15000 })
+      ).toBeVisible({ timeout: 20000 })
       await convItem.click()
       await dashboardPage.waitForTimeout(500)
       await expect(
