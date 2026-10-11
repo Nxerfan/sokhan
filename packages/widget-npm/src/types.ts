@@ -6,7 +6,7 @@
 export type {
   RealtimeTransport,
   RealtimeEndpointConfig,
-} from './realtime-resolve'
+} from './realtime-resolve.js'
 
 export interface WidgetConfig {
   slug: string

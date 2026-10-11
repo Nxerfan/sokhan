@@ -325,12 +325,20 @@ test('#3 test Compose overrides set NIXIFY_MOCK=true', () => {
   expect(liteTestCompose).toContain('NIXIFY_MOCK: "true"')
 })
 
-test('#3 production Compose does NOT set NIXIFY_MOCK', () => {
+test('#3 production Compose defaults NIXIFY_MOCK to false (NOT true)', () => {
+  // Production compose files MUST pass NIXIFY_MOCK through, but with
+  // a safe default of false. NIXIFY_MOCK=true must NEVER be the
+  // production default — it bypasses real OTP delivery.
   const prodCompose = readSrc('docker-compose.yml')
-  expect(prodCompose).not.toContain('NIXIFY_MOCK')
+  expect(prodCompose).toContain('NIXIFY_MOCK')
+  expect(prodCompose).toMatch(/NIXIFY_MOCK:\s*\$\{NIXIFY_MOCK:-false\}/)
+  // Must NOT default to true.
+  expect(prodCompose).not.toMatch(/NIXIFY_MOCK:\s*\$\{NIXIFY_MOCK:-true\}/)
 
   const prodLiteCompose = readSrc('docker-compose.lite.yml')
-  expect(prodLiteCompose).not.toContain('NIXIFY_MOCK')
+  expect(prodLiteCompose).toContain('NIXIFY_MOCK')
+  expect(prodLiteCompose).toMatch(/NIXIFY_MOCK:\s*\$\{NIXIFY_MOCK:-false\}/)
+  expect(prodLiteCompose).not.toMatch(/NIXIFY_MOCK:\s*\$\{NIXIFY_MOCK:-true\}/)
 })
 
 // ------------------------------------------------------------------

@@ -1,0 +1,80 @@
+name: Publish NPM Package
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (pack + verify without publishing)'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Setup Node.js (for npm publish)
+        uses: actions/setup-node@v4
+        with:
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build widget package
+        run: |
+          cd packages/widget-npm
+          bun run clean
+          bun run build
+
+      - name: Verify package contents (npm pack --dry-run)
+        run: |
+          cd packages/widget-npm
+          npm pack --dry-run
+
+      - name: Create tarball
+        run: |
+          cd packages/widget-npm
+          npm pack
+          echo "TARBALL=$(ls sukhan-widget-*.tgz)" >> $GITHUB_ENV
+
+      - name: Clean-consumer install + import test
+        run: |
+          mkdir -p /tmp/npm-consumer
+          cd /tmp/npm-consumer
+          npm init -y
+          npm install /home/runner/work/sokhan/sokhan/packages/widget-npm/$TARBALL
+          node -e "import('sukhan-widget').then(m => { if (typeof m.initSukhan !== 'function') throw new Error('initSukhan not exported'); console.log('import OK'); })" || \
+          node --input-type=module -e "import { initSukhan } from 'sukhan-widget'; if (typeof initSukhan !== 'function') throw new Error('initSukhan not exported'); console.log('import OK');"
+
+      - name: Bun clean-consumer install + import test
+        run: |
+          mkdir -p /tmp/bun-consumer
+          cd /tmp/bun-consumer
+          echo '{"name":"bun-consumer"}' > package.json
+          bun add /home/runner/work/sokhan/sokhan/packages/widget-npm/$TARBALL
+          bun -e "import { initSukhan } from 'sukhan-widget'; if (typeof initSukhan !== 'function') throw new Error('initSukhan not exported'); console.log('bun import OK');"
+
+      - name: Publish to npm (non-dry-run only)
+        if: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == 'false') }}
+        run: |
+          cd packages/widget-npm
+          npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Dry-run notice
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == 'true' }}
+        run: |
+          echo "DRY RUN — package was packed + verified but NOT published."
+          echo "To publish, re-run this workflow with dry_run=false."

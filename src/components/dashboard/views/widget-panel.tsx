@@ -124,10 +124,8 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
   }
 
   const htmlSnippet = `<script async defer src="${apiUrl}/api/widget/${slug}/script"></script>`
-  const npmInstall = `bun add sukhan-widget`
-  const npmInit = `import { initSukhan } from 'sukhan-widget'
-
-initSukhan({ apiKey: '${slug}'${apiUrl !== HOSTED_API_URL ? `, apiUrl: '${apiUrl}'` : ''} })`
+  // NPM package is NOT yet published. The npmInstall/npmInit variables
+  // are intentionally omitted — the UI shows "Coming Soon" instead.
 
   // Copy actions are TRUTHFULLY tracked as "code copied" — they do NOT
   // imply the user has installed the widget on a customer website. The
@@ -376,12 +374,12 @@ initSukhan({ apiKey: '${slug}'${apiUrl !== HOSTED_API_URL ? `, apiUrl: '${apiUrl
               </CardContent>
             </Card>
 
-            {/* NPM Installation */}
-            <Card>
+            {/* NPM Installation — not yet published */}
+            <Card className="opacity-75">
               <CardHeader>
                 <CardTitle className="font-display text-base flex items-center gap-2">
-                  <Package className="h-4 w-4 text-turquoise" />
-                  {fa ? 'نصب با NPM' : 'NPM Installation'}
+                  <Package className="h-4 w-4 text-muted-foreground" />
+                  {fa ? 'نصب با NPM (به‌زودی)' : 'NPM Installation (Coming Soon)'}
                 </CardTitle>
                 <CardDescription>
                   {fa ? 'برای React/Next.js/Vue و سایر فریم‌ورک‌ها' : 'For React/Next.js/Vue and other frameworks'}
@@ -391,24 +389,21 @@ initSukhan({ apiKey: '${slug}'${apiUrl !== HOSTED_API_URL ? `, apiUrl: '${apiUrl
                 <div>
                   <p className="mb-1 text-xs font-medium text-muted-foreground">{fa ? 'نصب پکیج:' : 'Install package:'}</p>
                   <div className="relative">
-                    <pre className="overflow-auto rounded-lg border border-border bg-muted/50 p-3 pr-12 text-xs" dir="ltr">
-                      <code className="font-mono">{npmInstall}</code>
+                    <pre className="overflow-auto rounded-lg border border-border bg-muted/50 p-3 text-xs" dir="ltr">
+                      <code className="font-mono text-muted-foreground">{'# Not yet published to npm'}</code>
                     </pre>
-                    <Button variant="ghost" size="icon" className="absolute end-1 top-1 h-8 w-8" onClick={() => copy(npmInstall, 'npm')}>
-                      {copiedNpm ? <Check className="h-4 w-4 text-turquoise" /> : <Copy className="h-4 w-4" />}
-                    </Button>
                   </div>
                 </div>
                 <div>
                   <p className="mb-1 text-xs font-medium text-muted-foreground">{fa ? 'راه‌اندازی:' : 'Initialize:'}</p>
                   <pre className="overflow-auto rounded-lg border border-border bg-muted/50 p-3 text-xs" dir="ltr">
-                    <code className="font-mono">{npmInit}</code>
+                    <code className="font-mono text-muted-foreground">{'# Available after publication'}</code>
                   </pre>
                 </div>
                 <p className="text-xs text-muted-foreground">
                   {fa
-                    ? 'برای استقرار شخصی، apiUrl را مشخص کنید. برای نسخه ابری، پیش‌فرض https://app.sukhan.chat استفاده می‌شود.'
-                    : 'For self-hosted, specify apiUrl. Hosted default: https://app.sukhan.chat'}
+                    ? 'این پکیج هنوز در npm منتشر نشده است. لطفاً از نصب با HTML ( بالا) استفاده کنید.'
+                    : 'This package is not yet published to npm. Please use the HTML installation above.'}
                 </p>
               </CardContent>
             </Card>

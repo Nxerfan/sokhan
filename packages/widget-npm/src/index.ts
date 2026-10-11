@@ -32,13 +32,13 @@
  * @packageDocumentation
  */
 
-import { SukhanWidget } from './widget'
-import type { SukhanOptions, SukhanInstance } from './types'
+import { SukhanWidget } from './widget.js'
+import type { SukhanOptions, SukhanInstance } from './types.js'
 
-export { SukhanWidget } from './widget'
-export { ApiClient, normalizeApiKey, resolveApiUrl } from './api'
-export { SukhanSocket, loadScriptOnce } from './socket'
-export type { SukhanSocketDeps } from './socket'
+export { SukhanWidget } from './widget.js'
+export { ApiClient, normalizeApiKey, resolveApiUrl } from './api.js'
+export { SukhanSocket, loadScriptOnce } from './socket.js'
+export type { SukhanSocketDeps } from './socket.js'
 export {
   resolveRealtimeUrl,
   resolveRealtimeFromConfig,
@@ -46,8 +46,8 @@ export {
   HOSTED_API_URL,
   HOSTED_REALTIME_CONFIG,
   SukhanConfigError,
-} from './realtime-resolve'
-export { mergeMessages, mergeMessage } from './merge'
+} from './realtime-resolve.js'
+export { mergeMessages, mergeMessage } from './merge.js'
 export type {
   WidgetConfig,
   Message,
@@ -62,7 +62,7 @@ export type {
   SocketHandler,
   RealtimeTransport,
   RealtimeEndpointConfig,
-} from './types'
+} from './types.js'
 
 /**
  * Initialize the Sukhan widget. Returns a handle with open/close/send/destroy
