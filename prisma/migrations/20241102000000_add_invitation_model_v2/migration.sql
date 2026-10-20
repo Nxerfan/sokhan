@@ -1,8 +1,11 @@
--- CreateEnum
-CREATE TYPE "InvitationStatus" AS ENUM ('pending', 'accepted', 'revoked');
+-- Idempotent migration for Invitation model (PR #11).
+-- Uses IF NOT EXISTS / IF EXISTS to handle partial application from
+-- a previous failed attempt on Neon (where gen_random_bytes was
+-- unavailable, causing the legacy INSERT to fail after the CREATE TABLE
+-- had already succeeded).
 
--- CreateTable
-CREATE TABLE "Invitation" (
+-- CreateTable (idempotent)
+CREATE TABLE IF NOT EXISTS "Invitation" (
     "id" TEXT NOT NULL,
     "tenantId" TEXT NOT NULL,
     "email" TEXT NOT NULL,
@@ -19,35 +22,26 @@ CREATE TABLE "Invitation" (
     CONSTRAINT "Invitation_pkey" PRIMARY KEY ("id")
 );
 
--- CreateIndex
-CREATE UNIQUE INDEX "Invitation_tokenHash_key" ON "Invitation"("tokenHash");
+-- CreateIndex (idempotent)
+CREATE UNIQUE INDEX IF NOT EXISTS "Invitation_tokenHash_key" ON "Invitation"("tokenHash");
+CREATE INDEX IF NOT EXISTS "Invitation_tenantId_idx" ON "Invitation"("tenantId");
+CREATE INDEX IF NOT EXISTS "Invitation_email_idx" ON "Invitation"("email");
+CREATE INDEX IF NOT EXISTS "Invitation_status_idx" ON "Invitation"("status");
 
--- CreateIndex
-CREATE INDEX "Invitation_tenantId_idx" ON "Invitation"("tenantId");
+-- AddForeignKey (idempotent — use DO block to check if constraint exists)
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints WHERE constraint_name = 'Invitation_tenantId_fkey') THEN
+    ALTER TABLE "Invitation" ADD CONSTRAINT "Invitation_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant"("id") ON DELETE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints WHERE constraint_name = 'Invitation_invitedByUserId_fkey') THEN
+    ALTER TABLE "Invitation" ADD CONSTRAINT "Invitation_invitedByUserId_fkey" FOREIGN KEY ("invitedByUserId") REFERENCES "User"("id") ON DELETE SET NULL;
+  END IF;
+END $$;
 
--- CreateIndex
-CREATE INDEX "Invitation_email_idx" ON "Invitation"("email");
-
--- CreateIndex
-CREATE INDEX "Invitation_status_idx" ON "Invitation"("status");
-
--- AddForeignKey
-ALTER TABLE "Invitation" ADD CONSTRAINT "Invitation_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant"("id") ON DELETE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "Invitation" ADD CONSTRAINT "Invitation_invitedByUserId_fkey" FOREIGN KEY ("invitedByUserId") REFERENCES "User"("id") ON DELETE SET NULL;
-
--- Legacy migration: move existing Membership(status='invited') rows into Invitation table.
--- For each invited Membership, create an Invitation with status='pending' and a random token hash.
--- Then DELETE the invited Membership rows so they don't double-count against plan limits.
--- The invited User accounts (created by the old flow, with no password) remain but are harmless
--- — they can't log in (no passwordHash) and won't be selected by the login flow (no active membership).
-
--- Step 1: Create Invitation rows from legacy invited memberships.
--- Use md5(random()::text) for the token hash — pgcrypto's gen_random_bytes
--- is not available in all PostgreSQL configurations. The legacy tokens are
--- already invalid (they will need to be reissued), so cryptographic strength
--- is not critical here — the hash just needs to be unique.
+-- Legacy migration: move existing Membership(status='invited') rows
+-- into Invitation table. Only insert rows that don't already exist
+-- (in case a previous partial run already inserted some).
 INSERT INTO "Invitation" ("id", "tenantId", "email", "role", "status", "tokenHash", "expiresAt", "createdAt", "updatedAt", "invitedByUserId")
 SELECT
   'legacy_' || m."id",
@@ -62,10 +56,8 @@ SELECT
   NULL
 FROM "Membership" m
 JOIN "User" u ON m."userId" = u."id"
-WHERE m."status" = 'invited';
+WHERE m."status" = 'invited'
+  AND NOT EXISTS (SELECT 1 FROM "Invitation" WHERE "id" = 'legacy_' || m."id");
 
--- Step 2: Delete the legacy invited Membership rows.
--- The User rows remain (they may have other active memberships, or they may be orphaned
--- — but they can't log in without a passwordHash, and the login flow only selects
--- active memberships).
+-- Delete the legacy invited Membership rows.
 DELETE FROM "Membership" WHERE "status" = 'invited';
