@@ -129,6 +129,7 @@ export function TopBar({ workspaceName }: { workspaceName: string }) {
   return (
     <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-border bg-card/60 px-4 backdrop-blur-sm">
       <div className="flex items-center gap-2">
+        <h2 className="font-display text-sm font-semibold tracking-tight">
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button
@@ -250,6 +251,7 @@ export function TopBar({ workspaceName }: { workspaceName: string }) {
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
+        </h2>
       </div>
 
       <div className="flex items-center gap-1">
