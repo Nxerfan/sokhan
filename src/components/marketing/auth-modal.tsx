@@ -26,7 +26,7 @@ import { useAuthModal } from '@/components/marketing/auth-modal-store'
 export function AuthModal() {
   const t = useTranslations()
   const locale = useLocale()
-  const { isOpen, mode, close } = useAuthModal()
+  const { isOpen, mode, close, callbackUrl } = useAuthModal()
   const [loading, setLoading] = useState(false)
 
   // OTP signup state
@@ -131,7 +131,13 @@ export function AuthModal() {
       })
       if (!res.ok) { const d = await res.json(); toast.error(d.error); return }
       await signIn('credentials', { email, password, redirect: false })
-      window.location.href = '/'
+      // If a callback URL was supplied (e.g. /invite?token=...), land the
+      // user back on that URL instead of the marketing home. The callback
+      // is consumed on first use — if the user signs out and back in they
+      // go to '/' as before.
+      const dest = callbackUrl || '/'
+      close()
+      window.location.href = dest
     } finally { setLoading(false) }
   }
 
@@ -141,7 +147,9 @@ export function AuthModal() {
     try {
       const result = await signIn('credentials', { email: loginEmail, password: loginPassword, redirect: false })
       if (result?.error) { toast.error(locale === 'fa' ? 'ایمیل یا رمز اشتباه است' : 'Invalid credentials'); return }
-      window.location.href = '/'
+      const dest = callbackUrl || '/'
+      close()
+      window.location.href = dest
     } finally { setLoading(false) }
   }
 

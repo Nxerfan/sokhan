@@ -78,10 +78,17 @@ async function countUsage(tenantId: string, limit: LimitKind): Promise<number> {
   return withTenant(tenantId, async () => {
     switch (limit) {
       case 'agents': {
-        // Active + invited memberships count toward the agent limit.
-        return db.membership.count({
-          where: { status: { in: ['active', 'invited'] } },
-        })
+        // Active memberships + pending invitations count toward the agent
+        // limit (PR #11). The old Membership(status='invited') flow is gone
+        // — invitations now live in the Invitation table. The plan-limit
+        // gate therefore counts BOTH active memberships AND pending
+        // invitations: a pending invitation reserves a seat for the invitee,
+        // so it must count against the cap to prevent over-booking.
+        const [active, pending] = await Promise.all([
+          db.membership.count({ where: { status: 'active' } }),
+          db.invitation.count({ where: { status: 'pending' } }),
+        ])
+        return active + pending
       }
       case 'conversations': {
         // Conversations created this calendar month (UTC).

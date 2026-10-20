@@ -1,9 +1,11 @@
 import { NextResponse, NextRequest } from 'next/server'
-import { withSessionTenant, hasRole, getCurrentTenantId, ROLE_RANK } from '@/lib/auth'
+import { withSessionTenant, hasRole, getCurrentTenantId } from '@/lib/auth'
 import { db } from '@/lib/db'
-import { enforceCurrentTenantPlanLimit, PlanLimitExceededError } from '@/lib/payments/gating'
+import { canManageRole, VALID_ROLES } from '@/lib/authz'
 
 /**
+ * Members CRUD (revised in PR #11).
+ *
  * Role hierarchy:
  *   owner: 5, admin: 4, manager: 3, agent: 2, viewer: 1
  *
@@ -17,31 +19,33 @@ import { enforceCurrentTenantPlanLimit, PlanLimitExceededError } from '@/lib/pay
  * Nobody may assign 'owner' through this endpoint.
  * Actor cannot modify their own membership (no self-promotion / self-demotion).
  * Only owner may modify admin memberships.
- */
-
-const VALID_ROLES = ['admin', 'manager', 'agent', 'viewer']
-
-/**
- * Returns true if `actorRole` is allowed to manage a membership whose
- * current or target role is `targetRole`.
  *
- * The target role must be strictly below the actor's role, and 'owner'
- * is never manageable through this endpoint.
+ * INVITATION FLOW (PR #11)
+ * ------------------------
+ *   POST /api/members (create a Membership) is DEPRECATED for invitations.
+ *   It returned an 'invited' Membership row + a stub User with no password —
+ *   an antipattern that polluted the User table with unverifiable accounts.
+ *   Invitations now go through POST /api/invitations, which creates an
+ *   `Invitation` row + a one-time raw token returned to the inviter; the
+ *   invitee verifies email ownership (OTP) then accepts to create their own
+ *   User + Membership in one atomic transaction (see
+ *   /api/invitations/accept-complete).
+ *
+ *   To preserve the PATCH /api/members role-change flow (still used to
+ *   change roles for existing members), only GET + PATCH remain supported
+ *   on this route. The POST is now a 410 Gone that points callers at the
+ *   invitations endpoint.
  */
-function canManageRole(actorRole: string, targetRole: string): boolean {
-  if (targetRole === 'owner') return false
-  if (!hasRole(actorRole, 'manager')) return false
-  const actorRank = ROLE_RANK[actorRole] ?? 0
-  const targetRank = ROLE_RANK[targetRole] ?? 0
-  return targetRank < actorRank
-}
 
 export async function GET() {
   const result = await withSessionTenant(async () => {
+    // Only active memberships — 'invited' no longer exists (see PR #11
+    // migration), and any other non-active status would leak users who no
+    // longer have access to the workspace.
     // Explicit tenantId filter — defense-in-depth (do not rely solely on
     // the Prisma extension's auto-injection).
     return db.membership.findMany({
-      where: { tenantId: getCurrentTenantId()! },
+      where: { tenantId: getCurrentTenantId()!, status: 'active' },
       include: { user: { select: { id: true, name: true, email: true } } },
       orderBy: { createdAt: 'asc' },
     })
@@ -50,86 +54,20 @@ export async function GET() {
   return NextResponse.json({ members: result.result })
 }
 
-export async function POST(req: NextRequest) {
-  const result = await withSessionTenant(async ({ session }) => {
-    // Agent and viewer have no membership management.
-    if (!hasRole(session.user.role, 'manager')) {
-      return { forbidden: true as const }
-    }
-
-    const body = await req.json()
-    const email = String(body.email ?? '').trim().toLowerCase()
-    const role = String(body.role ?? '')
-
-    // Validate role — reject 'owner' and invalid roles.
-    if (role === 'owner') {
-      return { error: 'cannot_assign_owner' as const }
-    }
-    if (!VALID_ROLES.includes(role)) {
-      return { error: 'invalid_role' as const }
-    }
-
-    // Actor cannot assign a role at or above their own authority.
-    if (!canManageRole(session.user.role, role)) {
-      return { forbidden: true as const }
-    }
-
-    if (!email) return { error: 'invalid_email' as const }
-
-    // Plan gating: check agent limit before adding a new member.
-    try {
-      await enforceCurrentTenantPlanLimit('agents')
-    } catch (e) {
-      if (e instanceof PlanLimitExceededError) {
-        return { planLimit: e.result }
-      }
-      throw e
-    }
-
-    const tid = getCurrentTenantId()!
-    const existing = await db.user.findUnique({ where: { email } })
-    let userId: string
-    if (existing) {
-      const m = await db.membership.findUnique({
-        where: { userId_tenantId: { userId: existing.id, tenantId: tid } },
-      })
-      if (m) return { error: 'already_member' as const }
-      userId = existing.id
-    } else {
-      const created = await db.user.create({
-        data: { email, name: email.split('@')[0], locale: 'fa' },
-      })
-      userId = created.id
-    }
-
-    const membership = await db.membership.create({
-      data: { userId, role, status: 'invited', tenantId: session.user.workspaceId! },
-      include: { user: { select: { id: true, name: true, email: true } } },
-    })
-    return { membership } as const
-  })
-  if (!result) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
-  if ('forbidden' in result.result) return NextResponse.json({ error: 'forbidden' }, { status: 403 })
-  if ('planLimit' in result.result) {
-    const r = result.result as { planLimit: { current: number; limit: number; planSlug: string } }
-    return NextResponse.json(
-      {
-        error: 'plan_limit_exceeded',
-        limit: 'agents',
-        current: r.planLimit.current,
-        max: r.planLimit.limit,
-        plan: r.planLimit.planSlug,
-      },
-      { status: 402 },
-    )
-  }
-  if ('error' in result.result) {
-    const status = result.result.error === 'invalid_role' || result.result.error === 'cannot_assign_owner' || result.result.error === 'invalid_email' || result.result.error === 'already_member'
-      ? 400
-      : 400
-    return NextResponse.json({ error: result.result.error }, { status })
-  }
-  return NextResponse.json({ membership: result.result.membership })
+/**
+ * DEPRECATED (PR #11) — invitation creation now lives at POST /api/invitations.
+ *
+ * Returns 410 Gone so stale callers (old clients, tests) get a clear
+ * non-success response and cannot accidentally create a stub membership.
+ */
+export async function POST() {
+  return NextResponse.json(
+    {
+      error: 'members_post_deprecated',
+      message: 'Use POST /api/invitations to create invitations',
+    },
+    { status: 410 },
+  )
 }
 
 export async function PATCH(req: NextRequest) {

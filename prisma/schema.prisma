@@ -69,6 +69,7 @@ model Tenant {
   aiConfig        AiConfig?
   connectorConfigs ConnectorConfig[]
   widgetDomains   WidgetDomain[]
+  invitations    Invitation[]
 }
 
 /// Global identity. A user may belong to multiple tenants via Membership.
@@ -91,6 +92,7 @@ model User {
   sentMessages  Message[]
   otpRequests  OtpRequest[]
   participants  Participant[]
+  sentInvitations Invitation[] @relation("InvitationSender")
 }
 
 model Membership {
@@ -107,6 +109,48 @@ model Membership {
 
   @@unique([userId, tenantId])
   @@index([tenantId])
+}
+
+/// Dedicated invitation domain model (PR #11).
+/// Replaces the old Membership(status="invited") flow which prematurely
+/// created global User accounts for unverified emails. The Invitation
+/// model stores the invitation state machine WITHOUT creating a User
+/// until the invitee verifies email ownership + sets a password.
+///
+/// Token security: only the SHA-256 hash of the invitation token is
+/// stored. The raw token is returned to the inviter exactly once and
+/// embedded in the invitation link. Acceptance requires the raw token
+/// (which is matched against the hash) + email ownership verification.
+///
+/// States:
+///   pending   — invitation created, not yet accepted
+///   accepted  — invitee verified email + Membership activated
+///   revoked   — inviter revoked the invitation
+///   (expired  — derived from expiresAt < now, not a stored state)
+///
+/// Legacy compatibility: existing Membership(status="invited") rows
+/// from the old flow are migrated to Invitation(status="pending") by
+/// the migration script, and the old Membership rows are deleted.
+model Invitation {
+  id              String   @id @default(cuid())
+  tenantId        String
+  email           String   // normalized lowercase
+  role            String   // admin/manager/agent/viewer (never owner)
+  status          String   @default("pending") // pending/accepted/revoked
+  tokenHash       String   @unique // SHA-256 hash of the raw token
+  expiresAt       DateTime
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  acceptedAt      DateTime?
+  acceptedUserId  String?  // the User.id who accepted (null until accepted)
+  invitedByUserId String?  // the User.id who created the invitation
+
+  tenant           Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  invitedBy        User?    @relation("InvitationSender", fields: [invitedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([email])
+  @@index([status])
 }
 
 model Department {
