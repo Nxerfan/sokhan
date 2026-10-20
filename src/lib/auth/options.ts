@@ -1,7 +1,7 @@
 import type { NextAuthOptions } from 'next-auth'
 import CredentialsProvider from 'next-auth/providers/credentials'
 import bcrypt from 'bcryptjs'
-import { db } from '@/lib/db'
+import { db, globalDb } from '@/lib/db'
 import '@/lib/env-check' // fails loudly if NEXTAUTH_SECRET is missing
 
 /**
@@ -90,7 +90,7 @@ export const authOptions: NextAuthOptions = {
       if (trigger === 'update' && session) {
         const newWorkspaceId = (session as any).workspaceId
         if (newWorkspaceId && token.uid) {
-          const m = await db.membership.findUnique({
+          const m = await globalDb.membership.findUnique({
             where: {
               userId_tenantId: {
                 userId: token.uid,
