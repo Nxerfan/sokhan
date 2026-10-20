@@ -1,6 +1,6 @@
 import { NextResponse, NextRequest } from 'next/server'
 import { withSessionTenant, hasRole, getCurrentTenantId } from '@/lib/auth'
-import { db } from '@/lib/db'
+import { db, globalDb } from '@/lib/db'
 import { enforceCurrentTenantPlanLimit, PlanLimitExceededError } from '@/lib/payments/gating'
 import { canManageRole, VALID_ROLES } from '@/lib/authz'
 import {
@@ -158,14 +158,30 @@ export async function POST(req: NextRequest) {
       },
     })
 
-    // Build the invite URL with the raw token. The origin is the request's
-    // forwarded host (respects Caddy/Vercel proxy headers). Falls back to
-    // the NEXTAUTH_URL env var if headers are absent (e.g., in tests).
+    // Build the invite URL with the raw token AND the workspace slug.
+    // The slug is the PUBLIC tenant identifier — the public lookup route
+    // (/api/invitations/lookup?workspace=<slug>&token=<opaque>) resolves
+    // the slug → tenantId FIRST, then enters withTenant(tenantId) before
+    // querying the tenant-scoped Invitation row. This establishes tenant
+    // context BEFORE any tenant-scoped read — the fail-closed contract
+    // (BLOCKER 2). The raw token is still the opaque invitation secret.
+    //
+    // The origin is the request's forwarded host (respects Caddy/Vercel
+    // proxy headers). Falls back to NEXTAUTH_URL if headers are absent.
     const origin = req.headers.get('x-forwarded-host')
       ? `${req.headers.get('x-forwarded-proto') || 'https'}://${req.headers.get('x-forwarded-host')}`
       : process.env.NEXTAUTH_URL || `${req.nextUrl.protocol}//${req.nextUrl.host}`
 
-    const inviteUrl = `${origin}/invite?token=${rawToken}`
+    // Resolve the tenant's slug — needed for the invite URL. The tenant
+    // row is read via globalDb (Tenant is a GLOBAL model). getCurrentTenantId()
+    // is non-null inside withSessionTenant.
+    const tenantRow = await globalDb.tenant.findUnique({
+      where: { id: tid },
+      select: { slug: true },
+    })
+    const slug = tenantRow?.slug ?? ''
+
+    const inviteUrl = `${origin}/invite?workspace=${encodeURIComponent(slug)}&token=${rawToken}`
 
     const payload: InvitationResult = {
       id: invitation.id,

@@ -42,13 +42,30 @@ END $$;
 -- Legacy migration: move existing Membership(status='invited') rows
 -- into Invitation table. Only insert rows that don't already exist
 -- (in case a previous partial run already inserted some).
+--
+-- BLOCKER 4 — these legacy rows carry a SYNTHETIC tokenHash
+-- ('legacy_' || md5(random() || id)) for which NO raw token ever
+-- existed. They are therefore PERMANENTLY UNUSABLE as invitation
+-- links (acceptance requires the raw token, which was never
+-- generated). Marking them status='pending' would (a) display them
+-- as normal usable invitations in the members UI (a lie — no link
+-- can ever be recovered) and (b) consume a plan-limit seat forever
+-- (the seat count is active memberships + UNEXPIRED pending
+-- invitations). Both are unacceptable.
+--
+-- The cleanest representation is status='revoked' — an explicit
+-- non-usable state that is already excluded from the pending list
+-- and from the seat count. The `id` prefix `legacy_'` lets the UI
+-- and the reissue endpoint identify migrated rows distinctly (the
+-- reissue endpoint accepts any revoked invitation and produces a
+-- fresh usable one for the same email/role).
 INSERT INTO "Invitation" ("id", "tenantId", "email", "role", "status", "tokenHash", "expiresAt", "createdAt", "updatedAt", "invitedByUserId")
 SELECT
   'legacy_' || m."id",
   m."tenantId",
   u."email",
   m."role",
-  'pending',
+  'revoked',
   'legacy_' || md5(random()::text || m."id"::text),
   NOW() + INTERVAL '7 days',
   m."createdAt",
@@ -61,3 +78,15 @@ WHERE m."status" = 'invited'
 
 -- Delete the legacy invited Membership rows.
 DELETE FROM "Membership" WHERE "status" = 'invited';
+
+-- BLOCKER 4 — convert any legacy rows that a PREVIOUS partial run of
+-- this migration left as status='pending' into status='revoked'.
+-- The INSERT above has a NOT EXISTS guard, so it won't touch rows
+-- already inserted by a prior run; those prior rows kept the old
+-- 'pending' status. Their synthetic tokenHash ('legacy_' || md5(...))
+-- has NO recoverable raw token, so they must NOT remain 'pending'
+-- (which would display them as usable invitations and consume a seat
+-- forever). This UPDATE is idempotent — re-running it on already-
+-- revoked rows is a no-op.
+UPDATE "Invitation" SET "status" = 'revoked', "updatedAt" = NOW()
+WHERE "id" LIKE 'legacy\_%' AND "status" = 'pending';

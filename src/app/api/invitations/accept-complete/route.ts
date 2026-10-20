@@ -1,13 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server'
 import bcrypt from 'bcryptjs'
-import { globalDb } from '@/lib/db'
+import { globalDb, withTenant, db, getCurrentTenantId } from '@/lib/db'
 import { verifyInvitationToken, isExpired } from '@/lib/invitations'
+import { PlanLimitExceededError } from '@/lib/payments/gating'
+import { getPlan } from '@/lib/payments/plans'
 
 /**
  * Invitation acceptance — NEW USER flow (PR #11).
  *
  *   POST  /api/invitations/accept-complete
- *         body: { email, requestId, password, token }
+ *         body: { workspace, email, requestId, password, token }
  *
  * Used when the invitee has NO existing user account. The invitee first
  * verifies their email ownership via the existing OTP infrastructure
@@ -25,17 +27,22 @@ import { verifyInvitationToken, isExpired } from '@/lib/invitations'
  *
  * FLOW
  * ----
- *   1. Look up the OTP request by (requestId, email, purpose='signup').
+ *   1. Resolve the workspace slug → tenantId via a GLOBAL Tenant lookup
+ *      (BLOCKER 2 — establish tenant context BEFORE any tenant-scoped read).
+ *   2. Look up the OTP request by (requestId, email, purpose='signup').
  *      Must be verified=true. The OTP serves as proof that the invitee
  *      controls the invitation email.
- *   2. Reject if the email is already a registered user → the invitee
- *      should have used the authenticated accept flow instead
- *      (POST /api/invitations/accept) — return 'email_already_registered'.
- *   3. Hash the raw invitation token, look up the Invitation (globalDb —
- *      public lookup by tokenHash, no tenant context needed).
- *   4. Validate: invitation exists; status='pending'; not expired;
+ *   3. Reject if the email is already a registered user → the invitee
+ *      should have used the authenticated accept flow instead.
+ *   4. Enter withTenant(tenantId), hash the raw invitation token, look up
+ *      the Invitation via the fail-closed `db` proxy (the extension
+ *      injects tenantId → effective query `WHERE tokenHash = $1 AND
+ *      tenantId = $2`). A token issued for a different tenant → 404.
+ *   5. Validate: invitation exists; status='pending'; not expired;
  *      invitation.email === email (case-insensitive).
- *   5. Atomically, in a transaction:
+ *   6. TRANSACTIONAL plan-limit re-check (BLOCKER 3) inside the
+ *      acceptance transaction — same as /api/invitations/accept.
+ *   7. Atomically, in a transaction:
  *        a. Create the User (passwordHash, emailVerified=true, locale='fa').
  *        b. Conditional update invitation: SET status='accepted',
  *           acceptedAt=now, acceptedUserId=user.id WHERE id=invitation.id
@@ -45,11 +52,10 @@ import { verifyInvitationToken, isExpired } from '@/lib/invitations'
  *        c. Create Membership(status='active', role=invitation.role,
  *           tenantId=invitation.tenantId, userId=user.id). Catch P2002
  *           (unique violation on userId+tenantId) → return 'already_member'
- *           (the user is already a member — invitation is still accepted;
- *           the User row is rolled back since it was created in the same
+ *           (the User row is rolled back since it was created in the same
  *           transaction).
- *   6. Cleanup: delete the PendingSignup + OtpRequest rows for this email.
- *   7. Return `{ ok: true, workspaceId, workspaceName }` — the client then
+ *   8. Cleanup: delete the PendingSignup + OtpRequest rows for this email.
+ *   9. Return `{ ok: true, workspaceId, workspaceName }` — the client then
  *      calls signIn('credentials', { email, password }) to obtain a
  *      session.
  *
@@ -64,18 +70,31 @@ import { verifyInvitationToken, isExpired } from '@/lib/invitations'
  *     accept it.
  *   - The new user is created with the emailVerified flag set true, since
  *     the OTP step has already verified the address.
+ *   - No new owner Tenant is created — the invitee joins an EXISTING
+ *     workspace as a non-owner member at the invitation's role.
  */
-
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => null)
+  const slug = String(body?.workspace ?? '').trim()
   const email = String(body?.email ?? '').trim().toLowerCase()
   const requestId = String(body?.requestId ?? '').trim()
   const password = String(body?.password ?? '')
   const rawToken = String(body?.token ?? '').trim()
 
-  if (!email || !requestId || !password || !rawToken) {
+  if (!slug || !email || !requestId || !password || !rawToken) {
     return NextResponse.json({ error: 'missing_fields' }, { status: 400 })
   }
+
+  // Resolve the public tenant slug → tenantId. Tenant is a GLOBAL model.
+  const tenant = await globalDb.tenant.findUnique({
+    where: { slug },
+    select: { id: true, name: true },
+  })
+  if (!tenant) {
+    return NextResponse.json({ error: 'not_found' }, { status: 404 })
+  }
+  const tenantId = tenant.id
+  const workspaceName = tenant.name
 
   // 1. Verify the OTP was verified (purpose='signup' — reuses the existing
   // signup OTP flow so the invitee doesn't have to learn a new OTP channel).
@@ -96,21 +115,23 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'email_already_registered' }, { status: 409 })
   }
 
-  // 3. Look up the invitation by hashed token.
+  // 3. Look up the invitation INSIDE the tenant context. The fail-closed
+  //    extension injects tenantId into the where clause, so the effective
+  //    query is `WHERE tokenHash = $1 AND tenantId = $2`. A token issued
+  //    for a different tenant → 404 (BLOCKER 2).
   const tokenHash = verifyInvitationToken(rawToken)
-  const invitation = await globalDb.invitation.findUnique({
-    where: { tokenHash },
-    include: { tenant: { select: { id: true, name: true } } },
-  })
+  const invitation = await withTenant(tenantId, () =>
+    db.invitation.findUnique({ where: { tokenHash } }),
+  )
 
   // 4. Validate invitation state + email ownership.
-  if (!invitation || !invitation.tenant) {
+  if (!invitation) {
     return NextResponse.json({ error: 'not_found' }, { status: 404 })
   }
   if (invitation.status === 'accepted') {
     return NextResponse.json({ error: 'already_accepted' }, { status: 410 })
   }
-  if (invitation.status === 'revoked') {
+  if (invitation.status === 'revoked' || invitation.status === 'superseded') {
     return NextResponse.json({ error: 'revoked' }, { status: 410 })
   }
   if (invitation.status !== 'pending') {
@@ -127,67 +148,107 @@ export async function POST(req: NextRequest) {
 
   // 5. Atomic transaction: create user + accept invitation + create membership.
   const passwordHash = await bcrypt.hash(password, 10)
-  const tenantId = invitation.tenantId
   const role = invitation.role
-  const workspaceName = invitation.tenant.name
+  const invitationId = invitation.id
 
   try {
-    const result = await globalDb.$transaction(async (tx) => {
-      // (a) Create the user. Email-verified=true because the OTP flow
-      // already proved ownership.
-      const user = await tx.user.create({
-        data: {
-          email,
-          name: email.split('@')[0],
-          passwordHash,
-          locale: 'fa',
-          hasUsedFreeTrial: false,
-          emailVerified: true,
-          emailVerifiedAt: new Date(),
-        },
-      })
+    const result = await withTenant(tenantId, async () => {
+      const tid = getCurrentTenantId()!
+      return db.$transaction(async (tx) => {
+        // (BLOCKER 3) TRANSACTIONAL plan-limit re-check — same as
+        // /api/invitations/accept. The new-user accept converts a
+        // pending seat into an active seat (total usage unchanged);
+        // the re-check guards against a plan downgrade that lowered
+        // the cap below the current usage AFTER the invitation was
+        // created. Count + cap resolution BOTH on `tx` → consistent.
+        const now = new Date()
+        const [activeCount, pendingCount] = await Promise.all([
+          tx.membership.count({ where: { status: 'active' } }),
+          tx.invitation.count({
+            where: { status: 'pending', expiresAt: { gt: now } },
+          }),
+        ])
+        const usage = activeCount + pendingCount
+        const sub = await tx.subscription.findFirst({
+          where: { status: 'active' },
+          include: { plan: { select: { slug: true } } },
+          orderBy: { createdAt: 'desc' },
+        })
+        let planSlug = sub?.plan?.slug
+        if (!planSlug) {
+          const t = await tx.tenant.findUnique({
+            where: { id: tid },
+            select: { plan: true },
+          })
+          planSlug = t?.plan ?? 'free'
+        }
+        const plan = getPlan(planSlug) ?? getPlan('free')!
+        const limitValue = plan.limits.agents
+        if (limitValue !== -1 && usage > limitValue) {
+          throw new PlanLimitExceededError('agents', {
+            allowed: false,
+            current: usage,
+            limit: limitValue,
+            planSlug,
+          })
+        }
 
-      // (b) Conditional invitation update — WHERE status='pending' guards
-      // against concurrent accepts. If a concurrent accept raced us, the
-      // User creation above is rolled back by the transaction.
-      const updated = await tx.invitation.updateMany({
-        where: { id: invitation.id, status: 'pending' },
-        data: {
-          status: 'accepted',
-          acceptedAt: new Date(),
-          acceptedUserId: user.id,
-        },
-      })
-      if (updated.count === 0) {
-        // Someone accepted first — signal to the caller; the tx will roll
-        // back the user creation (no orphan User).
-        return { raced: true as const, alreadyMember: false as const }
-      }
-
-      // (c) Create the membership. P2002 means the user is already a member
-      // of this workspace — return idempotent 'already_member'; the tx will
-      // roll back the User creation.
-      try {
-        await tx.membership.create({
+        // (a) Create the user. Email-verified=true because the OTP flow
+        // already proved ownership.
+        const user = await tx.user.create({
           data: {
-            userId: user.id,
-            tenantId,
-            role,
-            status: 'active',
+            email,
+            name: email.split('@')[0],
+            passwordHash,
+            locale: 'fa',
+            hasUsedFreeTrial: false,
+            emailVerified: true,
+            emailVerifiedAt: new Date(),
           },
         })
-      } catch (e: any) {
-        if (e?.code === 'P2002') {
-          return { raced: false as const, alreadyMember: true as const }
+
+        // (b) Conditional invitation update — WHERE status='pending' guards
+        // against concurrent accepts. If a concurrent accept raced us, the
+        // User creation above is rolled back by the transaction.
+        const updated = await tx.invitation.updateMany({
+          where: { id: invitationId, status: 'pending' },
+          data: {
+            status: 'accepted',
+            acceptedAt: new Date(),
+            acceptedUserId: user.id,
+          },
+        })
+        if (updated.count === 0) {
+          // Someone accepted first — signal to the caller; the tx will roll
+          // back the user creation (no orphan User).
+          return { raced: true as const, alreadyMember: false as const }
         }
-        throw e
-      }
 
-      // Cleanup the OTP + PendingSignup rows for this email.
-      await tx.pendingSignup.deleteMany({ where: { email } })
-      await tx.otpRequest.deleteMany({ where: { requestId } })
+        // (c) Create the membership. P2002 means the user is already a member
+        // of this workspace — return idempotent 'already_member'; the tx will
+        // roll back the User creation.
+        try {
+          await tx.membership.create({
+            data: {
+              userId: user.id,
+              tenantId,
+              role,
+              status: 'active',
+            },
+          })
+        } catch (e: any) {
+          if (e?.code === 'P2002') {
+            return { raced: false as const, alreadyMember: true as const }
+          }
+          throw e
+        }
 
-      return { raced: false as const, alreadyMember: false as const }
+        // Cleanup the OTP + PendingSignup rows for this email.
+        await tx.pendingSignup.deleteMany({ where: { email } })
+        await tx.otpRequest.deleteMany({ where: { requestId } })
+
+        return { raced: false as const, alreadyMember: false as const }
+      })
     })
 
     if (result.raced) {
@@ -204,7 +265,19 @@ export async function POST(req: NextRequest) {
       }, { status: 409 })
     }
     return NextResponse.json({ ok: true, workspaceId: tenantId, workspaceName })
-  } catch (e) {
+  } catch (e: any) {
+    if (e instanceof PlanLimitExceededError) {
+      return NextResponse.json(
+        {
+          error: 'plan_limit_exceeded',
+          limit: 'agents',
+          current: e.result.current,
+          max: e.result.limit,
+          plan: e.result.planSlug,
+        },
+        { status: 402 },
+      )
+    }
     console.error('[invitations/accept-complete] transaction failed', {
       component: 'invitations',
       route: '/api/invitations/accept-complete',

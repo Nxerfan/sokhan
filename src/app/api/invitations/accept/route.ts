@@ -1,22 +1,35 @@
 import { NextResponse, NextRequest } from 'next/server'
 import { getServerSession } from 'next-auth'
 import { authOptions } from '@/lib/auth/options'
-import { globalDb } from '@/lib/db'
+import { globalDb, withTenant, db, getCurrentTenantId } from '@/lib/db'
 import { verifyInvitationToken, isExpired } from '@/lib/invitations'
+import { PlanLimitExceededError } from '@/lib/payments/gating'
+import { getPlan } from '@/lib/payments/plans'
 
 /**
  * Invitation acceptance — for an EXISTING, AUTHENTICATED user (PR #11).
  *
- *   POST  /api/invitations/accept   body: { token }
+ *   POST  /api/invitations/accept   body: { workspace, token }
  *
  * Flow:
  *   1. Caller is signed in (an existing user with a session). The session
  *      user's email MUST match the invitation's email — case-insensitive.
- *   2. Hash the raw token, look up the invitation (globalDb — public lookup
- *      by tokenHash).
- *   3. Validate: invitation exists; status='pending'; not expired;
+ *   2. Resolve the workspace slug → tenantId via a GLOBAL Tenant lookup
+ *      (Tenant is a global model — globalDb is correct). This establishes
+ *      tenant context BEFORE any tenant-scoped read (BLOCKER 2).
+ *   3. Enter withTenant(tenantId), hash the raw token, look up the
+ *      invitation via the fail-closed `db` proxy (the extension injects
+ *      `tenantId` into the where clause, so the effective query is
+ *      `WHERE tokenHash = $1 AND tenantId = $2`). A token issued for a
+ *      different tenant will not match → 404.
+ *   4. Validate: invitation exists; status='pending'; not expired;
  *      invitation.email === session.user.email (case-insensitive).
- *   4. In a transaction:
+ *   5. TRANSACTIONAL plan-limit re-check (BLOCKER 3): inside the
+ *      acceptance transaction, re-count active memberships + unexpired
+ *      pending invitations against the plan cap. This protects against
+ *      plan downgrades / races between create-time and accept-time. If
+ *      the seat would be over-allocated, the transaction rolls back.
+ *   6. In the same transaction:
  *        a. Conditional update: SET status='accepted', acceptedAt,
  *           acceptedUserId WHERE id=invitation.id AND status='pending'.
  *           If 0 rows affected → a concurrent accept raced us → return
@@ -26,16 +39,13 @@ import { verifyInvitationToken, isExpired } from '@/lib/invitations'
  *           P2002 (unique violation on userId+tenantId) — means the user is
  *           already a member → return 'already_member' (idempotent: the
  *           invitation is still marked accepted).
- *   5. Do NOT switch the session — just tell the client the new workspace
- *      is available. The client can call /api/auth/switch-workspace if it
- *      wants to enter the new workspace immediately.
+ *   7. Do NOT switch the session — just tell the client the new workspace
+ *      is available. The client calls useSession().update({ workspaceId })
+ *      to switch (the jwt callback's trigger==='update' path).
  *
  * NEW-USER acceptance (where the email has no User account yet) goes
- * through a separate endpoint: /api/invitations/accept-complete (the
- * invitee first verifies email via OTP then sets a password — creating the
- * User row in the same transaction as the acceptance).
+ * through a separate endpoint: /api/invitations/accept-complete.
  */
-
 export async function POST(req: NextRequest) {
   const session = await getServerSession(authOptions)
   if (!session?.user?.id || !session.user.email) {
@@ -43,24 +53,40 @@ export async function POST(req: NextRequest) {
   }
 
   const body = await req.json().catch(() => null)
+  const slug = String(body?.workspace ?? '').trim()
   const rawToken = String(body?.token ?? '').trim()
-  if (!rawToken) {
-    return NextResponse.json({ error: 'missing_token' }, { status: 400 })
+  if (!slug || !rawToken) {
+    return NextResponse.json({ error: 'missing_fields' }, { status: 400 })
   }
 
-  const tokenHash = verifyInvitationToken(rawToken)
-  const invitation = await globalDb.invitation.findUnique({
-    where: { tokenHash },
-    include: { tenant: { select: { id: true, name: true } } },
+  // Resolve the public tenant slug → tenantId. Tenant is a GLOBAL model.
+  // If the slug doesn't resolve, return 404 (same as every other failure).
+  const tenant = await globalDb.tenant.findUnique({
+    where: { slug },
+    select: { id: true, name: true },
   })
+  if (!tenant) {
+    return NextResponse.json({ error: 'not_found' }, { status: 404 })
+  }
+  const tenantId = tenant.id
+  const workspaceName = tenant.name
 
-  if (!invitation || !invitation.tenant) {
+  const tokenHash = verifyInvitationToken(rawToken)
+
+  // Look up the invitation INSIDE the tenant context. The fail-closed
+  // extension injects tenantId into the where clause, so the effective
+  // query is `WHERE tokenHash = $1 AND tenantId = $2`.
+  const invitation = await withTenant(tenantId, () =>
+    db.invitation.findUnique({ where: { tokenHash } }),
+  )
+
+  if (!invitation) {
     return NextResponse.json({ error: 'not_found' }, { status: 404 })
   }
   if (invitation.status === 'accepted') {
     return NextResponse.json({ error: 'already_accepted' }, { status: 410 })
   }
-  if (invitation.status === 'revoked') {
+  if (invitation.status === 'revoked' || invitation.status === 'superseded') {
     return NextResponse.json({ error: 'revoked' }, { status: 410 })
   }
   if (invitation.status !== 'pending') {
@@ -78,42 +104,92 @@ export async function POST(req: NextRequest) {
   }
 
   const userId = session.user.id
-  const tenantId = invitation.tenantId
   const role = invitation.role
-  const workspaceName = invitation.tenant.name
+  const invitationId = invitation.id
 
-  // Transaction: conditional invitation update + membership create.
-  // The conditional WHERE status='pending' guards against concurrent accepts.
+  // Transaction: transactional plan-limit re-check + conditional
+  // invitation update + membership create. The conditional WHERE
+  // status='pending' guards against concurrent accepts.
   try {
-    const result = await globalDb.$transaction(async (tx) => {
-      // Conditional update — only succeeds if status is still 'pending'.
-      const updated = await tx.invitation.updateMany({
-        where: { id: invitation.id, status: 'pending' },
-        data: {
-          status: 'accepted',
-          acceptedAt: new Date(),
-          acceptedUserId: userId,
-        },
-      })
-      if (updated.count === 0) {
-        // Someone else accepted first — return idempotent outcome.
-        return { raced: true as const, alreadyMember: false as const }
-      }
-
-      // Try to create the membership. P2002 (unique violation on
-      // userId+tenantId) means the user is already a member — that's fine,
-      // the invitation is still marked accepted (idempotent).
-      try {
-        await tx.membership.create({
-          data: { userId, tenantId, role, status: 'active' },
+    const result = await withTenant(tenantId, async () => {
+      const tid = getCurrentTenantId()!
+      return db.$transaction(async (tx) => {
+        // (BLOCKER 3) TRANSACTIONAL plan-limit re-check.
+        // This protects against plan downgrades / races between the
+        // create-time check and the accept-time check. The seat count
+        // is: active memberships + unexpired pending invitations. The
+        // current invitation is still 'pending' at this point, so it
+        // already counts toward the usage — we are converting a pending
+        // seat into an active seat, not adding a new seat. The re-check
+        // guards against a plan downgrade that lowered the cap below
+        // the current usage AFTER the invitation was created.
+        //
+        // The count + the cap resolution BOTH run on `tx` so they are
+        // transactionally consistent with the membership create (a
+        // concurrent plan downgrade cannot slip in between the count
+        // and the create). Subscription is tenant-scoped → the
+        // extension injects tenantId. Tenant is global → passthrough.
+        const now = new Date()
+        const [activeCount, pendingCount] = await Promise.all([
+          tx.membership.count({ where: { status: 'active' } }),
+          tx.invitation.count({
+            where: { status: 'pending', expiresAt: { gt: now } },
+          }),
+        ])
+        const usage = activeCount + pendingCount
+        const sub = await tx.subscription.findFirst({
+          where: { status: 'active' },
+          include: { plan: { select: { slug: true } } },
+          orderBy: { createdAt: 'desc' },
         })
-      } catch (e: any) {
-        if (e?.code === 'P2002') {
-          return { raced: false as const, alreadyMember: true as const }
+        let planSlug = sub?.plan?.slug
+        if (!planSlug) {
+          const t = await tx.tenant.findUnique({
+            where: { id: tid },
+            select: { plan: true },
+          })
+          planSlug = t?.plan ?? 'free'
         }
-        throw e
-      }
-      return { raced: false as const, alreadyMember: false as const }
+        const plan = getPlan(planSlug) ?? getPlan('free')!
+        const limitValue = plan.limits.agents
+        if (limitValue !== -1 && usage > limitValue) {
+          throw new PlanLimitExceededError('agents', {
+            allowed: false,
+            current: usage,
+            limit: limitValue,
+            planSlug,
+          })
+        }
+
+        // Conditional update — only succeeds if status is still 'pending'.
+        const updated = await tx.invitation.updateMany({
+          where: { id: invitationId, status: 'pending' },
+          data: {
+            status: 'accepted',
+            acceptedAt: new Date(),
+            acceptedUserId: userId,
+          },
+        })
+        if (updated.count === 0) {
+          // Someone else accepted first — return idempotent outcome.
+          return { raced: true as const, alreadyMember: false as const }
+        }
+
+        // Try to create the membership. P2002 (unique violation on
+        // userId+tenantId) means the user is already a member — that's fine,
+        // the invitation is still marked accepted (idempotent).
+        try {
+          await tx.membership.create({
+            data: { userId, tenantId, role, status: 'active' },
+          })
+        } catch (e: any) {
+          if (e?.code === 'P2002') {
+            return { raced: false as const, alreadyMember: true as const }
+          }
+          throw e
+        }
+        return { raced: false as const, alreadyMember: false as const }
+      })
     })
 
     if (result.raced) {
@@ -131,7 +207,19 @@ export async function POST(req: NextRequest) {
       })
     }
     return NextResponse.json({ ok: true, workspaceId: tenantId, workspaceName })
-  } catch (e) {
+  } catch (e: any) {
+    if (e instanceof PlanLimitExceededError) {
+      return NextResponse.json(
+        {
+          error: 'plan_limit_exceeded',
+          limit: 'agents',
+          current: e.result.current,
+          max: e.result.limit,
+          plan: e.result.planSlug,
+        },
+        { status: 402 },
+      )
+    }
     console.error('[invitations/accept] transaction failed', {
       component: 'invitations',
       route: '/api/invitations/accept',

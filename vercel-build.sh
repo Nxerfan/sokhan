@@ -42,15 +42,22 @@ bunx prisma generate
 
 echo "▶ Vercel build — applying Prisma migrations (migrate deploy)"
 
-# Resolve any stuck failed migrations from previous deployment attempts.
-# This marks the migration record in _prisma_migrations as rolled-back
-# (does NOT execute SQL). The subsequent `migrate deploy` then re-applies
-# the new idempotent migration (v2) which uses IF NOT EXISTS / DO blocks.
-# This handles the case where a previous deployment partially applied a
-# migration (e.g., CREATE TABLE succeeded but INSERT failed) and left the
-# migration in a failed state that blocks all future deployments (P3009).
-bunx prisma migrate resolve --rolled-back 20241101000000_add_invitation_model 2>/dev/null || true
-
+# BLOCKER 5 fix: NO automatic `migrate resolve` here.
+# `prisma migrate resolve --rolled-back <name>` is an OPERATOR recovery
+# action for a specifically understood failed migration — it marks a
+# _prisma_migrations row as rolled-back (no SQL is executed) so a
+# subsequent `migrate deploy` can re-apply the migration. Running it
+# unconditionally on EVERY deployment is wrong: it papers over real
+# migration failures instead of failing the build, and it mutates the
+# migration ledger on every deploy.
+#
+# The known failed-migration state on the Neon preview branch
+# (20241102000000_add_invitation_model_v2) was recovered ONCE, out of
+# band, by the repository operator, using the documented procedure
+# (see the PR description / BLOCKER 5b recovery notes). After that
+# one-time recovery, normal production behavior is plain
+# `prisma migrate deploy` — which is what we run here. If a future
+# migration fails, the build MUST fail (P3009 surfaces the real error).
 bunx prisma migrate deploy
 
 echo "▶ Vercel build — running next build (no standalone output)"

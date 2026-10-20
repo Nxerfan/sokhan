@@ -78,15 +78,20 @@ async function countUsage(tenantId: string, limit: LimitKind): Promise<number> {
   return withTenant(tenantId, async () => {
     switch (limit) {
       case 'agents': {
-        // Active memberships + pending invitations count toward the agent
-        // limit (PR #11). The old Membership(status='invited') flow is gone
-        // — invitations now live in the Invitation table. The plan-limit
-        // gate therefore counts BOTH active memberships AND pending
-        // invitations: a pending invitation reserves a seat for the invitee,
-        // so it must count against the cap to prevent over-booking.
+        // Seat count (BLOCKER 3): active memberships + UNEXPIRED pending
+        // invitations. A pending invitation reserves a seat for the invitee
+        // so it must count against the cap to prevent over-booking. BUT an
+        // expired pending invitation no longer reserves a seat (the
+        // invitee can no longer accept it) — it must NOT count. This also
+        // excludes accepted invitations (seat is now an active membership,
+        // counted separately) and revoked/superseded invitations (seat
+        // freed). The `expiresAt > now` filter is the critical addition.
+        const now = new Date()
         const [active, pending] = await Promise.all([
           db.membership.count({ where: { status: 'active' } }),
-          db.invitation.count({ where: { status: 'pending' } }),
+          db.invitation.count({
+            where: { status: 'pending', expiresAt: { gt: now } },
+          }),
         ])
         return active + pending
       }

@@ -90,8 +90,9 @@ function InvitePageInner() {
   const tt = useTranslations()
   const locale = useLocale()
   const searchParams = useSearchParams()
+  const workspace = searchParams?.get('workspace') ?? ''
   const token = searchParams?.get('token') ?? ''
-  const { data: session, status } = useSession()
+  const { data: session, status, update: updateSession } = useSession()
   const { open } = useAuthModal()
   const [invitation, setInvitation] = useState<InvitationInfo | null>(null)
   const [fetchState, setFetchState] = useState<FetchState>('loading')
@@ -99,14 +100,15 @@ function InvitePageInner() {
   const [accepted, setAccepted] = useState(false)
 
   useEffect(() => {
-    if (!token) {
+    if (!workspace || !token) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setFetchState('not_found')
       return
     }
     let cancelled = false
     setFetchState('loading')
-    fetch(`/api/invitations/${encodeURIComponent(token)}`)
+    const qs = new URLSearchParams({ workspace, token })
+    fetch(`/api/invitations/lookup?${qs.toString()}`)
       .then(async (res) => {
         if (cancelled) return
         if (!res.ok) {
@@ -124,16 +126,16 @@ function InvitePageInner() {
     return () => {
       cancelled = true
     }
-  }, [token])
+  }, [workspace, token])
 
   async function onAccept() {
-    if (!token) return
+    if (!workspace || !token) return
     setAccepting(true)
     try {
       const res = await fetch('/api/invitations/accept', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token }),
+        body: JSON.stringify({ workspace, token }),
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) {
@@ -156,16 +158,18 @@ function InvitePageInner() {
       }
 
       // Acceptance succeeded — the backend returns the new workspaceId.
-      // Switch to it so the invitee lands INSIDE their new workspace, then
-      // hard-reload so the fresh session JWT is honoured everywhere.
+      // Switch to it via NextAuth's SUPPORTED session/JWT update path:
+      // useSession().update({ workspaceId }) triggers the jwt callback
+      // (trigger === 'update'), which validates the active membership
+      // server-side + sets token.workspaceId + token.role from the DB.
+      // NextAuth re-encodes the JWT + sets the session cookie with the
+      // correct dev/prod name + flags + expiration (we do NOT hand-roll
+      // the cookie contract). Then a hard reload clears all tenant-bound
+      // state (Inbox, socket, etc.) so the fresh token is honoured.
       const workspaceId = data.workspaceId
       if (workspaceId) {
         try {
-          await fetch('/api/auth/switch-workspace', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ workspaceId }),
-          })
+          await updateSession({ workspaceId })
         } catch {
           // Non-fatal — the membership is active, the user can switch
           // later from the workspace menu. Continue to reload so they

@@ -1,7 +1,7 @@
 import type { NextAuthOptions } from 'next-auth'
 import CredentialsProvider from 'next-auth/providers/credentials'
 import bcrypt from 'bcryptjs'
-import { db } from '@/lib/db'
+import { db, globalDb } from '@/lib/db'
 import '@/lib/env-check' // fails loudly if NEXTAUTH_SECRET is missing
 
 /**
@@ -13,19 +13,32 @@ import '@/lib/env-check' // fails loudly if NEXTAUTH_SECRET is missing
  *   ACTIVE membership as the sign-in workspace. A user with no active
  *   membership has no usable workspace and CANNOT sign in.
  *
- * Workspace switching (PR #11):
- *   The switch-workspace API route manually encodes a new JWT using
- *   next-auth/jwt's encode() and sets the session cookie directly.
- *   The client reloads the page after the switch.
+ * Workspace switching — NextAuth's SUPPORTED session/JWT update path:
+ *   The client calls `useSession().update({ workspaceId })`. NextAuth
+ *   POSTs to /api/auth/session, which triggers the `jwt` callback with
+ *   `trigger === 'update'` and `session` = the update payload. The
+ *   callback validates `token.uid`, queries the (userId, tenantId)
+ *   Membership via globalDb (the jwt callback runs OUTSIDE any tenant
+ *   context, and Membership is tenant-scoped — so `db.membership` would
+ *   throw TenantContextRequiredError; globalDb is the correct unscoped
+ *   client for this bootstrap-style lookup). The membership MUST be
+ *   `active`. `token.workspaceId` + `token.role` are set from the DB
+ *   membership ONLY — the client-supplied role is ignored. NextAuth
+ *   then re-encodes the JWT and sets the session cookie with the
+ *   correct dev/prod name + flags + expiration (we do NOT hand-roll
+ *   the cookie contract). The client reloads after the update to clear
+ *   tenant-bound state (Inbox, socket, etc.).
  *
  * SECURITY INVARIANTS
  * -------------------
- *   - The role in the JWT is always reconciled against the DB on the next
- *     session-access attempt that re-validates. (In the authz layer
- *     `withSessionTenant` replaces `session.user.role` with the fresh DB
- *     role, so even a stale JWT cannot grant authority beyond what the
- *     membership currently allows.)
- *   - Client-supplied workspaceId/role are NEVER trusted.
+ *   - Client-supplied workspaceId is validated server-side against an
+ *     ACTIVE membership before the token is mutated. An inactive /
+ *     revoked membership cannot be switched to.
+ *   - The role is ALWAYS read from the DB Membership, never from the
+ *     client. A client cannot escalate its own role via the update
+ *     payload.
+ *   - Client-supplied role is ignored (only workspaceId is read from
+ *     the payload; role comes from the DB).
  */
 export const authOptions: NextAuthOptions = {
   session: { strategy: 'jwt' },
@@ -78,11 +91,40 @@ export const authOptions: NextAuthOptions = {
     }),
   ],
   callbacks: {
-    async jwt({ token, user }) {
+    async jwt({ token, user, trigger, session: updatePayload }) {
       if (user) {
+        // Initial sign-in — persist uid + workspaceId + role into the JWT.
         token.uid = (user as any).id
         token.workspaceId = (user as any).workspaceId ?? null
         token.role = (user as any).role ?? 'agent'
+      }
+      if (trigger === 'update' && updatePayload && (updatePayload as any).workspaceId) {
+        // Workspace switch request from useSession().update({ workspaceId }).
+        // Validate the requested workspaceId against an ACTIVE membership —
+        // globalDb (the jwt callback runs outside any tenant context, and
+        // Membership is tenant-scoped so db.membership would throw).
+        const uid = token.uid as string | undefined
+        if (!uid) {
+          throw new Error('no_uid_in_token')
+        }
+        const requestedWorkspaceId = String((updatePayload as any).workspaceId)
+        const membership = await globalDb.membership.findUnique({
+          where: {
+            userId_tenantId: { userId: uid, tenantId: requestedWorkspaceId },
+          },
+          select: { role: true, status: true },
+        })
+        if (!membership || membership.status !== 'active') {
+          // Not an active member of the target workspace — reject the
+          // switch. Throwing here causes NextAuth's session endpoint to
+          // return an error, which useSession().update() surfaces to the
+          // client (the token is left unchanged, so no switch occurs).
+          throw new Error('not_active_member')
+        }
+        // Set workspaceId + role from the DB. Client-supplied role is
+        // IGNORED — only workspaceId is read from the payload.
+        token.workspaceId = requestedWorkspaceId
+        token.role = membership.role
       }
       return token
     },
