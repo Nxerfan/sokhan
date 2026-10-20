@@ -19,25 +19,25 @@
  *     async callback checks `this.destroyed` before touching state.
  */
 
-import { ApiClient } from './api'
-import { SukhanSocket } from './socket'
-import type { SukhanSocketOptions } from './types'
-import type { SukhanSocketDeps } from './socket'
-import { mergeMessages, mergeMessage } from './merge'
+import { ApiClient } from './api.js'
+import { SukhanSocket } from './socket.js'
+import type { SukhanSocketOptions } from './types.js'
+import type { SukhanSocketDeps } from './socket.js'
+import { mergeMessages, mergeMessage } from './merge.js'
 import {
   HOSTED_API_URL,
   HOSTED_REALTIME_CONFIG,
   resolveRealtimeFromConfig,
   buildSocketIoScriptUrl,
   type RealtimeEndpointConfig,
-} from './realtime-resolve'
+} from './realtime-resolve.js'
 import type {
   WidgetConfig,
   SukhanOptions,
   SukhanInstance,
   Message,
   SenderType,
-} from './types'
+} from './types.js'
 
 const POWERED_BY: Record<'fa' | 'en', string> = {
   fa: 'نیرو گرفته از سُخن',

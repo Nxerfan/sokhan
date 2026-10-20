@@ -61,12 +61,16 @@ test('widget-panel.tsx HTML snippet points to the Sukhan backend origin', () => 
   expect(src).not.toContain('your-domain')
 })
 
-test('widget-panel.tsx NPM instructions match the actual package API', () => {
+test('widget-panel.tsx NPM instructions are marked as not-yet-published (Coming Soon)', () => {
   const src = readSrc('src/components/dashboard/views/widget-panel.tsx')
-  expect(src).toContain('bun add sukhan-widget')
-  expect(src).toContain('initSukhan')
-  expect(src).toContain('apiKey')
-  // For self-hosted, apiUrl is documented
+  // The package is NOT yet published to npm. The UI must show
+  // "Coming Soon" and must NOT provide a copyable working command.
+  expect(src).toMatch(/Coming Soon|به‌زودی/)
+  expect(src).toMatch(/Not yet published to npm/)
+  // Must NOT show the actual install command as a copyable working command.
+  expect(src).not.toContain("bun add sukhan-widget")
+  // For self-hosted, apiUrl is documented (in the "Coming Soon" card's
+  // description, not as a working install command).
   expect(src).toContain('apiUrl')
 })
 

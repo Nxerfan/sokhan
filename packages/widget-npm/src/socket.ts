@@ -24,8 +24,8 @@
  *     terminal (no retry).
  */
 
-import type { SocketEvent, SocketHandler, SukhanSocketOptions } from './types'
-import type { RealtimeTransport } from './realtime-resolve'
+import type { SocketEvent, SocketHandler, SukhanSocketOptions } from './types.js'
+import type { RealtimeTransport } from './realtime-resolve.js'
 
 interface SocketIOClient {
   on(event: string, handler: (payload: unknown) => void): void

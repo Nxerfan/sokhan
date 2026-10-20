@@ -12,11 +12,11 @@ import type {
   WidgetConfig,
   IdentifyResponse,
   Message,
-} from './types'
+} from './types.js'
 
-// Re-export for backwards compat with `import { resolveApiUrl } from './api'`.
-export { resolveApiUrl, HOSTED_API_URL } from './realtime-resolve'
-import { resolveApiUrl } from './realtime-resolve'
+// Re-export for backwards compat with `import { resolveApiUrl } from './api.js'`.
+export { resolveApiUrl, HOSTED_API_URL } from './realtime-resolve.js'
+import { resolveApiUrl } from './realtime-resolve.js'
 
 /** Strip the optional `sk_` prefix from an API key. */
 export function normalizeApiKey(key: string): string {

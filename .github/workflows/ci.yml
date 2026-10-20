@@ -98,7 +98,7 @@ jobs:
         run: bun test tests/db-boundary/
       - name: Run Full regression tests
         run: |
-          bunx playwright test             tests/module2.spec.ts             tests/socketio-verify.spec.ts             tests/socket-race.spec.ts             tests/realtime-authz.spec.ts             tests/widget-external-origin.spec.ts tests/reconnect-regression.spec.ts tests/tenant-security.spec.ts tests/inbox-reply-echo-dedup.spec.ts tests/inbox-stale-selection.spec.ts tests/widget-npm-external-origin.spec.ts tests/inbox-burst-dedup.spec.ts tests/onboarding.spec.ts tests/anonymous-isolation.spec.ts tests/widget-live-messaging.spec.ts tests/widget-optimistic-failure.spec.ts tests/widget-duplicate-messages.spec.ts tests/widget-adversarial-ordering.spec.ts
+          bunx playwright test             tests/module2.spec.ts             tests/socketio-verify.spec.ts             tests/socket-race.spec.ts             tests/realtime-authz.spec.ts             tests/widget-external-origin.spec.ts tests/reconnect-regression.spec.ts tests/tenant-security.spec.ts tests/inbox-reply-echo-dedup.spec.ts tests/inbox-stale-selection.spec.ts tests/widget-npm-external-origin.spec.ts tests/inbox-burst-dedup.spec.ts tests/onboarding.spec.ts tests/anonymous-isolation.spec.ts tests/widget-live-messaging.spec.ts tests/widget-optimistic-failure.spec.ts tests/widget-duplicate-messages.spec.ts tests/widget-adversarial-ordering.spec.ts tests/caddy-public-boundary.spec.ts
       - name: Print Full container logs on failure
         if: failure()
         run: |
@@ -131,7 +131,7 @@ jobs:
         run: bun test tests/db-boundary/
       - name: Run Lite regression tests
         run: |
-          bunx playwright test             tests/module2.spec.ts             tests/socketio-verify.spec.ts             tests/socket-race.spec.ts             tests/realtime-authz.spec.ts             tests/widget-external-origin.spec.ts tests/reconnect-regression.spec.ts tests/tenant-security.spec.ts tests/inbox-reply-echo-dedup.spec.ts tests/inbox-stale-selection.spec.ts tests/widget-npm-external-origin.spec.ts tests/inbox-burst-dedup.spec.ts tests/onboarding.spec.ts tests/anonymous-isolation.spec.ts tests/widget-live-messaging.spec.ts tests/widget-optimistic-failure.spec.ts tests/widget-duplicate-messages.spec.ts tests/widget-adversarial-ordering.spec.ts
+          bunx playwright test             tests/module2.spec.ts             tests/socketio-verify.spec.ts             tests/socket-race.spec.ts             tests/realtime-authz.spec.ts             tests/widget-external-origin.spec.ts tests/reconnect-regression.spec.ts tests/tenant-security.spec.ts tests/inbox-reply-echo-dedup.spec.ts tests/inbox-stale-selection.spec.ts tests/widget-npm-external-origin.spec.ts tests/inbox-burst-dedup.spec.ts tests/onboarding.spec.ts tests/anonymous-isolation.spec.ts tests/widget-live-messaging.spec.ts tests/widget-optimistic-failure.spec.ts tests/widget-duplicate-messages.spec.ts tests/widget-adversarial-ordering.spec.ts tests/caddy-public-boundary.spec.ts
       - name: Print Lite container logs on failure
         if: failure()
         run: |
@@ -140,3 +140,61 @@ jobs:
         if: always()
         run: |
           docker compose -f docker-compose.lite.yml -f docker-compose.lite.test.yml down -v --remove-orphans || true
+
+  # === Self-host release qualification ===
+  # Production-shape clean-install + destructive backup/restore drill.
+  # Uses ONLY production compose files (no test overrides). Access through
+  # Caddy on port 80 only. No internal service host exposure.
+  self-host-qualification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      NEXTAUTH_SECRET: ci-docker-test-secret-not-production
+      POSTGRES_PASSWORD: ci-postgres-password
+      NIXIFY_MOCK: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Install dependencies
+        run: bun install
+      - name: Prisma generate
+        run: bunx prisma generate
+        env:
+          DATABASE_URL: postgresql://user:password@localhost:5432/dummy
+          DIRECT_URL: postgresql://user:password@localhost:5432/dummy
+      - name: Install Playwright Chromium
+        run: bunx playwright install --with-deps chromium
+
+      # Build the image once (reuses the cache from the docker-regression job
+      # if it ran first; otherwise builds fresh).
+      - name: Build Docker image
+        run: |
+          docker compose -f docker-compose.yml build app
+
+      # Run the production-shape qualification tests. These tests manage
+      # their own Docker containers (start/stop/destroy/restore) using
+      # the production compose files. They access the app through Caddy
+      # on port 80 only — no internal service host exposure.
+      - name: Run self-host qualification tests (Full + Lite)
+        run: |
+          bunx playwright test \
+            tests/self-host-backup-restore.spec.ts \
+            tests/self-host-clean-install.spec.ts
+
+      - name: Print container logs on failure
+        if: failure()
+        run: |
+          docker compose -p sukhan-bakres-full logs 2>/dev/null || true
+          docker compose -p sukhan-bakres-lite logs 2>/dev/null || true
+          docker compose -p sukhan-clean-full logs 2>/dev/null || true
+          docker compose -p sukhan-clean-lite logs 2>/dev/null || true
+      - name: Tear down any remaining stacks
+        if: always()
+        run: |
+          docker compose -p sukhan-bakres-full down -v --remove-orphans 2>/dev/null || true
+          docker compose -p sukhan-bakres-lite down -v --remove-orphans 2>/dev/null || true
+          docker compose -p sukhan-clean-full down -v --remove-orphans 2>/dev/null || true
+          docker compose -p sukhan-clean-lite down -v --remove-orphans 2>/dev/null || true
