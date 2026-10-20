@@ -1,7 +1,7 @@
 import type { NextAuthOptions } from 'next-auth'
 import CredentialsProvider from 'next-auth/providers/credentials'
 import bcrypt from 'bcryptjs'
-import { db, withTenant } from '@/lib/db'
+import { db } from '@/lib/db'
 import '@/lib/env-check' // fails loudly if NEXTAUTH_SECRET is missing
 
 /**
