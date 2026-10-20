@@ -44,7 +44,10 @@ ALTER TABLE "Invitation" ADD CONSTRAINT "Invitation_invitedByUserId_fkey" FOREIG
 -- — they can't log in (no passwordHash) and won't be selected by the login flow (no active membership).
 
 -- Step 1: Create Invitation rows from legacy invited memberships.
--- We use a CTE to generate a random token hash for each legacy invitation.
+-- Use md5(random()::text) for the token hash — pgcrypto's gen_random_bytes
+-- is not available in all PostgreSQL configurations. The legacy tokens are
+-- already invalid (they will need to be reissued), so cryptographic strength
+-- is not critical here — the hash just needs to be unique.
 INSERT INTO "Invitation" ("id", "tenantId", "email", "role", "status", "tokenHash", "expiresAt", "createdAt", "updatedAt", "invitedByUserId")
 SELECT
   'legacy_' || m."id",
@@ -52,7 +55,7 @@ SELECT
   u."email",
   m."role",
   'pending',
-  'legacy_' || encode(gen_random_bytes(32), 'hex'),
+  'legacy_' || md5(random()::text || m."id"::text),
   NOW() + INTERVAL '7 days',
   m."createdAt",
   NOW(),
