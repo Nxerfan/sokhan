@@ -298,27 +298,30 @@ test.describe('Docker DB-backed tenant security', () => {
   })
 
   test('C. Inactive (invited) membership cannot be assigned', async () => {
-    // As Tenant A owner, invite a new user (status='invited', not 'active').
+    // As Tenant A owner, invite a new user via the invitation API.
+    // The invitation creates an Invitation record (not a Membership).
+    // The invited user has no User identity yet (email not verified).
     const invitedEmail = `invited-${Date.now()}@tenant-security.test`
-    const inviteRes = await tenantA.page.request.post(`${BASE}/api/members`, {
+    const inviteRes = await tenantA.page.request.post(`${BASE}/api/invitations`, {
       data: { email: invitedEmail, role: 'agent' },
       headers: { 'Content-Type': 'application/json' },
     })
     expect(inviteRes.status(), 'invite should succeed').toBe(200)
     const inviteData = (await inviteRes.json()) as {
-      membership?: { user: { id: string }; status: string }
+      invitation?: { id: string; email: string; role: string; status: string }
     }
-    const invitedUserId = inviteData.membership?.user.id
-    expect(invitedUserId, 'invited user should have an id').toBeTruthy()
-    expect(inviteData.membership?.status).toBe('invited')
+    expect(inviteData.invitation?.id, 'invitation should have an id').toBeTruthy()
+    expect(inviteData.invitation?.status).toBe('pending')
 
-    // Now try to assign the invited (inactive) user to Tenant A's conversation.
-    // The membership.findFirst filters by status='active' — invited members
-    // are invisible to the assign endpoint → 'invalid_assignee'.
+    // The invited email has no User identity yet — try to assign a
+    // non-existent userId to the conversation. The membership.findFirst
+    // filters by status='active' — no active membership → 'invalid_assignee'.
+    // Use a random cuid-like string as the "invited user" (doesn't exist).
+    const fakeUserId = 'invited-user-does-not-exist'
     const res = await tenantA.page.request.patch(
       `${BASE}/api/conversations/${tenantAConv.conversationId}`,
       {
-        data: { assignedUserId: invitedUserId },
+        data: { assignedUserId: fakeUserId },
         headers: { 'Content-Type': 'application/json' },
       },
     )
