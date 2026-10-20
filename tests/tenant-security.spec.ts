@@ -111,21 +111,63 @@ async function setupTenant(
   // need the session cookie to be set — don't fail on a 302 either.
   if (signinRes.status() >= 400) {
     throw new Error(
-      `Sign-in failed for ${email}: status=${signinRes.status()}`,
+      `Sign-in failed for ${email}: callback status=${signinRes.status()}`,
     )
   }
 
-  // 4. Fetch tenant info + verify the session works
-  const meRes = await page.request.get(`${BASE}/api/tenants/me`)
-  const meData = (await meRes.json()) as { tenant?: { id: string; slug: string } }
-  if (!meData.tenant) {
+  // 4. Verify the NextAuth session is established before proceeding.
+  //    The session cookie from the credentials callback can take a
+  //    brief moment to propagate into Playwright's cookie jar. Poll
+  //    /api/auth/session (or /api/tenants/me) with a short bounded
+  //    deadline. This is NOT a retry of the actual tenant-security
+  //    assertions — it only retries the authentication establishment.
+  const sessionDeadline = Date.now() + 10000 // 10s bounded poll
+  let sessionEstablished = false
+  let lastSessionStatus = 0
+  let lastMeStatus = 0
+  let meData: { tenant?: { id: string; slug: string } } = {}
+
+  while (Date.now() < sessionDeadline) {
+    // Check /api/auth/session first — lighter-weight than /api/tenants/me.
+    const sessionRes = await page.request.get(`${BASE}/api/auth/session`)
+    lastSessionStatus = sessionRes.status()
+    if (sessionRes.ok()) {
+      const sessionBody = await sessionRes.json().catch(() => ({}))
+      // If the session contains an authenticated user, the session
+      // cookie is established.
+      if (sessionBody && sessionBody.user) {
+        // Session confirmed — now fetch tenant info.
+        const meRes = await page.request.get(`${BASE}/api/tenants/me`)
+        lastMeStatus = meRes.status()
+        if (meRes.ok()) {
+          meData = (await meRes.json()) as { tenant?: { id: string; slug: string } }
+          if (meData.tenant) {
+            sessionEstablished = true
+            break
+          }
+        }
+      }
+    }
+    // Brief pause before retrying (250ms — short enough to not slow
+    // the test meaningfully, long enough for cookie propagation).
+    await page.waitForTimeout(250)
+  }
+
+  if (!sessionEstablished) {
+    // Safe diagnostics — no cookie values, tokens, or secrets.
+    const hasSessionCookie = (await ctx.cookies()).some(c => c.name.includes('session') || c.name.includes('auth'))
     throw new Error(
-      `/api/tenants/me failed for ${email}: status=${meRes.status()}`,
+      `Auth session not established for ${email} after bounded poll. ` +
+      `callback_status=${signinRes.status()} ` +
+      `session_cookie_present=${hasSessionCookie} ` +
+      `last_session_status=${lastSessionStatus} ` +
+      `last_tenants_me_status=${lastMeStatus}`,
     )
   }
-  if (meData.tenant.id !== tenantId) {
+
+  if (meData.tenant!.id !== tenantId) {
     throw new Error(
-      `Tenant id mismatch for ${email}: signup=${tenantId} session=${meData.tenant.id}`,
+      `Tenant id mismatch for ${email}: signup=${tenantId} session=${meData.tenant!.id}`,
     )
   }
 
@@ -141,8 +183,7 @@ async function setupTenant(
   }
   const ownerId = ownerMembership.user.id
 
-  // 6. Resolve the tenant slug (needed for the widget contact endpoint)
-  const slug = meData.tenant.slug
+  const slug = meData.tenant!.slug
 
   return { page, email, workspaceName, tenantId, slug, ownerId }
 }
