@@ -41,6 +41,25 @@ echo "▶ Vercel build — generating Prisma client (PostgreSQL / Neon)"
 bunx prisma generate
 
 echo "▶ Vercel build — applying Prisma migrations (migrate deploy)"
+
+# Resolve any stuck failed migrations from previous deployment attempts.
+# This is safe: `migrate resolve --rolled-back` only marks the migration
+# record in _prisma_migrations as rolled-back — it does NOT execute any SQL.
+# The subsequent `migrate deploy` will then re-apply the migration from scratch.
+# This handles the case where a previous deployment partially applied a
+# migration (e.g., CREATE TABLE succeeded but INSERT failed) and left the
+# migration in a failed state that blocks all future deployments.
+FAILED_MIGRATIONS=$(bunx prisma migrate status 2>&1 | grep -i "failed" || true)
+if [ -n "$FAILED_MIGRATIONS" ]; then
+  echo "▶ Found failed migrations — resolving before deploy:"
+  echo "$FAILED_MIGRATIONS"
+  # Extract migration names from the status output and resolve each one.
+  echo "$FAILED_MIGRATIONS" | grep -oP '\d{14}_[a-z0-9_]+' | while read -r mig; do
+    echo "▶ Resolving failed migration: $mig (marked as rolled-back)"
+    bunx prisma migrate resolve --rolled-back "$mig" || true
+  done
+fi
+
 bunx prisma migrate deploy
 
 echo "▶ Vercel build — running next build (no standalone output)"
