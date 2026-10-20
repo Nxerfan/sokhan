@@ -1,7 +1,7 @@
 import type { NextAuthOptions } from 'next-auth'
 import CredentialsProvider from 'next-auth/providers/credentials'
 import bcrypt from 'bcryptjs'
-import { db, globalDb } from '@/lib/db'
+import { db, withTenant } from '@/lib/db'
 import '@/lib/env-check' // fails loudly if NEXTAUTH_SECRET is missing
 
 /**
@@ -14,10 +14,9 @@ import '@/lib/env-check' // fails loudly if NEXTAUTH_SECRET is missing
  *   membership has no usable workspace and CANNOT sign in.
  *
  * Workspace switching (PR #11):
- *   The switch-workspace API route uses NextAuth's `unstable_update`
- *   mechanism to trigger the jwt callback with `trigger='update'` +
- *   `session={ workspaceId }`. The jwt callback re-verifies the active
- *   membership (defense-in-depth) and updates the token.
+ *   The switch-workspace API route manually encodes a new JWT using
+ *   next-auth/jwt's encode() and sets the session cookie directly.
+ *   The client reloads the page after the switch.
  *
  * SECURITY INVARIANTS
  * -------------------
@@ -26,8 +25,7 @@ import '@/lib/env-check' // fails loudly if NEXTAUTH_SECRET is missing
  *     `withSessionTenant` replaces `session.user.role` with the fresh DB
  *     role, so even a stale JWT cannot grant authority beyond what the
  *     membership currently allows.)
- *   - Client-supplied workspaceId/role are NEVER trusted — the jwt
- *     callback always re-resolves the role from the DB Membership.
+ *   - Client-supplied workspaceId/role are NEVER trusted.
  */
 export const authOptions: NextAuthOptions = {
   session: { strategy: 'jwt' },
@@ -46,6 +44,10 @@ export const authOptions: NextAuthOptions = {
         const password = credentials?.password
         if (!email || !password) return null
 
+        // db (not globalDb) — User is NOT a tenant-scoped model, so the
+        // fail-closed proxy routes db.user to the base client without
+        // requiring a tenant context. The memberships include is a SQL
+        // JOIN, not a separate tenant-scoped query.
         const user = await db.user.findUnique({
           where: { email },
           include: {
@@ -76,36 +78,12 @@ export const authOptions: NextAuthOptions = {
     }),
   ],
   callbacks: {
-    async jwt({ token, user, trigger, session }) {
+    async jwt({ token, user }) {
       if (user) {
         token.uid = (user as any).id
         token.workspaceId = (user as any).workspaceId ?? null
         token.role = (user as any).role ?? 'agent'
       }
-
-      // Workspace switch via NextAuth's `update` trigger. The
-      // switch-workspace API route calls `unstable_update()` with
-      // `{ workspaceId }`, which triggers this callback with
-      // `trigger='update'` + `session={ workspaceId }`.
-      if (trigger === 'update' && session) {
-        const newWorkspaceId = (session as any).workspaceId
-        if (newWorkspaceId && token.uid) {
-          const m = await globalDb.membership.findUnique({
-            where: {
-              userId_tenantId: {
-                userId: token.uid,
-                tenantId: newWorkspaceId,
-              },
-            },
-            select: { role: true, status: true },
-          })
-          if (m?.status === 'active') {
-            token.workspaceId = newWorkspaceId
-            token.role = m.role
-          }
-        }
-      }
-
       return token
     },
     async session({ session, token }) {
