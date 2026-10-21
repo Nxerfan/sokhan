@@ -8,67 +8,44 @@ import {
 } from '@/lib/invitations'
 
 /**
- * Invitation REISSUE (PR #11, BLOCKER 4).
+ * Invitation REISSUE (PR #11, BLOCKER 4 — fixed lifecycle).
  *
  *   POST  /api/invitations/reissue?id=<invitationId>
  *
- * Reissues an existing REVOKED or SUPERSEDED invitation, producing a FRESH
- * cryptographic token + hash + expiry for the SAME email + role + tenant.
- * The old invitation row is marked `superseded` (a distinct non-usable
- * state) so it can never produce another valid link unexpectedly. The new
- * invitation is `pending` with a freshly-generated raw token returned
- * EXACTLY ONCE in the response.
+ * Reissues an existing REVOKED invitation, producing a FRESH cryptographic
+ * token + hash + expiry for the SAME email + role + tenant. The old
+ * invitation row is marked `superseded` (a distinct non-usable state) so it
+ * can never be reissued again. The new invitation is `pending` with a
+ * freshly-generated raw token returned EXACTLY ONCE in the response.
  *
- * WHY THIS EXISTS
- * --------------
- * The legacy migration (`20241102000000_add_invitation_model_v2`) converts
- * old `Membership(status='invited')` rows into `Invitation` rows with a
- * SYNTHETIC tokenHash (`'legacy_' || md5(random() || id)`). No raw token
- * was ever generated for these rows — the synthetic hash is a one-way
- * digest of random bytes + the membership id, and `verifyInvitationToken()`
- * hashes a user-supplied raw token through SHA-256, which can never
- * reproduce the synthetic md5 value. These rows are therefore PERMANENTLY
- * UNUSABLE as invitation links. The migration marks them `revoked` (not
- * `pending`) so they don't display as usable invitations or consume seats.
+ * LIFECYCLE INVARIANT — exactly one valid link per reissue chain (#4 fix)
+ * --------------------------------------------------------------------
+ *   - ONLY `revoked` invitations may be reissued.
+ *   - `superseded` rows CANNOT be reissued (they are the spent husk of a
+ *     previous reissue). Reissuing a superseded row would create a SECOND
+ *     valid pending link for the same logical invitee, violating the
+ *     one-active-link invariant.
+ *   - `pending` invitations are already usable — reissuing would duplicate.
+ *   - `accepted` invitations already produced a membership — reissuing
+ *     would create a duplicate membership path.
  *
- * A manager who wants to re-invite one of these legacy invitees (or any
- * other revoked/superseded invitee) uses this endpoint. It:
- *   1. Validates the target invitation exists in the current tenant and
- *      has status `revoked` or `superseded` (i.e. it is NOT a usable
- *      pending invitation — reissuing a pending one would be a no-op;
- *      reissuing an accepted one would create a duplicate membership path).
- *   2. Validates the actor is manager+ who outranks the target role
- *      (same check as create/revoke).
- *   3. Generates a FRESH raw token + SHA-256 hash + expiry.
- *   4. In a transaction:
- *        a. Mark the OLD invitation `superseded` (no longer `revoked`).
- *           `superseded` is NOT `pending` → does not consume a seat and
- *           cannot be accepted.
- *        b. Create a NEW invitation (status='pending') for the same
- *           email/role/tenant with the fresh tokenHash + expiry.
- *   5. Returns the new invitation's inviteUrl (with the raw token) EXACTLY
- *      ONCE.
+ * To reissue a CURRENTLY-PENDING invitation (e.g. the link was lost):
+ *   1. REVOKE the pending invitation (DELETE /api/invitations?id=...).
+ *   2. Reissue that newly-revoked row via this endpoint.
+ * This guarantees exactly one valid pending link exists at any time.
  *
- * SEAT COUNT INVARIANT
- * --------------------
+ * SEAT COUNT
+ * ----------
  * Before reissue: the old invitation is `revoked` → 0 seats.
  * After reissue: the old is `superseded` (0 seats) + the new is `pending`
- * (1 seat). Net change: +1 seat (the new pending invitation). This is
- * correct — the manager is re-creating an invitation that reserves a
- * seat. The plan-limit gate at create-time still applies: if the tenant
- * is at the cap, the reissue is rejected with `plan_limit_exceeded`
- * (same as a fresh create).
+ * (1 seat). Net: +1 seat. The plan-limit gate applies.
  *
- * SECURITY INVARIANTS
- * -------------------
- *   - The fresh raw token is generated server-side, returned EXACTLY ONCE
- *     in the response, and NEVER persisted/logged. Only the hash is stored.
- *   - The old synthetic/unrecoverable tokenHash remains in the DB row (now
- *     marked `superseded`) but is irrelevant — no raw token can ever match
- *     it, and the row's status prevents acceptance regardless.
- *   - Only revoked/superseded invitations can be reissued. A `pending`
- *     invitation is already usable (the inviter should share the original
- *     link). An `accepted` invitation already produced a membership.
+ * SECURITY
+ * --------
+ *   - Fresh raw token generated server-side, returned EXACTLY ONCE, never
+ *     persisted/logged. Only the SHA-256 hash is stored.
+ *   - Actor must be manager+ who outranks the target role.
+ *   - Target must belong to the current tenant (fail-closed).
  */
 export async function POST(req: NextRequest) {
   const result = await withSessionTenant(async ({ session }) => {
@@ -81,35 +58,32 @@ export async function POST(req: NextRequest) {
 
     const tid = getCurrentTenantId()!
 
-    // Look up the target invitation in the current tenant. The fail-closed
-    // extension injects tenantId; explicit filter is defense-in-depth.
     const target = await db.invitation.findFirst({
       where: { id, tenantId: tid },
       select: { id: true, email: true, role: true, status: true },
     })
     if (!target) return { error: 'not_found' as const }
 
-    // Only revoked or superseded invitations can be reissued.
+    // ONLY revoked invitations may be reissued (#4 fix).
     if (target.status === 'pending') {
       return { error: 'already_pending' as const }
     }
     if (target.status === 'accepted') {
       return { error: 'already_accepted' as const }
     }
-    if (target.status !== 'revoked' && target.status !== 'superseded') {
+    if (target.status === 'superseded') {
+      // A superseded row is the spent husk of a previous reissue — it
+      // CANNOT be reissued again (would create a second valid link).
+      return { error: 'superseded_not_reissuable' as const }
+    }
+    if (target.status !== 'revoked') {
       return { error: 'not_reissuable' as const }
     }
 
-    // Actor must outrank the target role (same as create/revoke).
     if (!canManageRole(session.user.role, target.role)) {
       return { forbidden: true as const }
     }
 
-    // Plan-limit gate — the new pending invitation consumes a seat.
-    // Reuse the create-time gate via a direct import to avoid a circular
-    // dependency. The gate counts active memberships + unexpired pending
-    // invitations (BLOCKER 3). The old invitation here is revoked/
-    // superseded → does not count → the new pending invitation is the +1.
     const { enforceCurrentTenantPlanLimit, PlanLimitExceededError } = await import(
       '@/lib/payments/gating'
     )
@@ -122,21 +96,20 @@ export async function POST(req: NextRequest) {
       throw e
     }
 
-    // Generate the fresh token + hash + expiry.
     const { rawToken, tokenHash } = generateInvitationToken()
     const expiresAt = invitationExpiryFromNow()
 
-    // Transaction: mark old superseded + create new pending.
     const newId = await db.$transaction(async (tx) => {
-      // (a) Mark the old invitation `superseded` — no longer usable, no
-      // longer counts as a seat, no longer displays as pending. Idempotent
-      // in case a previous reissue run already marked it.
+      // (a) Mark the OLD revoked invitation `superseded` — it can never be
+      // reissued again (#4 invariant). The WHERE status='revoked' guard
+      // makes this conditional (a concurrent reissue of the same row
+      // would affect 0 rows → the new pending is still created, but the
+      // old stays revoked rather than superseded — acceptable).
       await tx.invitation.updateMany({
-        where: { id: target.id, status: { in: ['revoked', 'superseded'] } },
+        where: { id: target.id, status: 'revoked' },
         data: { status: 'superseded', updatedAt: new Date() },
       })
 
-      // (b) Create the NEW pending invitation with the fresh hash + expiry.
       const created = await tx.invitation.create({
         data: {
           tenantId: tid,
@@ -152,7 +125,6 @@ export async function POST(req: NextRequest) {
       return created.id
     })
 
-    // Build the invite URL with the workspace slug + fresh raw token.
     const origin = req.headers.get('x-forwarded-host')
       ? `${req.headers.get('x-forwarded-proto') || 'https'}://${req.headers.get('x-forwarded-host')}`
       : process.env.NEXTAUTH_URL || `${req.nextUrl.protocol}//${req.nextUrl.host}`
@@ -199,7 +171,7 @@ export async function POST(req: NextRequest) {
     const status =
       err === 'not_found'
         ? 404
-        : err === 'missing_id' || err === 'already_pending' || err === 'already_accepted' || err === 'not_reissuable'
+        : err === 'missing_id' || err === 'already_pending' || err === 'already_accepted' || err === 'not_reissuable' || err === 'superseded_not_reissuable'
           ? 400
           : 400
     return NextResponse.json({ error: err }, { status })
