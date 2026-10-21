@@ -468,8 +468,8 @@ test.describe('A. Existing account / second workspace', () => {
 
   test.beforeAll(async ({ browser }) => {
     const suffix = uniqueSuffix()
-    tenantA = await setupTenant(browser, `ta-iws-${suffix}@test`, `TA IWS ${suffix}`)
-    tenantB = await setupTenant(browser, `tb-iws-${suffix}@test`, `TB IWS ${suffix}`)
+    tenantA = await setupTenant(browser, `ta-iws-${suffix}@iws.test`, `TA IWS ${suffix}`)
+    tenantB = await setupTenant(browser, `tb-iws-${suffix}@iws.test`, `TB IWS ${suffix}`)
     aConversationId = (await createVisitorConversation(tenantA.slug, 'hello from A visitor')).conversationId
     bConversationId = (await createVisitorConversation(tenantB.slug, 'hello from B visitor')).conversationId
     // A invites B. owner(A)=1 seat + inviteForB=1 seat = 2/2 (Free cap).
@@ -538,8 +538,8 @@ test.describe('B. New account invitation', () => {
   test.beforeAll(async ({ browser: b }) => {
     browser = b
     const suffix = uniqueSuffix()
-    tenantA = await setupTenant(browser, `ta-newacc-${suffix}@test`, `TA NewAcc ${suffix}`)
-    newEmail = `newuser-${suffix}@test`
+    tenantA = await setupTenant(browser, `ta-newacc-${suffix}@iws.test`, `TA NewAcc ${suffix}`)
+    newEmail = `newuser-${suffix}@iws.test`
     invite = await createInvitation(tenantA.page, newEmail, 'manager')
   })
 
@@ -633,8 +633,8 @@ test.describe('C. Security', () => {
   // single sub-scenario. Each sub-scenario that creates invitations gets
   // its own pair so the Free-plan 2-agent cap is never exceeded.
   async function freshPair(suffix: string): Promise<{ a: TenantCtx; b: TenantCtx }> {
-    const a = await setupTenant(browser, `ta-sec-${suffix}@test`, `TA ${suffix}`)
-    const b = await setupTenant(browser, `tb-sec-${suffix}@test`, `TB ${suffix}`)
+    const a = await setupTenant(browser, `ta-sec-${suffix}@iws.test`, `TA ${suffix}`)
+    const b = await setupTenant(browser, `tb-sec-${suffix}@iws.test`, `TB ${suffix}`)
     return { a, b }
   }
 
@@ -642,7 +642,7 @@ test.describe('C. Security', () => {
     const { a, b } = await freshPair(`c1-${uniqueSuffix()}`)
     try {
       // A invites a THIRD email (not B). owner(A)=1 + invite=1 = 2/2 (Free cap).
-      const cEmail = `c1c-${uniqueSuffix()}@test`
+      const cEmail = `c1c-${uniqueSuffix()}@iws.test`
       const inv = await createInvitation(a.page, cEmail, 'agent')
       // B (authenticated, different email) tries to accept → email_mismatch.
       const res = await acceptInvitation(b.page, inv.workspace, inv.token)
@@ -690,7 +690,7 @@ test.describe('C. Security', () => {
   test('C4. revoked invitation cannot be accepted', async () => {
     const { a } = await freshPair(`c4-${uniqueSuffix()}`)
     try {
-      const target = `c4-${uniqueSuffix()}@test`
+      const target = `c4-${uniqueSuffix()}@iws.test`
       const inv = await createInvitation(a.page, target, 'agent')
       const listRes = await a.page.request.get(`${BASE}/api/invitations`)
       const listBody = (await listRes.json()) as { invitations?: Array<{ id: string; email: string }> }
@@ -708,7 +708,7 @@ test.describe('C. Security', () => {
   test('C5. expired invitation cannot be accepted', async () => {
     const { a } = await freshPair(`c5-${uniqueSuffix()}`)
     try {
-      const target = `c5-${uniqueSuffix()}@test`
+      const target = `c5-${uniqueSuffix()}@iws.test`
       const inv = await createInvitation(a.page, target, 'agent')
       await devExpireInvitation(inv.workspace, inv.token)
       const look = await lookupInvitation(inv.workspace, inv.token)
@@ -739,7 +739,7 @@ test.describe('C. Security', () => {
     const { a } = await freshPair(`c7-${uniqueSuffix()}`)
     try {
       const suffix = uniqueSuffix()
-      const fresh = `c7-${suffix}@test`
+      const fresh = `c7-${suffix}@iws.test`
       // Create a fresh user via invitation + accept-complete.
       const inv = await createInvitation(a.page, fresh, 'agent')
       const { requestId } = await otpVerifyEmail(fresh)
@@ -775,7 +775,7 @@ test.describe('C. Security', () => {
   test('C8. pending invite never becomes an active login workspace', async () => {
     const { a } = await freshPair(`c8-${uniqueSuffix()}`)
     try {
-      const pending = `c8-${uniqueSuffix()}@test`
+      const pending = `c8-${uniqueSuffix()}@iws.test`
       await createInvitation(a.page, pending, 'agent')
       // Try to sign in as the pending invitee — must fail.
       const page = await browser.newPage()
@@ -797,7 +797,7 @@ test.describe('C. Security', () => {
     const { a } = await freshPair(`c9-${uniqueSuffix()}`)
     try {
       const suffix = uniqueSuffix()
-      const agentEmail = `c9-agent-${suffix}@test`
+      const agentEmail = `c9-agent-${suffix}@iws.test`
       const inv = await createInvitation(a.page, agentEmail, 'agent')
       const { requestId } = await otpVerifyEmail(agentEmail)
       await acceptCompleteNewUser({
@@ -806,7 +806,7 @@ test.describe('C. Security', () => {
       const agentPage = await signInExisting(browser, agentEmail, a.tenantId)
       // Agent tries to invite someone as 'admin' → forbidden (403).
       const res = await agentPage.request.post(`${BASE}/api/invitations`, {
-        data: { email: `c9-target-${suffix}@test`, role: 'admin' },
+        data: { email: `c9-target-${suffix}@iws.test`, role: 'admin' },
         headers: { 'Content-Type': 'application/json' },
       })
       expect(res.status(), 'agent cannot create admin invitation').toBe(403)
@@ -852,14 +852,14 @@ test.describe('D. Expired-seat counting (BLOCKER 3)', () => {
   test.beforeAll(async ({ browser: b }) => { browser = b })
 
   async function freshTenant(tag: string): Promise<TenantCtx> {
-    return setupTenant(browser, `ta-${tag}-${uniqueSuffix()}@test`, `TA ${tag}`)
+    return setupTenant(browser, `ta-${tag}-${uniqueSuffix()}@iws.test`, `TA ${tag}`)
   }
 
   test('D1. pending invite consumes one seat', async () => {
     const a = await freshTenant('d1')
     try {
       const before = await getUsage(a.page)
-      await createInvitation(a.page, `d1-${uniqueSuffix()}@test`, 'agent')
+      await createInvitation(a.page, `d1-${uniqueSuffix()}@iws.test`, 'agent')
       const after = await getUsage(a.page)
       expect(after.current, 'pending invite must consume one seat').toBe(before.current + 1)
     } finally { await a.page.context().close().catch(() => {}) }
@@ -869,7 +869,7 @@ test.describe('D. Expired-seat counting (BLOCKER 3)', () => {
     const a = await freshTenant('d2')
     try {
       const before = await getUsage(a.page)
-      const inv = await createInvitation(a.page, `d2-${uniqueSuffix()}@test`, 'agent')
+      const inv = await createInvitation(a.page, `d2-${uniqueSuffix()}@iws.test`, 'agent')
       const mid = await getUsage(a.page)
       expect(mid.current).toBe(before.current + 1)
       await devExpireInvitation(inv.workspace, inv.token)
@@ -882,7 +882,7 @@ test.describe('D. Expired-seat counting (BLOCKER 3)', () => {
     const a = await freshTenant('d3')
     try {
       const before = await getUsage(a.page)
-      const target = `d3-${uniqueSuffix()}@test`
+      const target = `d3-${uniqueSuffix()}@iws.test`
       await createInvitation(a.page, target, 'agent')
       const mid = await getUsage(a.page)
       expect(mid.current).toBe(before.current + 1)
@@ -900,7 +900,7 @@ test.describe('D. Expired-seat counting (BLOCKER 3)', () => {
     const a = await freshTenant('d4')
     try {
       const before = await getUsage(a.page)
-      const target = `d4-${uniqueSuffix()}@test`
+      const target = `d4-${uniqueSuffix()}@iws.test`
       const inv = await createInvitation(a.page, target, 'agent')
       // Capture usage IMMEDIATELY AFTER invitation creation (before accept).
       const afterCreate = await getUsage(a.page)
@@ -933,10 +933,10 @@ test.describe('D. Expired-seat counting (BLOCKER 3)', () => {
       const remaining = limit - usage.current
       const suffix = uniqueSuffix()
       for (let i = 0; i < remaining; i++) {
-        await createInvitation(a.page, `d5-${suffix}-${i}@test`, 'agent')
+        await createInvitation(a.page, `d5-${suffix}-${i}@iws.test`, 'agent')
       }
       const overRes = await a.page.request.post(`${BASE}/api/invitations`, {
-        data: { email: `d5-${suffix}-X@test`, role: 'agent' },
+        data: { email: `d5-${suffix}-X@iws.test`, role: 'agent' },
         headers: { 'Content-Type': 'application/json' },
       })
       expect(overRes.status(), 'over-limit invite must be 402').toBe(402)
@@ -950,12 +950,12 @@ test.describe('D. Expired-seat counting (BLOCKER 3)', () => {
       // 1. Start on 'max' (agents=20) — gives plenty of capacity.
       await devSetPlan(a.slug, 'max')
       // 2. Create valid pending invitation (usage: owner=1 + pending=1 = 2).
-      const target = `d6-${uniqueSuffix()}@test`
+      const target = `d6-${uniqueSuffix()}@iws.test`
       const inv = await createInvitation(a.page, target, 'agent')
       // 3. Create enough legitimate usage to be ABOVE the LOWER target cap.
       //    Downgrade target is 'free' (agents=2). We need usage > 2.
       //    Create a second pending invitation (usage=3, allowed on max=20).
-      const target2 = `d6b-${uniqueSuffix()}@test`
+      const target2 = `d6b-${uniqueSuffix()}@iws.test`
       await createInvitation(a.page, target2, 'agent')
       const usageOnMax = await getUsage(a.page)
       expect(usageOnMax.current, 'usage on max should be 3 (owner+2 pending)').toBe(3)
@@ -990,10 +990,10 @@ test.describe('D. Expired-seat counting (BLOCKER 3)', () => {
       // SEPARATELY prove: usage === limit with pending→active conversion IS allowed.
       // On a fresh 'free' tenant: owner=1, cap=2. Create 1 pending (usage=2=cap).
       // Accept it → pending converts to active, usage stays 2 (not a second increment).
-      const a2 = await setupTenant(browser, `ta-d6b-${uniqueSuffix()}@test`, `TA D6b`)
+      const a2 = await setupTenant(browser, `ta-d6b-${uniqueSuffix()}@iws.test`, `TA D6b`)
       try {
         const before2 = await getUsage(a2.page)
-        const target3 = `d6c-${uniqueSuffix()}@test`
+        const target3 = `d6c-${uniqueSuffix()}@iws.test`
         const inv3 = await createInvitation(a2.page, target3, 'agent')
         const atCap = await getUsage(a2.page)
         expect(atCap.current, 'usage at cap after one pending invite').toBe(before2.current + 1)
@@ -1024,14 +1024,14 @@ test.describe('E. Legacy reissue lifecycle (BLOCKER 4 — fixed lifecycle)', () 
   test.beforeAll(async ({ browser: b }) => { browser = b })
 
   async function freshTenant(tag: string): Promise<TenantCtx> {
-    return setupTenant(browser, `ta-${tag}-${uniqueSuffix()}@test`, `TA ${tag}`)
+    return setupTenant(browser, `ta-${tag}-${uniqueSuffix()}@iws.test`, `TA ${tag}`)
   }
 
   test('E1-E4. reissue produces ONE fresh link; old token dead; superseded not reissuable', async () => {
     const a = await freshTenant('e1')
     try {
       // Create + revoke an invitation (simulates a legacy/unusable invitation).
-      const target = `e1-${uniqueSuffix()}@test`
+      const target = `e1-${uniqueSuffix()}@iws.test`
       const inv = await createInvitation(a.page, target, 'manager')
       const listRes = await a.page.request.get(`${BASE}/api/invitations`)
       const listBody = (await listRes.json()) as { invitations?: Array<{ id: string; email: string }> }
@@ -1066,7 +1066,7 @@ test.describe('E. Legacy reissue lifecycle (BLOCKER 4 — fixed lifecycle)', () 
     const a = await freshTenant('e5')
     try {
       // Create a pending invitation (usable).
-      const target = `e5-${uniqueSuffix()}@test`
+      const target = `e5-${uniqueSuffix()}@iws.test`
       const inv = await createInvitation(a.page, target, 'agent')
       const listRes = await a.page.request.get(`${BASE}/api/invitations`)
       const listBody = (await listRes.json()) as { invitations?: Array<{ id: string; email: string }> }
@@ -1121,8 +1121,8 @@ test.describe('F. Revoked-current-workspace recovery', () => {
 
   test.beforeAll(async ({ browser }) => {
     const suffix = uniqueSuffix()
-    tenantA = await setupTenant(browser, `ta-rcvr-${suffix}@test`, `TA Rcvr ${suffix}`)
-    tenantB = await setupTenant(browser, `tb-rcvr-${suffix}@test`, `TB Rcvr ${suffix}`)
+    tenantA = await setupTenant(browser, `ta-rcvr-${suffix}@iws.test`, `TA Rcvr ${suffix}`)
+    tenantB = await setupTenant(browser, `tb-rcvr-${suffix}@iws.test`, `TB Rcvr ${suffix}`)
     aConversationId = (await createVisitorConversation(tenantA.slug, 'A conv for revoke test')).conversationId
     bConversationId = (await createVisitorConversation(tenantB.slug, 'B conv for revoke test')).conversationId
     // B accepts an invitation to A (B now has active memberships in both A and B).
