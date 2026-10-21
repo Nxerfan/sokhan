@@ -1,5 +1,5 @@
 import { NextResponse, NextRequest } from 'next/server'
-import { globalDb, withTenant, db } from '@/lib/db'
+import { globalDb } from '@/lib/db'
 import { getPlan } from '@/lib/payments/plans'
 import type { PlanSlug } from '@/lib/payments/plans'
 
@@ -70,16 +70,15 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'not_found' }, { status: 404 })
   }
 
-  // Set the plan directly on the Tenant row. The accept route's
+  // Set the plan directly on the Tenant row via globalDb (Tenant is a
+  // GLOBAL model — no tenant context needed). The accept route's
   // resolveTenantPlanSlug checks for an active Subscription first (none
   // here), then falls back to tenant.plan — so this is the value the
   // plan-limit re-check will read.
-  await withTenant(tenant.id, () =>
-    db.tenant.update({
-      where: { id: tenant.id },
-      data: { plan, updatedAt: new Date() },
-    }),
-  )
+  await globalDb.tenant.update({
+    where: { id: tenant.id },
+    data: { plan, updatedAt: new Date() },
+  })
 
   return NextResponse.json({ ok: true, plan, tenantId: tenant.id })
 }

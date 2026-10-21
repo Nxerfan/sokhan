@@ -86,58 +86,66 @@ async function setupTenant(
   }
   const tenantId = signupRes.tenantId
 
-  const csrfRes = await page.request.get(`${BASE}/api/auth/csrf`)
-  const csrfData = (await csrfRes.json()) as { csrfToken: string }
-  const signinRes = await page.request.post(
-    `${BASE}/api/auth/callback/credentials`,
-    {
-      form: { email, password: PASSWORD, csrfToken: csrfData.csrfToken, json: 'true' },
-      maxRedirects: 0,
-    },
-  )
-  // NextAuth returns 200 or 302 on success; 401 on bad credentials.
-  if (signinRes.status() >= 400) {
-    throw new Error(`Sign-in callback failed for ${email}: HTTP ${signinRes.status()}`)
-  }
-
-  // Bounded session-establishment poll (propagation barrier). Verifies
-  // BOTH that /api/auth/session has an authenticated user AND that
-  // /api/tenants/me returns the expected tenantId (workspace match).
-  const deadline = Date.now() + 15000
+  // Sign-in + bounded session-establishment poll, with ONE retry.
+  // The retry re-issues the credentials callback (fresh CSRF) if the
+  // first attempt's session cookie did not propagate within the poll
+  // window. This is NOT an arbitrary sleep — it is a re-attempt with a
+  // fresh callback, matching the resilience pattern of the existing
+  // tenant-security.spec.ts helper but with a single bounded retry for
+  // the high-contention Docker CI environment (20+ fresh tenants).
+  let meData: { tenant?: { id: string; slug: string } } = {}
   let sessionOk = false
+  let lastCallbackStatus = 0
   let lastSessionStatus = 0
   let lastMeStatus = 0
-  let meData: { tenant?: { id: string; slug: string } } = {}
 
-  while (Date.now() < deadline) {
-    const sessionRes = await page.request.get(`${BASE}/api/auth/session`)
-    lastSessionStatus = sessionRes.status()
-    if (sessionRes.ok()) {
-      const sb = await sessionRes.json().catch(() => ({}))
-      if (sb && sb.user) {
-        const meRes = await page.request.get(`${BASE}/api/tenants/me`)
-        lastMeStatus = meRes.status()
-        if (meRes.ok()) {
-          meData = (await meRes.json()) as { tenant?: { id: string; slug: string } }
-          if (meData.tenant && meData.tenant.id === tenantId) {
-            sessionOk = true
-            break
+  for (let attempt = 0; attempt < 2 && !sessionOk; attempt++) {
+    const csrfRes = await page.request.get(`${BASE}/api/auth/csrf`)
+    const csrfData = (await csrfRes.json()) as { csrfToken: string }
+    const signinRes = await page.request.post(
+      `${BASE}/api/auth/callback/credentials`,
+      {
+        form: { email, password: PASSWORD, csrfToken: csrfData.csrfToken, json: 'true' },
+        maxRedirects: 0,
+      },
+    )
+    lastCallbackStatus = signinRes.status()
+    if (signinRes.status() >= 400) {
+      // Bad credentials — retry once, then fail.
+      if (attempt === 0) continue
+      throw new Error(`Sign-in callback failed for ${email}: HTTP ${signinRes.status()}`)
+    }
+    // Bounded poll (15s, 250ms intervals) — propagation barrier.
+    const deadline = Date.now() + 15000
+    while (Date.now() < deadline) {
+      const sessionRes = await page.request.get(`${BASE}/api/auth/session`)
+      lastSessionStatus = sessionRes.status()
+      if (sessionRes.ok()) {
+        const sb = await sessionRes.json().catch(() => ({}))
+        if (sb && sb.user) {
+          const meRes = await page.request.get(`${BASE}/api/tenants/me`)
+          lastMeStatus = meRes.status()
+          if (meRes.ok()) {
+            meData = (await meRes.json()) as { tenant?: { id: string; slug: string } }
+            if (meData.tenant && meData.tenant.id === tenantId) {
+              sessionOk = true
+              break
+            }
           }
         }
       }
+      await page.waitForTimeout(250)
     }
-    await page.waitForTimeout(250)
   }
 
   if (!sessionOk) {
-    // SAFE diagnostics — no cookie values, no tokens, no secrets.
     const hasSessionCookie = (await ctx.cookies()).some(
       (c) => c.name.includes('session') || c.name.includes('auth'),
     )
     throw new Error(
-      `Auth session not established for ${email} after 15s bounded poll. ` +
+      `Auth session not established for ${email} after 2 attempts (15s poll each). ` +
         `signup_tenant_id=${tenantId} ` +
-        `callback_status=${signinRes.status()} ` +
+        `last_callback_status=${lastCallbackStatus} ` +
         `session_cookie_present=${hasSessionCookie} ` +
         `last_session_status=${lastSessionStatus} ` +
         `last_tenants_me_status=${lastMeStatus}`,
@@ -173,52 +181,44 @@ async function signInExisting(
   const page = await ctx.newPage()
   await page.goto(BASE, { waitUntil: 'domcontentloaded' }).catch(() => {})
 
-  const csrfRes = await page.request.get(`${BASE}/api/auth/csrf`)
-  const { csrfToken } = (await csrfRes.json()) as { csrfToken: string }
-  const signinRes = await page.request.post(
-    `${BASE}/api/auth/callback/credentials`,
-    {
-      form: { email, password: PASSWORD, csrfToken, json: 'true' },
-      maxRedirects: 0,
-    },
-  )
-  if (signinRes.status() >= 400) {
-    throw new Error(`Sign-in failed for existing ${email}: HTTP ${signinRes.status()}`)
-  }
-
-  const deadline = Date.now() + 15000
+  // Sign-in + bounded poll, with ONE retry (same pattern as setupTenant).
+  let lastCallbackStatus = 0
   let lastSessionStatus = 0
-  while (Date.now() < deadline) {
-    const s = await page.request.get(`${BASE}/api/auth/session`)
-    lastSessionStatus = s.status()
-    if (s.ok()) {
-      const b = await s.json().catch(() => ({}))
-      if (b && b.user) {
-        if (expectedTenantId) {
-          if (b.user.workspaceId === expectedTenantId) break
-        } else {
-          break
+  let established = false
+  for (let attempt = 0; attempt < 2 && !established; attempt++) {
+    const csrfRes = await page.request.get(`${BASE}/api/auth/csrf`)
+    const { csrfToken } = (await csrfRes.json()) as { csrfToken: string }
+    const signinRes = await page.request.post(
+      `${BASE}/api/auth/callback/credentials`,
+      {
+        form: { email, password: PASSWORD, csrfToken, json: 'true' },
+        maxRedirects: 0,
+      },
+    )
+    lastCallbackStatus = signinRes.status()
+    if (signinRes.status() >= 400) {
+      if (attempt === 0) continue
+      throw new Error(`Sign-in failed for existing ${email}: HTTP ${signinRes.status()}`)
+    }
+    const deadline = Date.now() + 15000
+    while (Date.now() < deadline) {
+      const s = await page.request.get(`${BASE}/api/auth/session`)
+      lastSessionStatus = s.status()
+      if (s.ok()) {
+        const b = await s.json().catch(() => ({}))
+        if (b && b.user) {
+          if (!expectedTenantId || b.user.workspaceId === expectedTenantId) {
+            established = true
+            break
+          }
         }
       }
+      await page.waitForTimeout(250)
     }
-    await page.waitForTimeout(250)
   }
-  // Final verification — if the session isn't established, throw with
-  // safe diagnostics (the poll above broke on success; if we reach here
-  // without breaking, do one more check).
-  const finalS = await page.request.get(`${BASE}/api/auth/session`)
-  if (!finalS.ok()) {
+  if (!established) {
     throw new Error(
-      `signInExisting: session not established for ${email} after 15s poll (last_status=${lastSessionStatus})`,
-    )
-  }
-  const finalBody = await finalS.json().catch(() => ({}))
-  if (!finalBody?.user) {
-    throw new Error(`signInExisting: no authenticated user for ${email} after poll`)
-  }
-  if (expectedTenantId && finalBody.user.workspaceId !== expectedTenantId) {
-    throw new Error(
-      `signInExisting: workspace mismatch for ${email}: expected=${expectedTenantId} got=${finalBody.user.workspaceId}`,
+      `signInExisting: session not established for ${email} after 2 attempts (last_callback=${lastCallbackStatus} last_session=${lastSessionStatus})`,
     )
   }
   return page
