@@ -49,7 +49,8 @@ import { verifyInvitationToken } from '@/lib/invitations'
 export async function POST(req: NextRequest) {
   // Hard gate — NEVER available in production or without the CI mock flag.
   if (
-      process.env.NIXIFY_MOCK !== 'true'
+      process.env.NIXIFY_MOCK !== 'true' ||
+    process.env.SUKHAN_TEST_HARNESS !== 'true'
   ) {
     return NextResponse.json({ error: 'not_found' }, { status: 404 })
   }

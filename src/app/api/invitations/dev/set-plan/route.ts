@@ -1,84 +1,95 @@
 import { NextResponse, NextRequest } from 'next/server'
-import { globalDb } from '@/lib/db'
+import { withSessionTenant, hasRole, getCurrentTenantId } from '@/lib/auth'
+import { db } from '@/lib/db'
 import { getPlan } from '@/lib/payments/plans'
 import type { PlanSlug } from '@/lib/payments/plans'
 
 /**
  * DEV-ONLY tenant plan change — CI test barrier (D6, BLOCKER 3).
  *
- *   POST  /api/invitations/dev/set-plan   body: { workspace, plan }
+ *   POST  /api/invitations/dev/set-plan   body: { plan }
  *
- * Deterministically changes the tenant's effective plan for the behavioral
- * plan-downgrade test (D6). The accept route's transactional plan-limit
- * re-check reads the plan via `resolveTenantPlanSlug`, which checks for an
- * active Subscription first, then falls back to `tenant.plan`. This endpoint
- * sets `tenant.plan` directly (no Subscription is created), so the fallback
- * path is exercised.
+ * Deterministically changes the CURRENT tenant's effective plan for the
+ * behavioral plan-downgrade test (D6). Mutates ONLY the current tenant
+ * (from the authenticated session), NOT an arbitrary public slug.
  *
- * GATING — this route is ONLY available when:
- *   - process.env.NIXIFY_MOCK === 'true'
+ * GATING — this route is ONLY available when BOTH:
+ *   - process.env.NIXIFY_MOCK === 'true'   (OTP-provider mock flag)
+ *   - process.env.SUKHAN_TEST_HARNESS === 'true'  (dedicated test-harness flag)
  *
- * NIXIFY_MOCK is the definitive CI/dev flag — never set in Vercel prod.
- * Docker CI runs production-MODE builds but sets NIXIFY_MOCK=true.
+ * `NIXIFY_MOCK` is the OTP mock flag — it must NOT double as the sole
+ * authorization for arbitrary tenant-plan mutation (BLOCKER 3). The
+ * dedicated `SUKHAN_TEST_HARNESS` flag is set ONLY in Docker test
+ * overrides (docker-compose.test.yml, docker-compose.lite.test.yml) +
+ * the GitHub Actions docker-regression job env. Production compose +
+ * Vercel leave it UNSET. This route therefore returns 404 in any
+ * production deployment (Vercel preview included), and in any Docker
+ * stack that is NOT using the test override compose.
  *
- * `NIXIFY_MOCK=true` is the CI/dev mock-OTP flag — it is NEVER set in
- * production (production requires a real Nixify API key). This route
- * therefore returns 404 in any production deployment, Vercel preview
- * included (Vercel sets NODE_ENV=production). The 404 is identical to
- * the "not found" error so the route's existence is not leakable.
+ * AUTHORIZATION
+ *   - Requires an authenticated session (withSessionTenant — 401 if none).
+ *   - Actor must be owner or admin of the CURRENT tenant
+ *     (hasRole(session.user.role, 'admin') — owner rank 5, admin rank 4).
+ *   - Mutates ONLY the current tenant (getCurrentTenantId()) — there is
+ *     NO workspace-slug parameter. A user cannot mutate a foreign tenant
+ *     through this route. A test helper that needs to change a specific
+ *     tenant's plan must authenticate as that tenant's owner/admin first.
  *
- * SECURITY
- * --------
- *   - The `workspace` is the public tenant slug — resolves to a tenantId
- *     via a GLOBAL Tenant.findUnique (Tenant is not tenant-scoped).
- *   - The `plan` must be a valid PlanSlug ('free' | 'pro' | 'max' |
- *     'self-hosted'). Invalid slugs are rejected.
- *   - No authentication required — this is a CI barrier that mutates the
- *     plan directly. It is gated by the env flags above, NOT by a session.
- *     (In CI, the test orchestrator sets NIXIFY_MOCK=true; in production,
- *     the route does not exist.)
- *   - Only mutates `tenant.plan` + `tenant.updatedAt`. No other field.
+ * The 404 (for missing flags) is identical to the "not found" error so
+ * the route's existence is not leakable. No secret values in source.
  */
 export async function POST(req: NextRequest) {
-  // Hard gate — NEVER available in production or without the CI mock flag.
+  // Hard gate — BOTH flags required. NEVER available in production or
+  // without the dedicated test-harness flag.
   if (
-      process.env.NIXIFY_MOCK !== 'true'
+    process.env.NIXIFY_MOCK !== 'true' ||
+    process.env.SUKHAN_TEST_HARNESS !== 'true'
   ) {
     return NextResponse.json({ error: 'not_found' }, { status: 404 })
   }
 
-  const body = await req.json().catch(() => null)
-  const slug = String(body?.workspace ?? '').trim()
-  const plan = String(body?.plan ?? '').trim() as PlanSlug
+  // Require an authenticated owner/admin session. Mutates ONLY the
+  // current tenant.
+  const result = await withSessionTenant(async ({ session }) => {
+    if (!hasRole(session.user.role, 'admin')) {
+      return { forbidden: true as const }
+    }
 
-  if (!slug || !plan) {
-    return NextResponse.json({ error: 'not_found' }, { status: 404 })
-  }
+    const body = await req.json().catch(() => null)
+    const plan = String(body?.plan ?? '').trim() as PlanSlug
+    if (!plan) {
+      return { error: 'missing_plan' as const }
+    }
 
-  // Validate the plan slug against the catalog.
-  const planObj = getPlan(plan)
-  if (!planObj) {
-    return NextResponse.json({ error: 'not_found' }, { status: 404 })
-  }
+    // Validate the plan slug against the catalog.
+    const planObj = getPlan(plan)
+    if (!planObj) {
+      return { error: 'invalid_plan' as const }
+    }
 
-  // Resolve slug → tenantId (Tenant is a global model).
-  const tenant = await globalDb.tenant.findUnique({
-    where: { slug },
-    select: { id: true, plan: true },
+    const tid = getCurrentTenantId()!
+
+    // Set the plan directly on the CURRENT tenant row. db.tenant routes
+    // through the per-tenant extended client (Tenant is global → no
+    // tenant-scoped handler → passthrough to base client). The where
+    // clause uses the current tenantId only — no foreign-tenant mutation
+    // is possible.
+    await db.tenant.update({
+      where: { id: tid },
+      data: { plan, updatedAt: new Date() },
+    })
+
+    return { ok: true as const, plan, tenantId: tid } as const
   })
-  if (!tenant) {
-    return NextResponse.json({ error: 'not_found' }, { status: 404 })
+
+  if (!result) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
+  if ('forbidden' in result.result) {
+    return NextResponse.json({ error: 'forbidden' }, { status: 403 })
   }
-
-  // Set the plan directly on the Tenant row via globalDb (Tenant is a
-  // GLOBAL model — no tenant context needed). The accept route's
-  // resolveTenantPlanSlug checks for an active Subscription first (none
-  // here), then falls back to tenant.plan — so this is the value the
-  // plan-limit re-check will read.
-  await globalDb.tenant.update({
-    where: { id: tenant.id },
-    data: { plan, updatedAt: new Date() },
-  })
-
-  return NextResponse.json({ ok: true, plan, tenantId: tenant.id })
+  if ('error' in result.result) {
+    const err = result.result.error
+    const status = err === 'missing_plan' || err === 'invalid_plan' ? 400 : 400
+    return NextResponse.json({ error: err }, { status })
+  }
+  return NextResponse.json({ ok: true, plan: result.result.plan, tenantId: result.result.tenantId })
 }

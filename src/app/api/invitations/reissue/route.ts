@@ -6,46 +6,43 @@ import {
   generateInvitationToken,
   invitationExpiryFromNow,
 } from '@/lib/invitations'
+import { PlanLimitExceededError } from '@/lib/payments/gating'
+import { getPlan } from '@/lib/payments/plans'
 
 /**
- * Invitation REISSUE (PR #11, BLOCKER 4 — fixed lifecycle).
+ * Invitation REISSUE (PR #11, BLOCKER 4 + BLOCKER 1 atomic single-winner).
  *
  *   POST  /api/invitations/reissue?id=<invitationId>
  *
  * Reissues an existing REVOKED invitation, producing a FRESH cryptographic
  * token + hash + expiry for the SAME email + role + tenant. The old
- * invitation row is marked `superseded` (a distinct non-usable state) so it
- * can never be reissued again. The new invitation is `pending` with a
- * freshly-generated raw token returned EXACTLY ONCE in the response.
+ * invitation row is marked `superseded`. The new invitation is `pending`.
  *
- * LIFECYCLE INVARIANT — exactly one valid link per reissue chain (#4 fix)
- * --------------------------------------------------------------------
+ * LIFECYCLE INVARIANT — exactly one valid link per reissue chain (#4)
  *   - ONLY `revoked` invitations may be reissued.
- *   - `superseded` rows CANNOT be reissued (they are the spent husk of a
- *     previous reissue). Reissuing a superseded row would create a SECOND
- *     valid pending link for the same logical invitee, violating the
- *     one-active-link invariant.
- *   - `pending` invitations are already usable — reissuing would duplicate.
- *   - `accepted` invitations already produced a membership — reissuing
- *     would create a duplicate membership path.
+ *   - `superseded` rows CANNOT be reissued (rejected with
+ *     `superseded_not_reissuable`).
+ *   - To reissue a CURRENTLY-PENDING invitation: revoke it first, then
+ *     reissue the revoked row.
  *
- * To reissue a CURRENTLY-PENDING invitation (e.g. the link was lost):
- *   1. REVOKE the pending invitation (DELETE /api/invitations?id=...).
- *   2. Reissue that newly-revoked row via this endpoint.
- * This guarantees exactly one valid pending link exists at any time.
+ * ATOMIC SINGLE-WINNER (BLOCKER 1)
+ *   The conditional `revoked → superseded` claim + the new pending
+ *   creation are in the SAME transaction. The claim uses
+ *   `updateMany WHERE status='revoked'`; the winner gets `count=1` and
+ *   proceeds to create the new pending invitation. A concurrent reissue
+ *   of the SAME row gets `count=0` (the row is already `superseded`) →
+ *   returns a deterministic `already_reissued` response WITHOUT creating
+ *   anything. This guarantees exactly one new pending link per reissue
+ *   chain, even under concurrency.
+ *
+ *   The plan-capacity check is ALSO inside the transaction (transactional),
+ *   so two concurrent reissues for DIFFERENT revoked invitations cannot
+ *   both pass a pre-transaction capacity check and overbook seats.
  *
  * SEAT COUNT
- * ----------
- * Before reissue: the old invitation is `revoked` → 0 seats.
- * After reissue: the old is `superseded` (0 seats) + the new is `pending`
- * (1 seat). Net: +1 seat. The plan-limit gate applies.
- *
- * SECURITY
- * --------
- *   - Fresh raw token generated server-side, returned EXACTLY ONCE, never
- *     persisted/logged. Only the SHA-256 hash is stored.
- *   - Actor must be manager+ who outranks the target role.
- *   - Target must belong to the current tenant (fail-closed).
+ *   Before: old is `revoked` → 0 seats. After: old is `superseded` (0) +
+ *   new is `pending` (1). Net: +1 seat. The transactional plan-capacity
+ *   re-check guards against overbooking.
  */
 export async function POST(req: NextRequest) {
   const result = await withSessionTenant(async ({ session }) => {
@@ -64,7 +61,6 @@ export async function POST(req: NextRequest) {
     })
     if (!target) return { error: 'not_found' as const }
 
-    // ONLY revoked invitations may be reissued (#4 fix).
     if (target.status === 'pending') {
       return { error: 'already_pending' as const }
     }
@@ -72,8 +68,6 @@ export async function POST(req: NextRequest) {
       return { error: 'already_accepted' as const }
     }
     if (target.status === 'superseded') {
-      // A superseded row is the spent husk of a previous reissue — it
-      // CANNOT be reissued again (would create a second valid link).
       return { error: 'superseded_not_reissuable' as const }
     }
     if (target.status !== 'revoked') {
@@ -84,32 +78,70 @@ export async function POST(req: NextRequest) {
       return { forbidden: true as const }
     }
 
-    const { enforceCurrentTenantPlanLimit, PlanLimitExceededError } = await import(
-      '@/lib/payments/gating'
-    )
-    try {
-      await enforceCurrentTenantPlanLimit('agents')
-    } catch (e: any) {
-      if (e instanceof PlanLimitExceededError) {
-        return { planLimit: e.result } as const
-      }
-      throw e
-    }
-
     const { rawToken, tokenHash } = generateInvitationToken()
     const expiresAt = invitationExpiryFromNow()
 
-    const newId = await db.$transaction(async (tx) => {
-      // (a) Mark the OLD revoked invitation `superseded` — it can never be
-      // reissued again (#4 invariant). The WHERE status='revoked' guard
-      // makes this conditional (a concurrent reissue of the same row
-      // would affect 0 rows → the new pending is still created, but the
-      // old stays revoked rather than superseded — acceptable).
-      await tx.invitation.updateMany({
+    // Single transaction: conditional claim + transactional plan-capacity
+    // re-check + new pending creation. The conditional claim's count
+    // determines the winner (BLOCKER 1).
+    const txResult = await db.$transaction(async (tx) => {
+      // (a) Conditional claim: revoked → superseded. Only the winner
+      // gets count=1. A concurrent reissue of the SAME row gets count=0
+      // (the row is already superseded) → returns 'raced' without
+      // creating anything.
+      const claimed = await tx.invitation.updateMany({
         where: { id: target.id, status: 'revoked' },
         data: { status: 'superseded', updatedAt: new Date() },
       })
+      if (claimed.count === 0) {
+        // Loser — another concurrent reissue already claimed this row.
+        // Do NOT create anything. Return a deterministic race response.
+        return { raced: true as const, newId: null as string | null }
+      }
 
+      // (b) TRANSACTIONAL plan-capacity re-check (BLOCKER 1). Two
+      // concurrent reissues for DIFFERENT revoked invitations could
+      // both pass a pre-transaction check. This in-tx count is
+      // consistent with the new pending create below — if the cap
+      // would be exceeded, the transaction rolls back (no new pending,
+      // the old row stays superseded — the claim is not "undone" but
+      // no overbooking occurs).
+      const now = new Date()
+      const [activeCount, pendingCount] = await Promise.all([
+        tx.membership.count({ where: { status: 'active' } }),
+        tx.invitation.count({
+          where: { status: 'pending', expiresAt: { gt: now } },
+        }),
+      ])
+      const usage = activeCount + pendingCount
+      const sub = await tx.subscription.findFirst({
+        where: { status: 'active' },
+        include: { plan: { select: { slug: true } } },
+        orderBy: { createdAt: 'desc' },
+      })
+      let planSlug = sub?.plan?.slug
+      if (!planSlug) {
+        const t = await tx.tenant.findUnique({
+          where: { id: tid },
+          select: { plan: true },
+        })
+        planSlug = t?.plan ?? 'free'
+      }
+      const plan = getPlan(planSlug) ?? getPlan('free')!
+      const limitValue = plan.limits.agents
+      if (limitValue !== -1 && usage >= limitValue) {
+        // The new pending invitation would exceed the cap. Throw to
+        // roll back the transaction (the claim is undone — the row
+        // reverts to 'revoked', no new pending is created).
+        throw new PlanLimitExceededError('agents', {
+          allowed: false,
+          current: usage,
+          limit: limitValue,
+          planSlug,
+        })
+      }
+
+      // (c) Winner — create the new pending invitation.
       const created = await tx.invitation.create({
         data: {
           tenantId: tid,
@@ -122,8 +154,14 @@ export async function POST(req: NextRequest) {
         },
         select: { id: true },
       })
-      return created.id
+      return { raced: false as const, newId: created.id as string | null }
     })
+
+    if (txResult.raced) {
+      return { raced: true as const } as const
+    }
+
+    const newId = txResult.newId!
 
     const origin = req.headers.get('x-forwarded-host')
       ? `${req.headers.get('x-forwarded-proto') || 'https'}://${req.headers.get('x-forwarded-host')}`
@@ -153,17 +191,12 @@ export async function POST(req: NextRequest) {
   if ('forbidden' in result.result) {
     return NextResponse.json({ error: 'forbidden' }, { status: 403 })
   }
-  if ('planLimit' in result.result) {
-    const r = result.result as { planLimit: { current: number; limit: number; planSlug: string } }
+  if ('raced' in result.result) {
+    // Deterministic race response — a concurrent reissue already claimed
+    // the row. NOT an error per se, but the caller did not win.
     return NextResponse.json(
-      {
-        error: 'plan_limit_exceeded',
-        limit: 'agents',
-        current: r.planLimit.current,
-        max: r.planLimit.limit,
-        plan: r.planLimit.planSlug,
-      },
-      { status: 402 },
+      { error: 'already_reissued', message: 'Concurrent reissue raced — no new link created' },
+      { status: 409 },
     )
   }
   if ('error' in result.result) {

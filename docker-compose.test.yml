@@ -2,8 +2,8 @@
 # Usage:
 #   docker compose -f docker-compose.yml -f docker-compose.test.yml up -d --build
 #
-# This override ONLY adds port mappings. It does NOT change services,
-# volumes, env vars, or health checks. Production deployments do NOT
+# This override ONLY adds port mappings + test-only env flags. It does NOT
+# change services, volumes, or health checks. Production deployments do NOT
 # use this file.
 services:
   app:
@@ -14,6 +14,11 @@ services:
       # 3-step OTP signup flow without a real Nixify API key.
       # Production docker-compose.yml must NOT set this.
       NIXIFY_MOCK: "true"
+      # Test-only: dedicated test-harness flag for dev-only test routes
+      # (e.g. /api/invitations/dev/set-plan, /dev/expire). This flag is
+      # the sole gate that distinguishes CI test stacks from production.
+      # Production compose + Vercel must NOT set this. See BLOCKER 3.
+      SUKHAN_TEST_HARNESS: "true"
 
   caddy:
     ports:

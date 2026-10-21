@@ -412,14 +412,17 @@ async function devExpireInvitation(workspace: string, token: string): Promise<vo
 
 /** DEV-ONLY: change the tenant's plan (D6 real downgrade test). Gated
  *  behind NODE_ENV !== 'production' && NIXIFY_MOCK === 'true'. */
-async function devSetPlan(workspace: string, plan: string): Promise<void> {
-  const res = await fetch(`${BASE}/api/invitations/dev/set-plan`, {
-    method: 'POST',
+/** DEV-ONLY: change the CURRENT tenant's plan (D6 real downgrade test).
+ *  Requires an authenticated owner/admin session (BLOCKER 3: the route
+ *  uses withSessionTenant + mutates ONLY the current tenant — no slug).
+ *  Gated behind NIXIFY_MOCK + SUKHAN_TEST_HARNESS (Docker CI only). */
+async function devSetPlan(page: Page, plan: string): Promise<void> {
+  const res = await page.request.post(`${BASE}/api/invitations/dev/set-plan`, {
+    data: { plan },
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ workspace, plan }),
   })
-  if (!res.ok) {
-    throw new Error(`dev/set-plan(${plan}) failed: ${res.status}`)
+  if (!res.ok()) {
+    throw new Error(`dev/set-plan(${plan}) failed: ${res.status()}`)
   }
 }
 
@@ -946,7 +949,7 @@ test.describe('D. Expired-seat counting (BLOCKER 3)', () => {
     const a = await freshTenant('d6')
     try {
       // 1. Start on 'max' (agents=20) — gives plenty of capacity.
-      await devSetPlan(a.slug, 'max')
+      await devSetPlan(a.page, 'max')
       // 2. Create valid pending invitation (usage: owner=1 + pending=1 = 2).
       const target = `d6-${uniqueSuffix()}@iws.test`
       const inv = await createInvitation(a.page, target, 'agent')
@@ -958,7 +961,7 @@ test.describe('D. Expired-seat counting (BLOCKER 3)', () => {
       const usageOnMax = await getUsage(a.page)
       expect(usageOnMax.current, 'usage on max should be 3 (owner+2 pending)').toBe(3)
       // 4. DOWNGRADE to 'free' (agents=2). Now usage(3) > cap(2).
-      await devSetPlan(a.slug, 'free')
+      await devSetPlan(a.page, 'free')
       // 5. Attempt invitation acceptance — must fail with plan_limit_exceeded
       //    (the transactional re-check sees usage > cap).
       const { requestId } = await otpVerifyEmail(target)
@@ -1007,7 +1010,7 @@ test.describe('D. Expired-seat counting (BLOCKER 3)', () => {
       } finally { await a2.page.context().close().catch(() => {}) }
     } finally {
       // Restore the downgraded tenant's plan so it doesn't interfere.
-      await devSetPlan(a.slug, 'max').catch(() => {})
+      await devSetPlan(a.page, 'max').catch(() => {})
       await a.page.context().close().catch(() => {})
     }
   })
@@ -1104,6 +1107,51 @@ test.describe('E. Legacy reissue lifecycle (BLOCKER 4 — fixed lifecycle)', () 
       expect(pendingForEmail.length, 'exactly ONE valid pending invitation for the email').toBe(1)
     } finally { await a.page.context().close().catch(() => {}) }
   })
+
+  test('E8. concurrent reissue of SAME revoked invitation — single winner (BLOCKER 1)', async () => {
+    // Fire TWO reissue requests concurrently against the SAME revoked
+    // invitation id. Exactly one wins (count=1 → creates new pending);
+    // the loser gets count=0 → deterministic 'already_reissued' (409).
+    // Only ONE pending invitation exists after; only ONE token is valid.
+    const a = await freshTenant('e8')
+    try {
+      const target = `e8-${uniqueSuffix()}@iws.test`
+      const inv = await createInvitation(a.page, target, 'agent')
+      const listRes = await a.page.request.get(`${BASE}/api/invitations`)
+      const listBody = (await listRes.json()) as { invitations?: Array<{ id: string; email: string }> }
+      const row = listBody.invitations?.find((i) => i.email === target)
+      expect(row, 'pending invitation in list').toBeTruthy()
+      await revokeInvitation(a.page, row!.id)
+
+      // Fire TWO concurrent reissues of the SAME revoked row.
+      const [r1, r2] = await Promise.all([
+        reissueInvitation(a.page, row!.id),
+        reissueInvitation(a.page, row!.id),
+      ])
+      const statuses = [r1.status, r2.status].sort()
+      // Exactly one 200 (winner); the other 409 (already_reissued loser).
+      expect(statuses, `concurrent reissue: one 200 + one 409, got ${statuses.join(',')}`).toEqual([200, 409])
+
+      // Identify winner + loser.
+      const winner = r1.status === 200 ? r1 : r2
+      const loser = r1.status === 200 ? r2 : r1
+      expect(loser.body.error, 'loser error must be already_reissued').toBe('already_reissued')
+
+      // Only ONE pending invitation exists for this email.
+      const list2Res = await a.page.request.get(`${BASE}/api/invitations`)
+      const list2Body = (await list2Res.json()) as { invitations?: Array<{ email: string; status: string }> }
+      const pending = list2Body.invitations?.filter((i) => i.email === target && i.status === 'pending') ?? []
+      expect(pending.length, 'exactly ONE pending invitation after concurrent reissue').toBe(1)
+
+      // The winner's token is publicly valid; the old token is invalid.
+      expect((await lookupInvitation(winner.workspace!, winner.token!)).status, 'winner token valid').toBe(200)
+      expect((await lookupInvitation(inv.workspace, inv.token)).status, 'old token invalid').toBe(404)
+
+      // The loser did NOT create a token (no inviteUrl in the 409 body).
+      expect(loser.inviteUrl, 'loser must not have an inviteUrl').toBeUndefined()
+      expect(loser.token, 'loser must not have a token').toBeUndefined()
+    } finally { await a.page.context().close().catch(() => {}) }
+  })
 })
 
 // ----------------------------------------------------------------------------
@@ -1176,5 +1224,151 @@ test.describe('F. Revoked-current-workspace recovery', () => {
     const sessionRes = await tenantB.page.request.get(`${BASE}/api/auth/session`)
     const session = (await sessionRes.json()) as { user?: { workspaceId?: string } }
     expect(session.user?.workspaceId).toBe(tenantB.tenantId)
+  })
+})
+
+
+// ----------------------------------------------------------------------------
+// G. REVOKED MEMBERSHIP REINVITATION REACTIVATION (BLOCKER 2)
+// ----------------------------------------------------------------------------
+
+test.describe('G. Revoked membership reinvitation reactivation (BLOCKER 2)', () => {
+  let browser: import('@playwright/test').Browser
+  test.beforeAll(async ({ browser: b }) => { browser = b })
+
+  async function freshPair(suffix: string): Promise<{ a: TenantCtx; b: TenantCtx }> {
+    const a = await setupTenant(browser, `ta-react-${suffix}@iws.test`, `TA ${suffix}`)
+    const b = await setupTenant(browser, `tb-react-${suffix}@iws.test`, `TB ${suffix}`)
+    return { a, b }
+  }
+
+  test('G1-G10. revoke B → reinvite → reactivate; same row active, not duplicated', async () => {
+    const { a, b } = await freshPair(`g1-${uniqueSuffix()}`)
+    try {
+      // 1. B is an active member of A (accept an invitation).
+      const inv1 = await createInvitation(a.page, b.email, 'agent')
+      const acc1 = await acceptInvitation(b.page, inv1.workspace, inv1.token)
+      expect(acc1.status, 'B should accept A first invite').toBe(200)
+
+      // 2. A revokes B's membership in A.
+      const membersRes = await a.page.request.get(`${BASE}/api/members`)
+      const membersBody = (await membersRes.json()) as { members?: Array<{ id: string; user: { email: string } }> }
+      const bMember = membersBody.members?.find((m) => m.user.email === b.email)
+      expect(bMember, 'B should be a member of A').toBeTruthy()
+      const revokeRes = await revokeMembership(a.page, bMember!.id)
+      expect(revokeRes.status, 'revoke should succeed').toBe(200)
+
+      // 3. B loses A access immediately — switch to A, A APIs fail closed.
+      await switchWorkspace(b.page, a.tenantId)
+      const failRes = await b.page.request.get(`${BASE}/api/conversations`)
+      expect([401, 403], 'A APIs must fail closed after revoke').toContain(failRes.status())
+      // Switch back to B so B can accept a new invitation.
+      // (switchWorkspace to B may also fail if B's session is broken —
+      // re-sign-in as B if needed.)
+      let bPage = b.page
+      try {
+        await switchWorkspace(bPage, b.tenantId)
+      } catch {
+        bPage = await signInExisting(browser, b.email, b.tenantId)
+      }
+
+      // 4. A creates a FRESH invitation for B (different role to prove reactivation sets the new role).
+      const inv2 = await createInvitation(a.page, b.email, 'manager')
+      // 5. B accepts.
+      const acc2 = await acceptInvitation(bPage, inv2.workspace, inv2.token)
+      expect(acc2.status, `B should accept the reinvitation (got ${acc2.status}: ${JSON.stringify(acc2.body)})`).toBe(200)
+
+      // 6-7. The SAME logical (userId, tenantId) membership is active again,
+      // with the NEW role (manager, not agent).
+      const members2Res = await a.page.request.get(`${BASE}/api/members`)
+      const members2Body = (await members2Res.json()) as { members?: Array<{ id: string; role: string; status: string; user: { email: string } }> }
+      const bMember2 = members2Body.members?.find((m) => m.user.email === b.email)
+      expect(bMember2, 'B should be an active member of A again').toBeTruthy()
+      expect(bMember2!.status, 'membership reactivated to active').toBe('active')
+      expect(bMember2!.role, 'role updated to the new invitation role').toBe('manager')
+      // 8. The membership id is the SAME (not a duplicate row) — compare
+      // against the original id.
+      expect(bMember2!.id, 'same membership row reactivated, not duplicated').toBe(bMember!.id)
+
+      // 9. B can switch back to A + A APIs work.
+      const sw = await switchWorkspace(bPage, a.tenantId)
+      expect(sw.status, 'switch to A should succeed after reactivation').toBe(200)
+      const convRes = await bPage.request.get(`${BASE}/api/conversations`)
+      expect(convRes.status(), 'A APIs should work after reactivation').toBe(200)
+
+      // 10. No duplicate membership row — /api/members shows B exactly once.
+      const bCount = members2Body.members?.filter((m) => m.user.email === b.email).length ?? 0
+      expect(bCount, 'exactly one membership row for B in A').toBe(1)
+    } finally {
+      await a.page.context().close().catch(() => {})
+      await b.page.context().close().catch(() => {})
+    }
+  })
+})
+
+// ----------------------------------------------------------------------------
+// H. TEST-HARNESS ROUTE GATING (BLOCKER 3)
+// ----------------------------------------------------------------------------
+
+test.describe('H. Test-harness route gating (BLOCKER 3)', () => {
+  let browser: import('@playwright/test').Browser
+  test.beforeAll(async ({ browser: b }) => { browser = b })
+
+  test('H1. unauthenticated caller cannot mutate tenant plan', async () => {
+    // No session cookie → withSessionTenant returns null → 401.
+    // (The test-harness flags are set in Docker CI, so the flag gate
+    // passes; the auth check is what rejects.)
+    const res = await fetch(`${BASE}/api/invitations/dev/set-plan`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ plan: 'max' }),
+    })
+    expect(res.status, 'unauthenticated set-plan must be 401').toBe(401)
+  })
+
+  test('H2. authenticated user can only mutate the CURRENT tenant (no foreign-tenant mutation)', async () => {
+    // A's owner calls set-plan('max'). Only A's plan changes; B's plan
+    // is unchanged. The route has NO slug parameter — it uses the session's
+    // current tenant. A foreign-tenant mutation is structurally impossible.
+    const suffix = uniqueSuffix()
+    const a = await setupTenant(browser, `ta-h2-${suffix}@iws.test`, `TA H2 ${suffix}`)
+    const b = await setupTenant(browser, `tb-h2-${suffix}@iws.test`, `TB H2 ${suffix}`)
+    try {
+      // A sets its own plan to 'max'.
+      await devSetPlan(a.page, 'max')
+      // Verify A's plan is 'max'.
+      const aUsage = await getUsage(a.page)
+      expect(aUsage.limit, 'A plan should be max (20 agents)').toBe(20)
+      // Verify B's plan is UNCHANGED (still free, 2 agents).
+      const bUsage = await getUsage(b.page)
+      expect(bUsage.limit, 'B plan must be unchanged (free, 2 agents)').toBe(2)
+    } finally {
+      await a.page.context().close().catch(() => {})
+      await b.page.context().close().catch(() => {})
+    }
+  })
+
+  test('H3. non-owner/non-admin cannot mutate tenant plan', async () => {
+    // An agent (rank 2) calls set-plan → 403 (hasRole admin required).
+    const suffix = uniqueSuffix()
+    const a = await setupTenant(browser, `ta-h3-${suffix}@iws.test`, `TA H3 ${suffix}`)
+    try {
+      const agentEmail = `h3-agent-${suffix}@iws.test`
+      const inv = await createInvitation(a.page, agentEmail, 'agent')
+      const { requestId } = await otpVerifyEmail(agentEmail)
+      await acceptCompleteNewUser({
+        workspace: inv.workspace, email: agentEmail, requestId, password: PASSWORD, token: inv.token,
+      })
+      const agentPage = await signInExisting(browser, agentEmail, a.tenantId)
+      // Agent tries set-plan → 403.
+      const res = await agentPage.request.post(`${BASE}/api/invitations/dev/set-plan`, {
+        data: { plan: 'max' },
+        headers: { 'Content-Type': 'application/json' },
+      })
+      expect(res.status(), 'agent cannot mutate plan').toBe(403)
+      await agentPage.context().close()
+    } finally {
+      await a.page.context().close().catch(() => {})
+    }
   })
 })

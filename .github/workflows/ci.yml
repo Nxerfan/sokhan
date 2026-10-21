@@ -50,6 +50,9 @@ jobs:
       NEXTAUTH_SECRET: ci-docker-test-secret-not-production
       POSTGRES_PASSWORD: ci-postgres-password
       NIXIFY_MOCK: "true"
+      # Dedicated test-harness flag for dev-only test routes (BLOCKER 3).
+      # Set ONLY in Docker test stacks. Production compose + Vercel unset.
+      SUKHAN_TEST_HARNESS: "true"
       # Direct Postgres connection for the bun db-boundary test runner
       # (runs on the CI host, connects to the exposed Docker Postgres port).
       DATABASE_URL: postgresql://sukhan:ci-postgres-password@127.0.0.1:5432/sukhan?schema=public

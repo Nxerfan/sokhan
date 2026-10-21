@@ -175,20 +175,34 @@ export async function POST(req: NextRequest) {
           return { raced: true as const, alreadyMember: false as const }
         }
 
-        // Try to create the membership. P2002 (unique violation on
-        // userId+tenantId) means the user is already a member — that's fine,
-        // the invitation is still marked accepted (idempotent).
+        // Create OR REACTIVATE the membership (BLOCKER 2 fix).
+        // P2002 (unique violation on userId+tenantId) means a Membership
+        // row already exists — it may be 'revoked' (the user was previously
+        // a member, got revoked, and is now re-accepting a fresh invitation).
+        // In that case we REACTIVATE it: set status='active' + role to the
+        // invitation's role. The invitation acceptance + membership
+        // activation are atomic (same transaction). If activation cannot
+        // complete, the transaction rolls back (the invitation is NOT
+        // marked accepted).
+        let alreadyMember = false
         try {
           await tx.membership.create({
             data: { userId, tenantId, role, status: 'active' },
           })
         } catch (e: any) {
-          if (e?.code === 'P2002') {
-            return { raced: false as const, alreadyMember: true as const }
-          }
-          throw e
+          if (e?.code !== 'P2002') throw e
+          // Membership already exists (revoked or active). Reactivate it.
+          const before = await tx.membership.findFirst({
+            where: { userId },
+            select: { status: true },
+          })
+          alreadyMember = before?.status === 'active'
+          await tx.membership.updateMany({
+            where: { userId },
+            data: { status: 'active', role, updatedAt: new Date() },
+          })
         }
-        return { raced: false as const, alreadyMember: false as const }
+        return { raced: false as const, alreadyMember: alreadyMember }
       })
     })
 
