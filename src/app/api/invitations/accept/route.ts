@@ -176,31 +176,52 @@ export async function POST(req: NextRequest) {
         }
 
         // Create OR REACTIVATE the membership (BLOCKER 2 fix).
-        // P2002 (unique violation on userId+tenantId) means a Membership
-        // row already exists — it may be 'revoked' (the user was previously
-        // a member, got revoked, and is now re-accepting a fresh invitation).
-        // In that case we REACTIVATE it: set status='active' + role to the
-        // invitation's role. The invitation acceptance + membership
-        // activation are atomic (same transaction). If activation cannot
-        // complete, the transaction rolls back (the invitation is NOT
-        // marked accepted).
+        // First, check if a Membership already exists (may be 'revoked'
+        // — the user was previously a member, got revoked, and is now
+        // re-accepting a fresh invitation). If so, REACTIVATE it: set
+        // status='active' + role to the invitation's role. The invitation
+        // acceptance + membership activation are atomic (same tx); if
+        // activation cannot complete, the tx rolls back (the invitation
+        // is NOT marked accepted).
+        //
+        // The updateMany uses `id` (the PK) in the where — matching the
+        // existing PATCH /api/members pattern. The fail-closed extension
+        // injects tenantId into the where (defense-in-depth).
+        const existing = await tx.membership.findFirst({
+          where: { userId },
+          select: { id: true, status: true },
+        })
         let alreadyMember = false
-        try {
-          await tx.membership.create({
-            data: { userId, tenantId, role, status: 'active' },
-          })
-        } catch (e: any) {
-          if (e?.code !== 'P2002') throw e
-          // Membership already exists (revoked or active). Reactivate it.
-          const before = await tx.membership.findFirst({
-            where: { userId },
-            select: { status: true },
-          })
-          alreadyMember = before?.status === 'active'
+        if (existing) {
+          // Membership exists (revoked or active). Reactivate it.
+          alreadyMember = existing.status === 'active'
           await tx.membership.updateMany({
-            where: { userId },
+            where: { id: existing.id },
             data: { status: 'active', role, updatedAt: new Date() },
           })
+        } else {
+          // No membership — create one. Catch P2002 for the race where
+          // a concurrent accept (of a DIFFERENT invitation for the same
+          // user) created the membership between our findFirst + create.
+          try {
+            await tx.membership.create({
+              data: { userId, tenantId, role, status: 'active' },
+            })
+          } catch (e: any) {
+            if (e?.code !== 'P2002') throw e
+            // Concurrent accept created the membership. Find + reactivate.
+            const raced = await tx.membership.findFirst({
+              where: { userId },
+              select: { id: true, status: true },
+            })
+            alreadyMember = raced?.status === 'active'
+            if (raced) {
+              await tx.membership.updateMany({
+                where: { id: raced.id },
+                data: { status: 'active', role, updatedAt: new Date() },
+              })
+            }
+          }
         }
         return { raced: false as const, alreadyMember: alreadyMember }
       })
