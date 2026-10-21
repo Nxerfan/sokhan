@@ -736,31 +736,27 @@ test.describe('C. Security', () => {
   })
 
   test('C7. simultaneous accepts create exactly one active membership', async () => {
-    const { a } = await freshPair(`c7-${uniqueSuffix()}`)
+    // B is the owner of a separate tenant (can sign in). A invites B.
+    // Two sessions of B concurrently accept A's SINGLE invitation. The
+    // accept route's conditional `updateMany WHERE status='pending'`
+    // ensures exactly one succeeds (200); the other gets already_accepted
+    // (410). This avoids the `already_member` block (B is NOT yet a member
+    // of A when the invitation is created).
+    const { a, b } = await freshPair(`c7-${uniqueSuffix()}`)
     try {
-      const suffix = uniqueSuffix()
-      const fresh = `c7-${suffix}@iws.test`
-      // Create a fresh user via invitation + accept-complete.
-      const inv = await createInvitation(a.page, fresh, 'agent')
-      const { requestId } = await otpVerifyEmail(fresh)
-      const ac = await acceptCompleteNewUser({
-        workspace: inv.workspace, email: fresh, requestId, password: PASSWORD, token: inv.token,
-      })
-      expect(ac.status, `first accept-complete should succeed (got ${ac.status})`).toBe(200)
-      // Create a SECOND invitation for the same (now-existing) user.
-      await devSetPlan(a.slug, 'max')
-      const inv2 = await createInvitation(a.page, fresh, 'manager')
-      // Sign in on TWO contexts.
-      const page1 = await signInExisting(browser, fresh, a.tenantId)
-      const page2 = await signInExisting(browser, fresh, a.tenantId)
-      // Fire both accepts concurrently.
+      // A invites B (manager). owner(A)=1 + invite=1 = 2/2 (Free cap).
+      const inv = await createInvitation(a.page, b.email, 'manager')
+      // B signs in on TWO separate contexts (both as B, owner of B).
+      const page1 = await signInExisting(browser, b.email, b.tenantId)
+      const page2 = await signInExisting(browser, b.email, b.tenantId)
+      // Both concurrently accept A's invitation.
       const [r1, r2] = await Promise.all([
-        acceptInvitation(page1, inv2.workspace, inv2.token),
-        acceptInvitation(page2, inv2.workspace, inv2.token),
+        acceptInvitation(page1, inv.workspace, inv.token),
+        acceptInvitation(page2, inv.workspace, inv.token),
       ])
       const statuses = [r1.status, r2.status].sort()
       expect(statuses, `concurrent accepts: one 200 + one 410, got ${statuses.join(',')}`).toEqual([200, 410])
-      // Exactly one active membership in A.
+      // Exactly one active membership for B in A.
       const meRes = await page1.request.get(`${BASE}/api/workspaces`)
       const ws = (await meRes.json()) as { workspaces: Array<{ id: string; role: string }> }
       const aMemberships = ws.workspaces.filter((w) => w.id === a.tenantId)
@@ -770,6 +766,7 @@ test.describe('C. Security', () => {
       await page2.context().close()
     } finally {
       await a.page.context().close().catch(() => {})
+      await b.page.context().close().catch(() => {})
     }
   })
 
