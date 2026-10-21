@@ -748,6 +748,7 @@ test.describe('C. Security', () => {
       })
       expect(ac.status, `first accept-complete should succeed (got ${ac.status})`).toBe(200)
       // Create a SECOND invitation for the same (now-existing) user.
+      await devSetPlan(a.slug, 'max')
       const inv2 = await createInvitation(a.page, fresh, 'manager')
       // Sign in on TWO contexts.
       const page1 = await signInExisting(browser, fresh, a.tenantId)

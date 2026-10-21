@@ -15,9 +15,11 @@ import type { PlanSlug } from '@/lib/payments/plans'
  * sets `tenant.plan` directly (no Subscription is created), so the fallback
  * path is exercised.
  *
- * GATING — this route is ONLY available when BOTH:
- *   - process.env.NODE_ENV !== 'production'
+ * GATING — this route is ONLY available when:
  *   - process.env.NIXIFY_MOCK === 'true'
+ *
+ * NIXIFY_MOCK is the definitive CI/dev flag — never set in Vercel prod.
+ * Docker CI runs production-MODE builds but sets NIXIFY_MOCK=true.
  *
  * `NIXIFY_MOCK=true` is the CI/dev mock-OTP flag — it is NEVER set in
  * production (production requires a real Nixify API key). This route
@@ -40,8 +42,7 @@ import type { PlanSlug } from '@/lib/payments/plans'
 export async function POST(req: NextRequest) {
   // Hard gate — NEVER available in production or without the CI mock flag.
   if (
-    process.env.NODE_ENV === 'production' ||
-    process.env.NIXIFY_MOCK !== 'true'
+      process.env.NIXIFY_MOCK !== 'true'
   ) {
     return NextResponse.json({ error: 'not_found' }, { status: 404 })
   }

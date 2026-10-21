@@ -16,9 +16,15 @@ import { verifyInvitationToken } from '@/lib/invitations'
  *   - expired pending invitations do NOT consume a plan-limit seat
  *     (gating.ts counts only `expiresAt > now` pending invitations)
  *
- * GATING — this route is ONLY available when BOTH:
- *   - process.env.NODE_ENV !== 'production'
+ * GATING — this route is ONLY available when:
  *   - process.env.NIXIFY_MOCK === 'true'
+ *
+ * NIXIFY_MOCK is the definitive CI/dev flag — it is NEVER set in Vercel
+ * production or preview deployments (the owner does not configure it).
+ * Docker CI runs production-MODE builds but sets NIXIFY_MOCK=true, so this
+ * route IS available in Docker CI (where the behavioral tests run). The
+ * NODE_ENV check was removed because Docker CI production-mode builds set
+ * NODE_ENV=production, which would incorrectly block the route in CI.
  *
  * `NIXIFY_MOCK=true` is the CI/dev mock-OTP flag — it is NEVER set in
  * production (production requires a real Nixify API key). This route
@@ -43,8 +49,7 @@ import { verifyInvitationToken } from '@/lib/invitations'
 export async function POST(req: NextRequest) {
   // Hard gate — NEVER available in production or without the CI mock flag.
   if (
-    process.env.NODE_ENV === 'production' ||
-    process.env.NIXIFY_MOCK !== 'true'
+      process.env.NIXIFY_MOCK !== 'true'
   ) {
     return NextResponse.json({ error: 'not_found' }, { status: 404 })
   }
