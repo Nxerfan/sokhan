@@ -85,80 +85,64 @@ async function setupTenant(
   }
   const tenantId = signupRes.tenantId
 
-  // 2. Get CSRF token (NextAuth requires it for the credentials callback)
-  const csrfRes = await page.request.get(`${BASE}/api/auth/csrf`)
-  const csrfData = (await csrfRes.json()) as { csrfToken: string }
-  if (!csrfData.csrfToken) {
-    throw new Error(`CSRF fetch failed for ${email}`)
-  }
-
-  // 3. Sign in via NextAuth credentials callback. Use `form` so Playwright
-  //    sets Content-Type: application/x-www-form-urlencoded. `json=true`
-  //    in the body tells NextAuth to return JSON instead of redirecting.
-  const signinRes = await page.request.post(
-    `${BASE}/api/auth/callback/credentials`,
-    {
-      form: {
-        email,
-        password: PASSWORD,
-        csrfToken: csrfData.csrfToken,
-        json: 'true',
-      },
-      maxRedirects: 0,
-    },
-  )
-  // NextAuth returns 200 (or 302 if not json=true) on success. We only
-  // need the session cookie to be set — don't fail on a 302 either.
-  if (signinRes.status() >= 400) {
-    throw new Error(
-      `Sign-in failed for ${email}: callback status=${signinRes.status()}`,
-    )
-  }
-
-  // 4. Verify the NextAuth session is established before proceeding.
-  //    The session cookie from the credentials callback can take a
-  //    brief moment to propagate into Playwright's cookie jar. Poll
-  //    /api/auth/session (or /api/tenants/me) with a short bounded
-  //    deadline. This is NOT a retry of the actual tenant-security
-  //    assertions — it only retries the authentication establishment.
-  const sessionDeadline = Date.now() + 10000 // 10s bounded poll
+  // Sign-in + bounded session-establishment poll, with ONE retry.
+  // The retry re-issues the credentials callback (fresh CSRF) if the
+  // first attempt's session cookie did not propagate within the poll
+  // window. This matches the resilience pattern in
+  // invite-workspace-switching.spec.ts (bounded re-attempt, NOT an
+  // arbitrary sleep). Each attempt has a 10s propagation poll (250ms).
   let sessionEstablished = false
+  let lastCallbackStatus = 0
   let lastSessionStatus = 0
   let lastMeStatus = 0
   let meData: { tenant?: { id: string; slug: string } } = {}
 
-  while (Date.now() < sessionDeadline) {
-    // Check /api/auth/session first — lighter-weight than /api/tenants/me.
-    const sessionRes = await page.request.get(`${BASE}/api/auth/session`)
-    lastSessionStatus = sessionRes.status()
-    if (sessionRes.ok()) {
-      const sessionBody = await sessionRes.json().catch(() => ({}))
-      // If the session contains an authenticated user, the session
-      // cookie is established.
-      if (sessionBody && sessionBody.user) {
-        // Session confirmed — now fetch tenant info.
-        const meRes = await page.request.get(`${BASE}/api/tenants/me`)
-        lastMeStatus = meRes.status()
-        if (meRes.ok()) {
-          meData = (await meRes.json()) as { tenant?: { id: string; slug: string } }
-          if (meData.tenant) {
-            sessionEstablished = true
-            break
+  for (let attempt = 0; attempt < 2 && !sessionEstablished; attempt++) {
+    const csrfRes = await page.request.get(`${BASE}/api/auth/csrf`)
+    const csrfData = (await csrfRes.json()) as { csrfToken: string }
+    if (!csrfData.csrfToken) {
+      if (attempt === 0) continue
+      throw new Error(`CSRF fetch failed for ${email}`)
+    }
+    const signinRes = await page.request.post(
+      `${BASE}/api/auth/callback/credentials`,
+      {
+        form: { email, password: PASSWORD, csrfToken: csrfData.csrfToken, json: 'true' },
+        maxRedirects: 0,
+      },
+    )
+    lastCallbackStatus = signinRes.status()
+    if (signinRes.status() >= 400) {
+      if (attempt === 0) continue
+      throw new Error(`Sign-in failed for ${email}: callback status=${signinRes.status()}`)
+    }
+    const sessionDeadline = Date.now() + 10000
+    while (Date.now() < sessionDeadline) {
+      const sessionRes = await page.request.get(`${BASE}/api/auth/session`)
+      lastSessionStatus = sessionRes.status()
+      if (sessionRes.ok()) {
+        const sessionBody = await sessionRes.json().catch(() => ({}))
+        if (sessionBody && sessionBody.user) {
+          const meRes = await page.request.get(`${BASE}/api/tenants/me`)
+          lastMeStatus = meRes.status()
+          if (meRes.ok()) {
+            meData = (await meRes.json()) as { tenant?: { id: string; slug: string } }
+            if (meData.tenant) {
+              sessionEstablished = true
+              break
+            }
           }
         }
       }
+      await page.waitForTimeout(250)
     }
-    // Brief pause before retrying (250ms — short enough to not slow
-    // the test meaningfully, long enough for cookie propagation).
-    await page.waitForTimeout(250)
   }
 
   if (!sessionEstablished) {
-    // Safe diagnostics — no cookie values, tokens, or secrets.
     const hasSessionCookie = (await ctx.cookies()).some(c => c.name.includes('session') || c.name.includes('auth'))
     throw new Error(
-      `Auth session not established for ${email} after bounded poll. ` +
-      `callback_status=${signinRes.status()} ` +
+      `Auth session not established for ${email} after 2 attempts (10s poll each). ` +
+      `last_callback_status=${lastCallbackStatus} ` +
       `session_cookie_present=${hasSessionCookie} ` +
       `last_session_status=${lastSessionStatus} ` +
       `last_tenants_me_status=${lastMeStatus}`,

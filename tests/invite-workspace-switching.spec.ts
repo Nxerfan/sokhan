@@ -1250,7 +1250,13 @@ test.describe('G. Revoked membership reinvitation reactivation (BLOCKER 2)', () 
       const acc1 = await acceptInvitation(b.page, inv1.workspace, inv1.token)
       expect(acc1.status, 'B should accept A first invite').toBe(200)
 
-      // 2. A revokes B's membership in A.
+      // 2. B switches to A (works — A membership is active). This puts
+      //    B's session ON A, so the revocation in step 3 can be observed
+      //    as fail-closed A API access.
+      await switchWorkspace(b.page, a.tenantId)
+      expect(await getSessionWorkspaceId(b.page), 'B session on A').toBe(a.tenantId)
+
+      // 3. A revokes B's membership in A.
       const membersRes = await a.page.request.get(`${BASE}/api/members`)
       const membersBody = (await membersRes.json()) as { members?: Array<{ id: string; user: { email: string } }> }
       const bMember = membersBody.members?.find((m) => m.user.email === b.email)
@@ -1258,61 +1264,52 @@ test.describe('G. Revoked membership reinvitation reactivation (BLOCKER 2)', () 
       const revokeRes = await revokeMembership(a.page, bMember!.id)
       expect(revokeRes.status, 'revoke should succeed').toBe(200)
 
-      // 3. B loses A access immediately — switch to A, A APIs fail closed.
-      await switchWorkspace(b.page, a.tenantId)
+      // 4. B loses A access immediately — B is on A (revoked), so A APIs
+      //    fail closed (withSessionTenant rejects revoked membership → 401).
       const failRes = await b.page.request.get(`${BASE}/api/conversations`)
       expect([401, 403], 'A APIs must fail closed after revoke').toContain(failRes.status())
-      // Switch back to B so B can accept a new invitation.
-      // (switchWorkspace to B may also fail if B's session is broken —
-      // re-sign-in as B if needed.)
-      let bPage = b.page
-      try {
-        await switchWorkspace(bPage, b.tenantId)
-      } catch {
-        bPage = await signInExisting(browser, b.email, b.tenantId)
-      }
 
-      // 4. A creates a FRESH invitation for B (different role to prove reactivation sets the new role).
+      // 5. B re-signs-in as B (fresh session on B — B is the active owner
+      //    of B). This avoids any session invalidation from the failed-A
+      //    access. signInExisting establishes a clean authenticated session.
+      const bPage = await signInExisting(browser, b.email, b.tenantId)
+      expect(await getSessionWorkspaceId(bPage), 'fresh B session on B').toBe(b.tenantId)
+
+      // 6. A creates a FRESH invitation for B (manager role — different
+      //    from the original 'agent' to prove reactivation sets the new role).
       const inv2 = await createInvitation(a.page, b.email, 'manager')
-      // 5. B accepts.
+      // 7. B accepts the reinvitation (authenticated, on B).
       const acc2 = await acceptInvitation(bPage, inv2.workspace, inv2.token)
       expect(acc2.status, `B should accept the reinvitation (got ${acc2.status}: ${JSON.stringify(acc2.body)})`).toBe(200)
 
-      // 6-7. The SAME logical (userId, tenantId) membership is active again,
-      // with the NEW role (manager, not agent).
+      // 8-9. The SAME logical (userId, tenantId) membership is active
+      // again, with the NEW role (manager, not agent). The membership id
+      // is the SAME (not a duplicate row).
       const members2Res = await a.page.request.get(`${BASE}/api/members`)
       const members2Body = (await members2Res.json()) as { members?: Array<{ id: string; role: string; status: string; user: { email: string } }> }
       const bMember2 = members2Body.members?.find((m) => m.user.email === b.email)
       expect(bMember2, 'B should be an active member of A again').toBeTruthy()
       expect(bMember2!.status, 'membership reactivated to active').toBe('active')
       expect(bMember2!.role, 'role updated to the new invitation role').toBe('manager')
-      // 8. The membership id is the SAME (not a duplicate row) — compare
-      // against the original id.
       expect(bMember2!.id, 'same membership row reactivated, not duplicated').toBe(bMember!.id)
 
-      // 9. B can switch back to A + A APIs work.
+      // 10. B can switch to A + A APIs work.
       const sw = await switchWorkspace(bPage, a.tenantId)
       expect(sw.status, 'switch to A should succeed after reactivation').toBe(200)
+      expect(await getSessionWorkspaceId(bPage), 'B session now on A').toBe(a.tenantId)
       const convRes = await bPage.request.get(`${BASE}/api/conversations`)
       expect(convRes.status(), 'A APIs should work after reactivation').toBe(200)
 
-      // 10. No duplicate membership row — /api/members shows B exactly once.
+      // 11. No duplicate membership row — /api/members shows B exactly once.
       const bCount = members2Body.members?.filter((m) => m.user.email === b.email).length ?? 0
       expect(bCount, 'exactly one membership row for B in A').toBe(1)
+
+      await bPage.context().close()
     } finally {
       await a.page.context().close().catch(() => {})
       await b.page.context().close().catch(() => {})
     }
   })
-})
-
-// ----------------------------------------------------------------------------
-// H. TEST-HARNESS ROUTE GATING (BLOCKER 3)
-// ----------------------------------------------------------------------------
-
-test.describe('H. Test-harness route gating (BLOCKER 3)', () => {
-  let browser: import('@playwright/test').Browser
-  test.beforeAll(async ({ browser: b }) => { browser = b })
 
   test('H1. unauthenticated caller cannot mutate tenant plan', async () => {
     // No session cookie → withSessionTenant returns null → 401.
