@@ -6,6 +6,7 @@ import {
   generateInvitationToken,
   invitationExpiryFromNow,
 } from '@/lib/invitations'
+import { acquireTenantSeatLock } from '@/lib/seat-lock'
 import { PlanLimitExceededError } from '@/lib/payments/gating'
 import { getPlan } from '@/lib/payments/plans'
 
@@ -85,6 +86,16 @@ export async function POST(req: NextRequest) {
     // re-check + new pending creation. The conditional claim's count
     // determines the winner (BLOCKER 1).
     const txResult = await db.$transaction(async (tx) => {
+      // (0) Acquire the per-tenant seat-capacity serialization lock
+      // (FINAL BLOCKER fix). PostgreSQL `SELECT ... FOR UPDATE` on the
+      // Tenant row — serializes ALL seat-increasing transactions for
+      // this tenant (invitation create + reissue) across ALL app
+      // instances, EVEN when they touch DIFFERENT Invitation rows. Two
+      // concurrent reissues of two different revoked invitations both
+      // block here; the second one's capacity count sees the first
+      // one's committed pending invitation.
+      await acquireTenantSeatLock(tx, tid)
+
       // (a) Conditional claim: revoked → superseded. Only the winner
       // gets count=1. A concurrent reissue of the SAME row gets count=0
       // (the row is already superseded) → returns 'raced' without
@@ -100,12 +111,12 @@ export async function POST(req: NextRequest) {
       }
 
       // (b) TRANSACTIONAL plan-capacity re-check (BLOCKER 1). Two
-      // concurrent reissues for DIFFERENT revoked invitations could
-      // both pass a pre-transaction check. This in-tx count is
-      // consistent with the new pending create below — if the cap
-      // would be exceeded, the transaction rolls back (no new pending,
-      // the old row stays superseded — the claim is not "undone" but
-      // no overbooking occurs).
+      // concurrent reissues for DIFFERENT revoked invitations both
+      // serialized by the tenant seat lock above — the second one's
+      // count sees the first one's committed pending invitation. If
+      // the cap would be exceeded, throw → the WHOLE transaction rolls
+      // back (the claim is undone — the row reverts to 'revoked',
+      // safely reissuable; no new pending is created).
       const now = new Date()
       const [activeCount, pendingCount] = await Promise.all([
         tx.membership.count({ where: { status: 'active' } }),

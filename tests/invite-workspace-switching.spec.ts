@@ -925,24 +925,40 @@ test.describe('D. Expired-seat counting (BLOCKER 3)', () => {
     } finally { await a.page.context().close().catch(() => {}) }
   })
 
-  test('D5. concurrent invites at the limit cannot overbook', async () => {
-    const a = await freshTenant('d5')
-    try {
-      const usage = await getUsage(a.page)
-      const limit = usage.limit
-      if (limit === -1) { console.warn('[D5] unlimited plan — trivially satisfied'); return }
-      const remaining = limit - usage.current
-      const suffix = uniqueSuffix()
-      for (let i = 0; i < remaining; i++) {
-        await createInvitation(a.page, `d5-${suffix}-${i}@iws.test`, 'agent')
-      }
-      const overRes = await a.page.request.post(`${BASE}/api/invitations`, {
-        data: { email: `d5-${suffix}-X@iws.test`, role: 'agent' },
-        headers: { 'Content-Type': 'application/json' },
-      })
-      expect(overRes.status(), 'over-limit invite must be 402').toBe(402)
-      expect((await overRes.json()).error).toBe('plan_limit_exceeded')
-    } finally { await a.page.context().close().catch(() => {}) }
+  test('D5. CONCURRENT fresh invitations with ONE remaining seat cannot overbook (FINAL BLOCKER)', async () => {
+    // Genuinely concurrent HTTP requests (Promise.all), fresh Free tenant
+    // per iteration. Repeated 3x to catch timing races — NO arbitrary sleeps.
+    for (let iter = 0; iter < 3; iter++) {
+      const a = await freshTenant(`d5-${iter}`)
+      try {
+        const usage = await getUsage(a.page)
+        expect(usage.limit, 'Free plan agents=2').toBe(2)
+        expect(usage.current, 'owner consumes one seat — exactly one remaining').toBe(1)
+        // Fire TWO concurrent create requests for DIFFERENT emails.
+        const s = uniqueSuffix()
+        const [r1, r2] = await Promise.all([
+          a.page.request.post(`${BASE}/api/invitations`, {
+            data: { email: `d5a-${s}@iws.test`, role: 'agent' },
+            headers: { 'Content-Type': 'application/json' },
+          }),
+          a.page.request.post(`${BASE}/api/invitations`, {
+            data: { email: `d5b-${s}@iws.test`, role: 'agent' },
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        ])
+        const statuses = [r1.status(), r2.status()].sort()
+        expect(statuses, `iter ${iter}: exactly one 200 + one 402, got ${statuses.join(',')}`).toEqual([200, 402])
+        const loser = r1.status() === 402 ? r1 : r2
+        expect((await loser.json()).error, `iter ${iter}: loser error`).toBe('plan_limit_exceeded')
+        // Final usage == limit — no transient or persisted overbooking.
+        const after = await getUsage(a.page)
+        expect(after.current, `iter ${iter}: final usage == limit (no overbooking)`).toBe(2)
+        // Exactly one new pending invitation exists.
+        const listRes = await a.page.request.get(`${BASE}/api/invitations`)
+        const listBody = (await listRes.json()) as { invitations?: Array<{ email: string }> }
+        expect(listBody.invitations?.length ?? 0, `iter ${iter}: exactly one pending invitation`).toBe(1)
+      } finally { await a.page.context().close().catch(() => {}) }
+    }
   })
 
   test('D6. REAL plan downgrade before acceptance blocks over-activation (#3 fix)', async () => {
@@ -1012,6 +1028,103 @@ test.describe('D. Expired-seat counting (BLOCKER 3)', () => {
       // Restore the downgraded tenant's plan so it doesn't interfere.
       await devSetPlan(a.page, 'max').catch(() => {})
       await a.page.context().close().catch(() => {})
+    }
+  })
+
+  test('D7. CONCURRENT reissue of DIFFERENT revoked invitations — shared capacity cannot overbook', async () => {
+    // Two DIFFERENT revoked rows do not conflict on the same-row claim —
+    // the per-tenant seat lock (FOR UPDATE on the Tenant row) must
+    // serialize their capacity counts. Repeated 3x to catch timing races.
+    for (let iter = 0; iter < 3; iter++) {
+      const a = await freshTenant(`d7-${iter}`)
+      try {
+        // Prepare: create+revoke invitation A, then create+revoke
+        // invitation B (sequential — each create consumes the one
+        // remaining Free seat, each revoke frees it). Usage returns to
+        // owner-only (1/2), no pending, two revoked rows.
+        const s = uniqueSuffix()
+        const emailA = `d7a-${s}@iws.test`
+        const emailB = `d7b-${s}@iws.test`
+        const ids: string[] = []
+        for (const email of [emailA, emailB]) {
+          await createInvitation(a.page, email, 'agent')
+          const listRes = await a.page.request.get(`${BASE}/api/invitations`)
+          const listBody = (await listRes.json()) as { invitations?: Array<{ id: string; email: string }> }
+          const row = listBody.invitations?.find((i) => i.email === email)
+          expect(row, `iter ${iter}: ${email} invitation in pending list`).toBeTruthy()
+          await revokeInvitation(a.page, row!.id)
+          ids.push(row!.id)
+        }
+        const preUsage = await getUsage(a.page)
+        expect(preUsage.current, `iter ${iter}: usage back to owner-only after revokes`).toBe(1)
+
+        // Fire TWO concurrent reissues of the TWO DIFFERENT revoked rows.
+        const [r1, r2] = await Promise.all([
+          reissueInvitation(a.page, ids[0]),
+          reissueInvitation(a.page, ids[1]),
+        ])
+        const statuses = [r1.status, r2.status].sort()
+        expect(statuses, `iter ${iter}: exactly one 200 + one 402, got ${statuses.join(',')}`).toEqual([200, 402])
+        const loser = r1.status === 200 ? r2 : r1
+        const loserId = r1.status === 200 ? ids[1] : ids[0]
+        expect(loser.body?.error, `iter ${iter}: loser gets plan_limit_exceeded`).toBe('plan_limit_exceeded')
+
+        // Final usage == limit — no overbooking.
+        const after = await getUsage(a.page)
+        expect(after.current, `iter ${iter}: final usage == limit (no overbooking)`).toBe(2)
+
+        // Exactly one valid pending invitation exists across A+B.
+        const list2Res = await a.page.request.get(`${BASE}/api/invitations`)
+        const list2Body = (await list2Res.json()) as { invitations?: Array<{ id: string; email: string; status: string }> }
+        const pendings = list2Body.invitations ?? []
+        expect(pendings.length, `iter ${iter}: exactly one pending across A+B`).toBe(1)
+
+        // The losing revoked invitation is NOT left superseded (the
+        // capacity failure rolled back the WHOLE transaction, claim
+        // included). Prove it: free the seat (revoke the winner's
+        // pending), then reissue the loser's row → must SUCCEED (a
+        // superseded row would return 400 superseded_not_reissuable).
+        await revokeInvitation(a.page, pendings[0].id)
+        const retry = await reissueInvitation(a.page, loserId)
+        expect(retry.status, `iter ${iter}: loser row remains safely reissuable after capacity rollback`).toBe(200)
+        expect((await lookupInvitation(retry.workspace!, retry.token!)).status, `iter ${iter}: retry link is valid`).toBe(200)
+      } finally { await a.page.context().close().catch(() => {}) }
+    }
+  })
+
+  test('D8. same-email duplicate invitation race — at most one pending, deterministic loser', async () => {
+    // Two concurrent creates for the SAME email: the per-tenant lock
+    // serializes the duplicate-pending check — the second sees the first
+    // one's committed pending row. Repeated 3x to catch timing races.
+    for (let iter = 0; iter < 3; iter++) {
+      const a = await freshTenant(`d8-${iter}`)
+      try {
+        const s = uniqueSuffix()
+        const email = `d8-${s}@iws.test`
+        // Capacity is available (one remaining seat) — the dup-pending
+        // check is the serialization point under test.
+        const [r1, r2] = await Promise.all([
+          a.page.request.post(`${BASE}/api/invitations`, {
+            data: { email, role: 'agent' },
+            headers: { 'Content-Type': 'application/json' },
+          }),
+          a.page.request.post(`${BASE}/api/invitations`, {
+            data: { email, role: 'agent' },
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        ])
+        const statuses = [r1.status(), r2.status()].sort()
+        expect(statuses, `iter ${iter}: one 200 + one 400, got ${statuses.join(',')}`).toEqual([200, 400])
+        const loser = r1.status() === 200 ? r2 : r1
+        const loserBody = await loser.json()
+        expect(loserBody?.error, `iter ${iter}: loser gets invitation_already_pending`).toBe('invitation_already_pending')
+        expect(loserBody?.invitation?.inviteUrl, `iter ${iter}: loser has NO inviteUrl (no duplicate link)`).toBeUndefined()
+        // At most one pending invitation for the email (exactly one).
+        const listRes = await a.page.request.get(`${BASE}/api/invitations`)
+        const listBody = (await listRes.json()) as { invitations?: Array<{ email: string }> }
+        const forEmail = listBody.invitations?.filter((i) => i.email === email) ?? []
+        expect(forEmail.length, `iter ${iter}: exactly one pending for the email (no duplicates)`).toBe(1)
+      } finally { await a.page.context().close().catch(() => {}) }
     }
   })
 })

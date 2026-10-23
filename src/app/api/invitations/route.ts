@@ -1,8 +1,10 @@
 import { NextResponse, NextRequest } from 'next/server'
 import { withSessionTenant, hasRole, getCurrentTenantId } from '@/lib/auth'
 import { db, globalDb } from '@/lib/db'
-import { enforceCurrentTenantPlanLimit, PlanLimitExceededError } from '@/lib/payments/gating'
+import { PlanLimitExceededError } from '@/lib/payments/gating'
+import { getPlan } from '@/lib/payments/plans'
 import { canManageRole, VALID_ROLES } from '@/lib/authz'
+import { acquireTenantSeatLock } from '@/lib/seat-lock'
 import {
   generateInvitationToken,
   invitationExpiryFromNow,
@@ -98,35 +100,113 @@ export async function POST(req: NextRequest) {
 
     const tid = getCurrentTenantId()!
 
-    // Duplicate active membership check: if there's already an active
-    // membership for this email in this workspace, do not invite again.
-    const existingUser = await db.user.findUnique({
-      where: { email },
-      select: { id: true },
-    })
-    if (existingUser) {
-      const m = await db.membership.findUnique({
-        where: { userId_tenantId: { userId: existingUser.id, tenantId: tid } },
-        select: { status: true },
-      })
-      if (m?.status === 'active') return { error: 'already_member' as const }
-    }
+    // Generate token + hash (pure functions, no DB state). The raw token
+    // is returned EXACTLY ONCE in the response — never logged, persisted.
+    const { rawToken, tokenHash } = generateInvitationToken()
+    const expiresAt = invitationExpiryFromNow()
 
-    // Duplicate pending invitation check: at most one active invitation per
-    // (tenantId, email) at a time. (Existing revoked/accepted invitations
-    // for the same email are fine — the user can be re-invited.)
-    const dupPending = await db.invitation.findFirst({
-      where: { tenantId: tid, email, status: 'pending' },
-      select: { id: true, expiresAt: true },
-    })
-    if (dupPending && !isExpired(dupPending)) {
-      return { error: 'invitation_already_pending' as const }
-    }
-
-    // Plan limit check: active memberships + pending invitations count toward
-    // the 'agents' limit. The new gating.ts formula counts both correctly.
+    // ONE serialized transaction (FINAL BLOCKER fix): acquire the
+    // per-tenant seat-capacity lock → duplicate checks → capacity check
+    // → create. The PostgreSQL `SELECT ... FOR UPDATE` row lock on the
+    // Tenant row (acquireTenantSeatLock) serializes ALL seat-increasing
+    // operations for this tenant across ALL app instances — two
+    // concurrent creates for DIFFERENT emails cannot both pass the
+    // capacity check and overbook, and two concurrent creates for the
+    // SAME email cannot both pass the duplicate-pending check.
+    let txResult:
+      | { error: 'already_member' | 'invitation_already_pending' }
+      | { invitation: { id: string; email: string; role: string; status: string; expiresAt: Date } }
     try {
-      await enforceCurrentTenantPlanLimit('agents')
+      txResult = await db.$transaction(async (tx) => {
+        // (a) Acquire the per-tenant seat-capacity serialization lock.
+        // Blocks until any concurrent seat-reserving transaction for this
+        // tenant commits — everything below is serialized per tenant.
+        await acquireTenantSeatLock(tx, tid)
+
+        // (b) Duplicate active membership check (under the lock).
+        const existingUser = await tx.user.findUnique({
+          where: { email },
+          select: { id: true },
+        })
+        if (existingUser) {
+          const m = await tx.membership.findUnique({
+            where: { userId_tenantId: { userId: existingUser.id, tenantId: tid } },
+            select: { status: true },
+          })
+          if (m?.status === 'active') {
+            return { error: 'already_member' as const }
+          }
+        }
+
+        // (c) Duplicate pending invitation check (under the lock): at
+        // most one live pending invitation per (tenantId, email).
+        // Serialized by the tenant lock — a concurrent same-email create
+        // sees the first one's committed pending row.
+        const dupPending = await tx.invitation.findFirst({
+          where: { tenantId: tid, email, status: 'pending' },
+          select: { id: true, expiresAt: true },
+        })
+        if (dupPending && !isExpired(dupPending)) {
+          return { error: 'invitation_already_pending' as const }
+        }
+
+        // (d) TRANSACTIONAL capacity check (under the lock): active
+        // memberships + unexpired pending invitations. The new pending
+        // invitation consumes one seat — reject if usage >= limit.
+        // Throw to roll back (nothing created).
+        const now = new Date()
+        const [activeCount, pendingCount] = await Promise.all([
+          tx.membership.count({ where: { status: 'active' } }),
+          tx.invitation.count({
+            where: { status: 'pending', expiresAt: { gt: now } },
+          }),
+        ])
+        const usage = activeCount + pendingCount
+        const sub = await tx.subscription.findFirst({
+          where: { status: 'active' },
+          include: { plan: { select: { slug: true } } },
+          orderBy: { createdAt: 'desc' },
+        })
+        let planSlug = sub?.plan?.slug
+        if (!planSlug) {
+          const t = await tx.tenant.findUnique({
+            where: { id: tid },
+            select: { plan: true },
+          })
+          planSlug = t?.plan ?? 'free'
+        }
+        const plan = getPlan(planSlug) ?? getPlan('free')!
+        const limitValue = plan.limits.agents
+        if (limitValue !== -1 && usage >= limitValue) {
+          throw new PlanLimitExceededError('agents', {
+            allowed: false,
+            current: usage,
+            limit: limitValue,
+            planSlug,
+          })
+        }
+
+        // (e) Create the pending invitation (the seat-increasing write).
+        const created = await tx.invitation.create({
+          data: {
+            tenantId: tid,
+            email,
+            role,
+            status: 'pending',
+            tokenHash,
+            expiresAt,
+            invitedByUserId: session.user.id,
+          },
+          select: {
+            id: true,
+            email: true,
+            role: true,
+            status: true,
+            expiresAt: true,
+          },
+        })
+        return { invitation: created } as const
+      })
     } catch (e) {
       if (e instanceof PlanLimitExceededError) {
         return { planLimit: e.result } as const
@@ -134,29 +214,10 @@ export async function POST(req: NextRequest) {
       throw e
     }
 
-    // Generate token + hash. The raw token is returned EXACTLY ONCE in the
-    // response — never logged, never persisted.
-    const { rawToken, tokenHash } = generateInvitationToken()
-    const expiresAt = invitationExpiryFromNow()
-
-    const invitation = await db.invitation.create({
-      data: {
-        tenantId: tid,
-        email,
-        role,
-        status: 'pending',
-        tokenHash,
-        expiresAt,
-        invitedByUserId: session.user.id,
-      },
-      select: {
-        id: true,
-        email: true,
-        role: true,
-        status: true,
-        expiresAt: true,
-      },
-    })
+    if ('error' in txResult) {
+      return txResult
+    }
+    const invitation = txResult.invitation
 
     // Build the invite URL with the raw token AND the workspace slug.
     // The slug is the PUBLIC tenant identifier — the public lookup route
