@@ -82,6 +82,7 @@ export const TENANT_SCOPED_MODEL_NAMES: readonly string[] = Object.freeze([
   'AiConfig',
   'ConnectorConfig',
   'WidgetDomain',
+  'Invitation',
 ])
 
 /** Models that carry a `tenantId` column and therefore REQUIRE a tenant scope. */

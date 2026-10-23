@@ -89,3 +89,4 @@ scripts/apply-final.sh
 packages/widget-npm/dist/
 packages/widget-npm/*.tgz
 agent-ctx/
+.pgdata/

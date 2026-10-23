@@ -5,7 +5,11 @@ export type AuthMode = 'login' | 'signup'
 interface AuthModalState {
   isOpen: boolean
   mode: AuthMode
-  open: (mode?: AuthMode) => void
+  /** Optional URL to redirect to after a successful login/signup. Defaults to
+   *  `'/'` when not set. Used by the /invite flow so an invitee can sign in
+   *  and land back on the invitation-acceptance page in one go. */
+  callbackUrl: string | null
+  open: (mode?: AuthMode, callbackUrl?: string | null) => void
   close: () => void
   setMode: (mode: AuthMode) => void
 }
@@ -17,7 +21,9 @@ interface AuthModalState {
 export const useAuthModal = create<AuthModalState>((set) => ({
   isOpen: false,
   mode: 'signup',
-  open: (mode = 'signup') => set({ isOpen: true, mode }),
-  close: () => set({ isOpen: false }),
+  callbackUrl: null,
+  open: (mode = 'signup', callbackUrl = null) =>
+    set({ isOpen: true, mode, callbackUrl }),
+  close: () => set({ isOpen: false, callbackUrl: null }),
   setMode: (mode) => set({ mode }),
 }))

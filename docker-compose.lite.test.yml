@@ -8,6 +8,9 @@ services:
       # 3-step OTP signup flow without a real Nixify API key.
       # Production docker-compose.lite.yml must NOT set this.
       NIXIFY_MOCK: "true"
+      # Test-only: dedicated test-harness flag for dev-only test routes.
+      # Production compose + Vercel must NOT set this. See BLOCKER 3.
+      SUKHAN_TEST_HARNESS: "true"
 
   caddy:
     ports:
@@ -15,8 +18,7 @@ services:
       - "443:443"
 
   # Expose Postgres on the host so the bun db-boundary test runner (which
-  # runs on the CI host, not inside a container) can connect directly to
-  # exercise the fail-closed Prisma tenant extension against real PostgreSQL.
+  # runs on the CI host, connects to the exposed Docker Postgres port).
   # Production docker-compose.lite.yml does NOT expose this port.
   postgres:
     ports:

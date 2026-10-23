@@ -114,7 +114,9 @@ test('#4 members PATCH checks target role below actor', () => {
 
 test('#4 members UI shows only assignable roles', () => {
   const source = readSrc('src/components/dashboard/views/members-panel.tsx')
-  expect(source).toContain('assignablRolesFor')
+  // The role-filtering helper now uses canManageRole from @/lib/authz
+  expect(source).toContain('canManageRole')
+  expect(source).toContain('VALID_ROLES')
   expect(source).toContain('canModifyTarget')
 })
 
