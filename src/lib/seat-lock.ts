@@ -64,7 +64,6 @@ export async function acquireTenantSeatLock(
   tx: Prisma.TransactionClient,
   tenantId: string,
 ): Promise<void> {
-  const t0 = Date.now()
   // Update the OWNER membership row. A PostgreSQL UPDATE takes an
   // exclusive row lock on the matched row(s), held until the enclosing
   // transaction commits/rolls back. Concurrent seat-reserving
@@ -74,12 +73,6 @@ export async function acquireTenantSeatLock(
     where: { tenantId, role: 'owner' },
     data: { updatedAt: new Date() },
   })
-  // TEMPORARY DIAGNOSTIC (remove after the race fix is verified green):
-  // logs the lock wait time so the CI container-log dump proves whether
-  // the second concurrent transaction actually blocked on the lock.
-  console.error(
-    `[seatlock] tenant=${tenantId.slice(-8)} locked=${locked.count} waitMs=${Date.now() - t0} at=${new Date().toISOString()}`,
-  )
   if (locked.count === 0) {
     // Every tenant has an owner membership — missing means data
     // corruption. Fail loudly rather than proceeding unsynchronized.

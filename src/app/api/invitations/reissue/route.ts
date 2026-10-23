@@ -133,19 +133,15 @@ export async function POST(req: NextRequest) {
         orderBy: { createdAt: 'desc' },
       })
       let planSlug = sub?.plan?.slug
-      let tenantPlanRead: string | null | undefined = 'NOT_READ'
       if (!planSlug) {
         const t = await tx.tenant.findUnique({
           where: { id: tid },
           select: { plan: true },
         })
-        tenantPlanRead = t?.plan ?? null
-        planSlug = tenantPlanRead ?? 'free'
+        planSlug = t?.plan ?? 'free'
       }
       const plan = getPlan(planSlug) ?? getPlan('free')!
       const limitValue = plan.limits.agents
-      // TEMPORARY DIAGNOSTIC (remove after verification):
-      console.error(`[reissueTx] tenant=${tid.slice(-8)} usage=${usage} active=${activeCount} pending=${pendingCount} hasSub=${!!sub} tenantPlanRead=${tenantPlanRead} planSlug=${planSlug} limit=${limitValue} willThrow=${limitValue !== -1 && usage >= limitValue} at=${new Date().toISOString()}`)
       if (limitValue !== -1 && usage >= limitValue) {
         // The new pending invitation would exceed the cap. Throw to
         // roll back the transaction (the claim is undone — the row
@@ -178,8 +174,6 @@ export async function POST(req: NextRequest) {
       // transaction back (lock released, claim undone — the row reverts to
       // 'revoked', safely reissuable). Convert to the planLimit response
       // (402).
-      // TEMPORARY DIAGNOSTIC (remove after verification):
-      console.error(`[reissueCatch] tenant=${tid.slice(-8)} name=${(e as any)?.name ?? 'unknown'} isPlanLimit=${e instanceof PlanLimitExceededError} msg=${String((e as any)?.message ?? '').slice(0, 120)} at=${new Date().toISOString()}`)
       if (e instanceof PlanLimitExceededError) {
         return { planLimit: e.result } as const
       }
@@ -219,6 +213,23 @@ export async function POST(req: NextRequest) {
   if (!result) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
   if ('forbidden' in result.result) {
     return NextResponse.json({ error: 'forbidden' }, { status: 403 })
+  }
+  if ('planLimit' in result.result) {
+    // Capacity-exceeded (serialized loser) → 402. THIS BRANCH WAS MISSING —
+    // the { planLimit } result previously fell through every branch to
+    // `return { invitation: undefined }` → HTTP 200 with an empty body
+    // (the phantom 200 observed by the D7 concurrent-reissue test).
+    const r = result.result as { planLimit: { current: number; limit: number; planSlug: string } }
+    return NextResponse.json(
+      {
+        error: 'plan_limit_exceeded',
+        limit: 'agents',
+        current: r.planLimit.current,
+        max: r.planLimit.limit,
+        plan: r.planLimit.planSlug,
+      },
+      { status: 402 },
+    )
   }
   if ('raced' in result.result) {
     // Deterministic race response — a concurrent reissue already claimed
