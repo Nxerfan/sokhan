@@ -85,7 +85,9 @@ export async function POST(req: NextRequest) {
     // Single transaction: conditional claim + transactional plan-capacity
     // re-check + new pending creation. The conditional claim's count
     // determines the winner (BLOCKER 1).
-    const txResult = await db.$transaction(async (tx) => {
+    let txResult: { raced: boolean; newId: string | null }
+    try {
+    txResult = await db.$transaction(async (tx) => {
       // (0) Acquire the per-tenant seat-capacity serialization lock
       // (FINAL BLOCKER fix). PostgreSQL `SELECT ... FOR UPDATE` on the
       // Tenant row — serializes ALL seat-increasing transactions for
@@ -167,6 +169,17 @@ export async function POST(req: NextRequest) {
       })
       return { raced: false as const, newId: created.id as string | null }
     })
+    } catch (e) {
+      // Capacity-exceeded: the throw inside the transaction rolls the WHOLE
+      // transaction back (lock released, claim undone — the row reverts to
+      // 'revoked', safely reissuable). Convert to the planLimit response
+      // (402) — previously this threw unhandled → 500 (latent bug found by
+      // the D7 concurrent-reissue behavioral test).
+      if (e instanceof PlanLimitExceededError) {
+        return { planLimit: e.result } as const
+      }
+      throw e
+    }
 
     if (txResult.raced) {
       return { raced: true as const } as const
