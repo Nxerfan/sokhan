@@ -127,23 +127,25 @@ export async function POST(req: NextRequest) {
         }),
       ])
       const usage = activeCount + pendingCount
-      // TEMPORARY DIAGNOSTIC (remove after verification):
-      console.error(`[reissueTx] tenant=${tid.slice(-8)} usage=${usage} active=${activeCount} pending=${pendingCount} at=${new Date().toISOString()}`)
       const sub = await tx.subscription.findFirst({
         where: { status: 'active' },
         include: { plan: { select: { slug: true } } },
         orderBy: { createdAt: 'desc' },
       })
       let planSlug = sub?.plan?.slug
+      let tenantPlanRead: string | null | undefined = 'NOT_READ'
       if (!planSlug) {
         const t = await tx.tenant.findUnique({
           where: { id: tid },
           select: { plan: true },
         })
-        planSlug = t?.plan ?? 'free'
+        tenantPlanRead = t?.plan ?? null
+        planSlug = tenantPlanRead ?? 'free'
       }
       const plan = getPlan(planSlug) ?? getPlan('free')!
       const limitValue = plan.limits.agents
+      // TEMPORARY DIAGNOSTIC (remove after verification):
+      console.error(`[reissueTx] tenant=${tid.slice(-8)} usage=${usage} active=${activeCount} pending=${pendingCount} hasSub=${!!sub} tenantPlanRead=${tenantPlanRead} planSlug=${planSlug} limit=${limitValue} willThrow=${limitValue !== -1 && usage >= limitValue} at=${new Date().toISOString()}`)
       if (limitValue !== -1 && usage >= limitValue) {
         // The new pending invitation would exceed the cap. Throw to
         // roll back the transaction (the claim is undone — the row
@@ -175,8 +177,9 @@ export async function POST(req: NextRequest) {
       // Capacity-exceeded: the throw inside the transaction rolls the WHOLE
       // transaction back (lock released, claim undone — the row reverts to
       // 'revoked', safely reissuable). Convert to the planLimit response
-      // (402) — previously this threw unhandled → 500 (latent bug found by
-      // the D7 concurrent-reissue behavioral test).
+      // (402).
+      // TEMPORARY DIAGNOSTIC (remove after verification):
+      console.error(`[reissueCatch] tenant=${tid.slice(-8)} name=${(e as any)?.name ?? 'unknown'} isPlanLimit=${e instanceof PlanLimitExceededError} msg=${String((e as any)?.message ?? '').slice(0, 120)} at=${new Date().toISOString()}`)
       if (e instanceof PlanLimitExceededError) {
         return { planLimit: e.result } as const
       }
