@@ -1,5 +1,31 @@
 name: Publish NPM Package
 
+# ─────────────────────────────────────────────────────────────────────
+# sukhan-widget NPM publication workflow.
+#
+# Triggers:
+#   - GitHub Release (tag) publication  → real publish (if version is new)
+#   - Manual workflow_dispatch          → dry-run by default (pack + verify only)
+#
+# A normal PR or branch push NEVER publishes — this workflow is not in
+# the pull_request/push trigger set. Publication is tied to an
+# intentional release operation (GitHub Release/tag) or an explicit
+# manual dispatch with dry_run=false.
+#
+# Publication path (bootstrap):
+#   This workflow currently uses the NPM_TOKEN GitHub Actions secret
+#   (NODE_AUTH_TOKEN env) for the one-time bootstrap publication of
+#   sukhan-widget@1.0.0. The owner must create this secret externally.
+#
+# Target path (npm Trusted Publishing, OIDC, tokenless):
+#   After the first public version exists, the long-term publishing path
+#   migrates to npm Trusted Publishing. The job-level
+#   `permissions: id-token: write` below is already set so the workflow
+#   is OIDC-ready. The migration steps are documented at the bottom of
+#   this file and in PR #12. Do NOT remove NPM_TOKEN before the first
+#   publication succeeds.
+# ─────────────────────────────────────────────────────────────────────
+
 on:
   release:
     types: [published]
@@ -14,6 +40,14 @@ on:
           - 'true'
           - 'false'
 
+# Trusted-Publishing-ready permissions. `id-token: write` is required
+# for npm provenance / Trusted Publishing (OIDC). `contents: read` is
+# required for checkout. These are also the minimum permissions for the
+# bootstrap (token) path.
+permissions:
+  contents: read
+  id-token: write
+
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -23,9 +57,12 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
 
-      - name: Setup Node.js (for npm publish)
+      - name: Setup Node.js (for npm publish, Trusted-Publishing-ready)
         uses: actions/setup-node@v4
         with:
+          # Node 20 LTS ships npm 10, which satisfies npm Trusted
+          # Publishing (OIDC) requirements. Pinning for stability.
+          node-version: '20'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Install dependencies
@@ -36,6 +73,13 @@ jobs:
           cd packages/widget-npm
           bun run clean
           bun run build
+
+      - name: Assert build artifacts (dist/index.js + dist/index.d.ts)
+        run: |
+          cd packages/widget-npm
+          test -f dist/index.js   || { echo "::error::dist/index.js missing after build"; exit 1; }
+          test -f dist/index.d.ts || { echo "::error::dist/index.d.ts missing after build"; exit 1; }
+          echo "dist/index.js and dist/index.d.ts present."
 
       - name: Verify package contents (npm pack --dry-run)
         run: |
@@ -48,24 +92,106 @@ jobs:
           npm pack
           echo "TARBALL=$(ls sukhan-widget-*.tgz)" >> $GITHUB_ENV
 
-      - name: Clean-consumer install + import test
+      - name: Verify tarball contents (no secrets/config/db files)
+        run: |
+          cd packages/widget-npm
+          echo "=== Tarball contents ==="
+          tar -tzf "$TARBALL"
+          echo "=== Forbidden-file scan ==="
+          # The published tarball must contain ONLY intended package
+          # files (dist + package.json + README). No source, secrets,
+          # database, prisma, docker, or repo config may leak.
+          FORBIDDEN=$(tar -tzf "$TARBALL" | grep -E '\.env$|\.env\.|/prisma/|\.git/|database|schema\.prisma|migrate|\.secret|\.key$|\.pem$|\.pfx$|next\.config|tsconfig|docker-compose|Dockerfile|Caddyfile|vercel|\.github/|/src/|\.test\.' || true)
+          if [ -n "$FORBIDDEN" ]; then
+            echo "::error::Tarball contains forbidden files:"
+            echo "$FORBIDDEN"
+            exit 1
+          fi
+          echo "=== Required-file presence ==="
+          tar -tzf "$TARBALL" | grep -q 'dist/index\.js$'   || { echo "::error::dist/index.js missing from tarball"; exit 1; }
+          tar -tzf "$TARBALL" | grep -q 'dist/index\.d\.ts$' || { echo "::error::dist/index.d.ts missing from tarball"; exit 1; }
+          echo "Tarball contents verified: only intended package files; dist/index.js + dist/index.d.ts present."
+
+      - name: Clean npm consumer install + ESM import + SSR-safe
         run: |
           mkdir -p /tmp/npm-consumer
           cd /tmp/npm-consumer
           npm init -y
           npm install /home/runner/work/sokhan/sokhan/packages/widget-npm/$TARBALL
-          node -e "import('sukhan-widget').then(m => { if (typeof m.initSukhan !== 'function') throw new Error('initSukhan not exported'); console.log('import OK'); })" || \
-          node --input-type=module -e "import { initSukhan } from 'sukhan-widget'; if (typeof initSukhan !== 'function') throw new Error('initSukhan not exported'); console.log('import OK');"
+          # ESM import + initSukhan export
+          node --input-type=module -e "import { initSukhan } from 'sukhan-widget'; if (typeof initSukhan !== 'function') throw new Error('initSukhan not exported'); console.log('npm ESM import OK');"
+          # SSR-safe: importing in a server environment (no window/document) must not crash
+          node --input-type=module -e "import 'sukhan-widget'; console.log('npm SSR import OK (no crash)');"
+          # initSukhan correctly rejects a missing API key (no silent failure)
+          node --input-type=module -e "import { initSukhan } from 'sukhan-widget'; try { initSukhan(); throw new Error('should have thrown for missing key'); } catch (e) { if (!/no API key/i.test(e.message)) throw e; console.log('initSukhan missing-key rejection OK'); }"
 
-      - name: Bun clean-consumer install + import test
+      - name: Bun clean-consumer install + ESM import + SSR-safe
         run: |
           mkdir -p /tmp/bun-consumer
           cd /tmp/bun-consumer
           echo '{"name":"bun-consumer"}' > package.json
           bun add /home/runner/work/sokhan/sokhan/packages/widget-npm/$TARBALL
-          bun -e "import { initSukhan } from 'sukhan-widget'; if (typeof initSukhan !== 'function') throw new Error('initSukhan not exported'); console.log('bun import OK');"
+          bun -e "import { initSukhan } from 'sukhan-widget'; if (typeof initSukhan !== 'function') throw new Error('initSukhan not exported'); console.log('bun ESM import OK');"
+          bun -e "import 'sukhan-widget'; console.log('bun SSR import OK (no crash)';"
 
-      - name: Publish to npm (non-dry-run only)
+      - name: Verify version/tag consistency (release trigger)
+        if: ${{ github.event_name == 'release' }}
+        run: |
+          PKG_VERSION=$(node -p "require('./packages/widget-npm/package.json').version")
+          TAG="${{ github.event.release.tag_name }}"
+          EXPECTED_TAG="v${PKG_VERSION}"
+          echo "Package version: ${PKG_VERSION}"
+          echo "Release tag:     ${TAG}"
+          echo "Expected tag:    ${EXPECTED_TAG}"
+          if [ -z "$TAG" ]; then
+            echo "::error::Release trigger has no tag_name — refusing to publish."
+            exit 1
+          fi
+          if [ "$TAG" != "$EXPECTED_TAG" ]; then
+            echo "::error::Tag/version mismatch. Release tag '${TAG}' does not match expected 'v${PKG_VERSION}'."
+            echo "The git tag must equal 'v' + the package version (e.g. package 1.0.0 ↔ tag v1.0.0)."
+            echo "Version changes belong in reviewed commits — the workflow does not bump versions."
+            exit 1
+          fi
+          echo "Tag/version consistent."
+
+      - name: Verify version not already published (immutability)
+        run: |
+          PKG_VERSION=$(node -p "require('./packages/widget-npm/package.json').version")
+          echo "Checking if sukhan-widget@${PKG_VERSION} already exists on the public npm registry..."
+          if npm view "sukhan-widget@${PKG_VERSION}" version >/dev/null 2>&1; then
+            echo "::error::sukhan-widget@${PKG_VERSION} already exists on the public npm registry."
+            echo "npm versions are immutable and cannot be overwritten."
+            echo "Bump the version in packages/widget-npm/package.json in a reviewed commit before publishing."
+            exit 1
+          fi
+          echo "sukhan-widget@${PKG_VERSION} is not yet published — safe to publish."
+
+      # ─── Publication (bootstrap, NPM_TOKEN) ───────────────────────
+      # This step is the bootstrap publication path. It uses the
+      # NPM_TOKEN GitHub Actions secret. After npm Trusted Publishing is
+      # configured by the owner (see migration notes at the bottom of
+      # this file), this step is replaced by the tokenless OIDC path.
+      - name: Verify publication credential configured (non-dry-run only)
+        if: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == 'false') }}
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NPM_TOKEN" ]; then
+            echo "::error::NPM_TOKEN GitHub Actions secret is not configured."
+            echo "Cannot publish sukhan-widget — no credential available."
+            echo "The repository owner must:"
+            echo "  1. Sign in to npmjs.com with the intended publisher account."
+            echo "  2. Ensure account 2FA is enabled."
+            echo "  3. Create a minimum-scope granular publish token for sukhan-widget."
+            echo "  4. Store it ONLY as the GitHub Actions secret NPM_TOKEN."
+            echo "  5. Re-trigger this workflow with dry_run=false (or publish a GitHub Release)."
+            echo "The token is never printed or committed. This workflow fails closed when no credential is configured."
+            exit 1
+          fi
+          echo "NPM_TOKEN is configured — bootstrap publication can proceed."
+
+      - name: Publish to npm (bootstrap, non-dry-run only)
         if: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == 'false') }}
         run: |
           cd packages/widget-npm
@@ -73,8 +199,68 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      - name: PUBLICATION READY — EXTERNAL NPM OWNER ACTION REQUIRED
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == 'true' }}
+        run: |
+          PKG_VERSION=$(node -p "require('./packages/widget-npm/package.json').version")
+          echo "============================================================"
+          echo "  PUBLICATION READY — EXTERNAL NPM OWNER ACTION REQUIRED"
+          echo "============================================================"
+          echo ""
+          echo "sukhan-widget@${PKG_VERSION} passed all pre-publish verification:"
+          echo "  - build succeeded (dist/index.js + dist/index.d.ts)"
+          echo "  - npm pack --dry-run succeeded"
+          echo "  - real tarball produced (contents verified, no secrets/db/config)"
+          echo "  - clean npm consumer install + ESM import + SSR-safe import OK"
+          echo "  - clean Bun consumer install + ESM import + SSR-safe import OK"
+          echo "  - version not already published on the public registry"
+          echo ""
+          echo "The package is NOT yet published to npm. To publish ${PKG_VERSION}:"
+          echo ""
+          echo "  1. Sign in to npmjs.com with the intended publisher account."
+          echo "  2. Ensure account 2FA is enabled."
+          echo "  3. Confirm the unscoped name 'sukhan-widget' can be published by that account."
+          echo "  4. Create a minimum-scope granular publish token for sukhan-widget."
+          echo "  5. Store it ONLY as the GitHub Actions secret 'NPM_TOKEN'."
+          echo "  6. Trigger this workflow with dry_run=false (or publish a GitHub Release tagged v${PKG_VERSION})."
+          echo "  7. Never expose the token in logs/chat/source."
+          echo ""
+          echo "After publication, run the 'Verify NPM Release' workflow to confirm"
+          echo "registry-backed installation works (npm + Bun, clean consumers)."
+
       - name: Dry-run notice
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == 'true' }}
         run: |
           echo "DRY RUN — package was packed + verified but NOT published."
-          echo "To publish, re-run this workflow with dry_run=false."
+          echo "To publish, re-run this workflow with dry_run=false (or publish a GitHub Release)."
+
+# ─────────────────────────────────────────────────────────────────────
+# MIGRATION: npm Trusted Publishing (OIDC, tokenless) — TARGET STATE
+# ─────────────────────────────────────────────────────────────────────
+# After sukhan-widget@1.0.0 is publicly published and verified:
+#
+# 1. The owner configures a Trusted Publisher on npmjs.com for:
+#      GitHub user/org:  Nxerfan
+#      Repository:       sokhan
+#      Workflow filename: publish-npm.yml
+#      (Environment: optional, e.g. "release")
+#
+# 2. In this file, the "Publish to npm (bootstrap)" step is replaced:
+#
+#      - name: Publish to npm (Trusted Publishing, OIDC)
+#        if: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == 'false') }}
+#        run: |
+#          cd packages/widget-npm
+#          npm publish --provenance --access public
+#        # NO NODE_AUTH_TOKEN — npm Trusted Publishing uses OIDC.
+#
+#    and the "Verify publication credential configured" step is removed
+#    (no token to check). The `id-token: write` permission above is
+#    already present.
+#
+# 3. The owner revokes the long-lived NPM_TOKEN GitHub Actions secret
+#    (do NOT revoke it yourself — the owner performs external cleanup).
+#
+# Do NOT remove NPM_TOKEN before the first publication succeeds and the
+# npm-side Trusted Publisher configuration is complete.
+# ─────────────────────────────────────────────────────────────────────
