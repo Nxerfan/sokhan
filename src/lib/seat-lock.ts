@@ -3,9 +3,9 @@ import type { Prisma } from '@prisma/client'
 /**
  * Per-tenant seat-capacity serialization lock — FINAL BLOCKER fix.
  *
- * PostgreSQL row-level lock (`SELECT ... FOR UPDATE`) on the Tenant row,
- * acquired INSIDE a `db.$transaction` BEFORE reading seat usage. While
- * the lock is held, the transaction:
+ * Takes an exclusive PostgreSQL ROW LOCK on the Tenant row, INSIDE the
+ * enclosing `db.$transaction`, BEFORE reading seat usage. While the lock
+ * is held, the transaction:
  *   1. resolves the effective plan
  *   2. counts active memberships
  *   3. counts unexpired pending invitations
@@ -24,6 +24,25 @@ import type { Prisma } from '@prisma/client'
  * — they both block on the same Tenant row, so the second transaction's
  * capacity count sees the first one's committed write.
  *
+ * IMPLEMENTATION — model UPDATE, NOT $queryRaw
+ * --------------------------------------------
+ * The lock is taken via a model operation `tx.tenant.update(...)`, NOT a
+ * raw `SELECT ... FOR UPDATE` via `$queryRaw`. Reason: raw queries on an
+ * extended client's interactive transaction are NOT guaranteed to run on
+ * the transaction's connection (observed in CI: the FOR UPDATE lock was
+ * taken on a SEPARATE connection and released immediately — providing
+ * zero serialization; the D7 concurrent-reissue behavioral test caught
+ * it with a 200,200 overbooking outcome). Model operations on the
+ * extended transaction client ARE guaranteed to run on the transaction
+ * connection (proven by the existing claim+create atomicity in the
+ * reissue transaction). A PostgreSQL UPDATE takes an exclusive row lock
+ * on the updated row, held until the transaction commits/rolls back —
+ * a concurrent `tx.tenant.update` on the same row BLOCKS until then.
+ * This is the standard "dummy update" row-lock idiom.
+ *
+ * The only side effect is bumping `tenant.updatedAt` (bookkeeping) —
+ * semantically harmless.
+ *
  * DATABASE-BACKED + CROSS-INSTANCE SAFE
  * -------------------------------------
  * The lock is a PostgreSQL row lock, NOT an application-process mutex.
@@ -41,7 +60,6 @@ import type { Prisma } from '@prisma/client'
  *     // ... serialized capacity count + seat-increasing write ...
  *   })
  *
- * The lock is held until the transaction commits or rolls back.
  * Deadlock-free: this is the ONLY row lock taken first in these
  * transactions, and no other transaction locks Tenant after locking
  * Invitation/Membership rows (single lock ordering).
@@ -50,17 +68,14 @@ export async function acquireTenantSeatLock(
   tx: Prisma.TransactionClient,
   tenantId: string,
 ): Promise<void> {
-  // FOR UPDATE takes an exclusive row lock on the Tenant row, held until
-  // the enclosing transaction commits/rolls back. Concurrent transactions
-  // executing this statement for the same tenant BLOCK here.
-  // The interpolated value is a Prisma parameterized value (SQL-injection safe).
-  const locked = await tx.$queryRaw<
-    Array<{ id: string }>
-  >`SELECT id FROM "Tenant" WHERE id = ${tenantId} FOR UPDATE`
-  if (!locked || locked.length === 0) {
-    // The tenant row must exist (we are inside an authenticated tenant
-    // context). If it does not, fail loudly rather than proceeding
-    // unsynchronized.
-    throw new Error('seat-lock: tenant row not found for seat reservation')
-  }
+  // A no-op data UPDATE on the Tenant row takes an exclusive PostgreSQL
+  // row lock, held until the enclosing transaction commits/rolls back.
+  // Concurrent seat-reserving transactions for the same tenant BLOCK on
+  // this UPDATE — the capacity count below is then serialized. If the
+  // tenant row does not exist, update throws P2025 (fail loudly rather
+  // than proceeding unsynchronized).
+  await tx.tenant.update({
+    where: { id: tenantId },
+    data: { updatedAt: new Date() },
+  })
 }
