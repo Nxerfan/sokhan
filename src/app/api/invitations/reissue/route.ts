@@ -127,6 +127,8 @@ export async function POST(req: NextRequest) {
         }),
       ])
       const usage = activeCount + pendingCount
+      // TEMPORARY DIAGNOSTIC (remove after verification):
+      console.error(`[reissueTx] tenant=${tid.slice(-8)} usage=${usage} active=${activeCount} pending=${pendingCount} at=${new Date().toISOString()}`)
       const sub = await tx.subscription.findFirst({
         where: { status: 'active' },
         include: { plan: { select: { slug: true } } },
