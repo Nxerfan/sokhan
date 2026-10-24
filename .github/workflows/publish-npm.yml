@@ -14,25 +14,40 @@ name: Publish NPM Package
 # A normal PR or branch push NEVER publishes — this workflow is not in
 # the pull_request/push trigger set.
 #
-# Publication path (bootstrap):
-#   This workflow currently uses the NPM_TOKEN GitHub Actions secret
-#   (NODE_AUTH_TOKEN env) for the one-time bootstrap publication of
-#   sukhan-widget. The owner must create this secret externally. This
-#   is a TEMPORARY bootstrap path — remove/revoke it ONLY AFTER npm
-#   Trusted Publishing is actually configured and proven.
+# First-publication bootstrap (external npm operator action):
+#   PREFERRED — interactive local first publication with npm account 2FA:
+#       npm login
+#       cd packages/widget-npm
+#       npm publish --access public
+#     The owner performs any required interactive 2FA challenge. No
+#     credentials are automated for this path.
+#   OPTIONAL CI bootstrap — ONLY if the owner deliberately wants the first
+#     publication through GitHub Actions: a temporary Granular Access Token
+#     (GAT) supported by the current npm account state, with the minimum
+#     practical write permission and the shortest practical expiration,
+#     using Bypass 2FA ONLY if required for non-interactive publishing,
+#     stored ONLY as the GitHub Actions secret NPM_TOKEN, never printed
+#     or committed, and revoked AFTER Trusted Publishing is proven.
+#     NOTE: npm may not be able to scope a GAT specifically to the
+#     unpublished package before the package exists — if so, the owner
+#     uses the interactive path instead. Direct publishing via bypass-2FA
+#     granular tokens is being deprecated, so CI bootstrap is strictly a
+#     temporary mechanism.
+#
+# Trusted Publishing runtime requirements (ACTUAL minimum):
+#   Node >= 22.14.0 AND npm >= 11.5.1 (full semver, enforced below).
+#   npm supports only Granular Access Tokens (GAT) for publish
+#   automation; this workflow uses a GAT for the optional CI bootstrap
+#   path only (never a long-lived token).
 #
 # Target path (npm Trusted Publishing, OIDC, tokenless):
 #   After the first public version exists AND the owner has configured
 #   the npm-side Trusted Publisher, the long-term publishing path migrates
 #   to npm Trusted Publishing (OIDC). The job-level
-#   `permissions: id-token: write` below is already set so the workflow
-#   is OIDC-ready. The migration steps are documented at the bottom of
-#   this file. Do NOT remove NPM_TOKEN before the first publication
-#   succeeds and the npm-side Trusted Publisher configuration is complete.
-#
-# Trusted Publishing runtime requirements (CURRENT, not Node 20/npm 10):
-#   Node 24 + npm 11 (installed/validated explicitly below). Do NOT
-#   assume the bundled npm version — it is checked and upgraded if needed.
+#   `permissions: id-token: write` below is already set. The migration
+#   steps are documented at the bottom of this file. Do NOT remove the
+#   NPM_TOKEN bootstrap path before the first publication succeeds and the
+#   npm-side Trusted Publisher configuration is complete.
 # ─────────────────────────────────────────────────────────────────────
 
 on:
@@ -76,23 +91,47 @@ jobs:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Verify Node + npm versions (Trusted Publishing minimum)
+      - name: Verify Node + npm satisfy Trusted Publishing minimum (full semver)
         run: |
-          echo "node: $(node --version)"
-          echo "npm (bundled): $(npm --version)"
-          NPM_MAJOR=$(npm --version | cut -d. -f1)
-          if [ "$NPM_MAJOR" -lt 11 ]; then
-            echo "Bundled npm $(npm --version) is below the npm Trusted Publishing minimum (npm 11)."
-            echo "Explicitly installing npm 11."
-            npm install -g npm@11
-            echo "npm (installed): $(npm --version)"
-            NPM_MAJOR=$(npm --version | cut -d. -f1)
-          fi
-          if [ "$NPM_MAJOR" -lt 11 ]; then
-            echo "::error::npm ${NPM_MAJOR}.x does not satisfy npm Trusted Publishing (requires npm >= 11)."
+          # npm Trusted Publishing actual minimum: Node >= 22.14.0 AND
+          # npm >= 11.5.1. Enforce full semver (major.minor.patch), NOT
+          # just the major version. Dependency-free comparison via Node.
+          NODE_MIN="22.14.0"
+          NPM_MIN="11.5.1"
+          NODE_VER=$(node --version)   # e.g. v24.21.0
+          NPM_VER=$(npm --version)     # e.g. 11.19.0
+          echo "node: ${NODE_VER}"
+          echo "npm (bundled): ${NPM_VER}"
+
+          # semver_ge CUR MIN: exit 0 if CUR >= MIN, else 1.
+          semver_ge() {
+            node -e "
+              const c=process.argv[1].replace(/^v/,'').split('.').map(Number);
+              const m=process.argv[2].replace(/^v/,'').split('.').map(Number);
+              for(let i=0;i<3;i++){ if(c[i]>m[i])process.exit(0); if(c[i]<m[i])process.exit(1); }
+              process.exit(0);
+            " "$1" "$2"
+          }
+
+          if ! semver_ge "${NODE_VER}" "${NODE_MIN}"; then
+            echo "::error::Node ${NODE_VER} does not satisfy npm Trusted Publishing minimum (Node >= ${NODE_MIN})."
             exit 1
           fi
-          echo "Node $(node --version) + npm $(npm --version) — Trusted-Publishing-ready."
+          echo "Node ${NODE_VER} >= ${NODE_MIN}: PASS"
+
+          if ! semver_ge "${NPM_VER}" "${NPM_MIN}"; then
+            echo "Bundled npm ${NPM_VER} is below the Trusted Publishing minimum (npm >= ${NPM_MIN}). Installing npm@11."
+            npm install -g npm@11
+            NPM_VER=$(npm --version)
+            echo "npm (after install): ${NPM_VER}"
+            # Re-verify the EXACT installed version against the minimum.
+            if ! semver_ge "${NPM_VER}" "${NPM_MIN}"; then
+              echo "::error::npm ${NPM_VER} still does not satisfy npm Trusted Publishing minimum (npm >= ${NPM_MIN})."
+              exit 1
+            fi
+          fi
+          echo "npm ${NPM_VER} >= ${NPM_MIN}: PASS"
+          echo "Node ${NODE_VER} + npm ${NPM_VER} — Trusted-Publishing-ready (actual minimum Node ${NODE_MIN} / npm ${NPM_MIN})."
 
       - name: Install dependencies
         run: bun install
@@ -162,58 +201,63 @@ jobs:
           fi
           echo "Release tag points to a commit contained in main — allowed."
 
-      - name: Verify version not already published (fail-closed registry check)
+      - name: Verify version not already published (fail-closed exact-version check)
         run: |
           PKG_VERSION="${{ steps.pkg.outputs.version }}"
-          REGISTRY="https://registry.npmjs.org/"
-          echo "Querying public registry at ${REGISTRY} for sukhan-widget@${PKG_VERSION} ..."
-          # Distinguish an explicit registry 404 (not published -> continue)
-          # from EVERY other failure (timeout / DNS / TLS / 5xx / auth /
-          # config / unexpected -> FAIL closed). Do not publish if the
-          # registry state cannot be determined confidently.
-          REG_BODY=$(mktemp)
-          HTTP_CODE=$(curl -s -o "$REG_BODY" -w "%{http_code}" --max-time 30 --connect-timeout 10 "${REGISTRY}sukhan-widget" 2>/tmp/reg-err) || {
+          # Query the EXACT package-version endpoint on the public registry.
+          # No JSON parsing — the HTTP code is the sole signal, so a
+          # malformed/empty body cannot be misread as "version absent".
+          # curl does NOT follow redirects by default, so any 3xx is FAIL.
+          URL="https://registry.npmjs.org/sukhan-widget/${PKG_VERSION}"
+          echo "Querying exact-version endpoint: ${URL}"
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 --connect-timeout 10 "${URL}" 2>/tmp/reg-err) || {
             echo "::error::Registry query failed (network/timeout/DNS/TLS)."
             echo "curl stderr: $(cat /tmp/reg-err)"
             echo "Refusing to publish — cannot confidently determine registry state."
-            rm -f "$REG_BODY"
             exit 1
           }
           echo "Registry HTTP response: ${HTTP_CODE}"
           case "$HTTP_CODE" in
             200)
-              # Package exists — check whether our specific version is present.
-              if node -e "const p=JSON.parse(require('fs').readFileSync('$REG_BODY','utf8')); process.exit(p.versions && p.versions['${PKG_VERSION}'] ? 0 : 2)" 2>/dev/null; then
-                echo "::error::sukhan-widget@${PKG_VERSION} already exists on the public npm registry."
-                echo "npm versions are immutable and cannot be overwritten."
-                echo "Bump the version in packages/widget-npm/package.json in a reviewed commit before publishing."
-                rm -f "$REG_BODY"
-                exit 1
-              else
-                echo "Package exists but version ${PKG_VERSION} is not yet published — safe to publish."
-              fi
+              echo "::error::sukhan-widget@${PKG_VERSION} already exists on the public npm registry (HTTP 200 at exact-version endpoint)."
+              echo "npm versions are immutable and cannot be overwritten."
+              echo "Bump the version in packages/widget-npm/package.json in a reviewed commit before publishing."
+              exit 1
               ;;
             404)
-              echo "Package sukhan-widget is not currently published publicly (registry 404)."
-              echo "Version ${PKG_VERSION} is not yet published — safe to publish."
-              echo "NOTE: a 404 proves only that the package is not currently published publicly."
-              echo "Claimability by the intended npm publisher account remains an external operator check."
+              echo "sukhan-widget@${PKG_VERSION} is not currently published publicly (registry 404 at exact-version endpoint)."
+              echo "A 404 proves only that this version/package is not currently published publicly."
+              echo "Claimability by the intended npm account remains an external operator check."
+              ;;
+            301|302|303|307|308)
+              echo "::error::Unexpected registry redirect (HTTP ${HTTP_CODE}). Refusing to publish."
+              exit 1
+              ;;
+            401|403)
+              echo "::error::Registry returned HTTP ${HTTP_CODE} (auth/forbidden). Refusing to publish."
+              exit 1
+              ;;
+            429)
+              echo "::error::Registry returned HTTP 429 (rate limited). Refusing to publish (state uncertain)."
+              exit 1
+              ;;
+            5*)
+              echo "::error::Registry server error (HTTP ${HTTP_CODE}). Refusing to publish."
+              exit 1
               ;;
             *)
-              echo "::error::Unexpected registry response HTTP ${HTTP_CODE}."
-              echo "Response body (first 200 bytes): $(head -c 200 "$REG_BODY")"
-              echo "Refusing to publish — cannot confidently determine registry state."
-              rm -f "$REG_BODY"
+              echo "::error::Unexpected registry response HTTP ${HTTP_CODE}. Refusing to publish — cannot confidently determine registry state."
               exit 1
               ;;
           esac
-          rm -f "$REG_BODY"
 
-      # ─── Bootstrap publication (NPM_TOKEN) ──────────────────────────
-      # This is the TEMPORARY bootstrap publication path. It uses the
-      # NPM_TOKEN GitHub Actions secret. After npm Trusted Publishing is
-      # configured by the owner (see migration notes at the bottom of this
-      # file), this step is replaced by the tokenless OIDC path.
+      # ─── Bootstrap publication (NPM_TOKEN, optional CI path) ────────
+      # The NPM_TOKEN path is the OPTIONAL CI bootstrap. It is a TEMPORARY
+      # GitHub Actions secret holding a Granular Access Token (the only
+      # token type npm supports as of Nov 2025). After npm Trusted
+      # Publishing is configured by the owner (see migration notes at the
+      # bottom of this file), this step is replaced by the tokenless OIDC
+      # path and NPM_TOKEN is revoked.
       - name: Verify publication credential configured (non-dry-run only)
         if: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == 'false') }}
         env:
@@ -221,22 +265,31 @@ jobs:
         run: |
           if [ -z "$NPM_TOKEN" ]; then
             echo "::error::NPM_TOKEN GitHub Actions secret is not configured."
-            echo "Cannot publish sukhan-widget — no credential available."
-            echo "The NPM_TOKEN bootstrap path is a TEMPORARY GitHub Actions secret."
-            echo "The first publication is an external npm operator action:"
-            echo "  1. Sign in to npmjs.com with the intended publisher account."
-            echo "  2. Ensure account 2FA is enabled."
-            echo "  3. Confirm the npm account can publish 'sukhan-widget' — claimability is an external check"
-            echo "     (a registry 404 does not prove the name is claimable by the intended account)."
-            echo "  4. Create the least-privileged practical bootstrap publish credential the account state supports"
-            echo "     (a classic automation token, OR — after the package exists — a package-scoped granular token)."
-            echo "  5. Store it ONLY as the GitHub Actions secret 'NPM_TOKEN'."
-            echo "  6. Trigger this workflow from main with dry_run=false (or publish a GitHub Release tagged v<version>)."
-            echo "  7. Never expose the token in logs/chat/source."
+            echo "Cannot publish sukhan-widget via CI — no credential available."
+            echo ""
+            echo "First publication is an external npm operator action. TWO valid bootstrap paths:"
+            echo ""
+            echo "  PREFERRED — interactive local first publication (npm account 2FA):"
+            echo "    npm login"
+            echo "    cd packages/widget-npm"
+            echo "    npm publish --access public"
+            echo "    (The owner performs any required interactive 2FA challenge. No credentials automated.)"
+            echo ""
+            echo "  OPTIONAL CI bootstrap — only if the owner deliberately wants first publication through GitHub Actions:"
+            echo "    Use a temporary Granular Access Token (GAT) supported by the current npm account state:"
+            echo "      - minimum practical WRITE permission"
+            echo "      - shortest practical expiration"
+            echo "      - Bypass 2FA ONLY if required for non-interactive publishing (being deprecated — temporary)"
+            echo "      - store ONLY as the GitHub Actions secret 'NPM_TOKEN'"
+            echo "      - never printed, never committed"
+            echo "      - revoke AFTER Trusted Publishing is proven"
+            echo "    NOTE: npm may not be able to scope a GAT to the unpublished package before it exists."
+            echo "    If so, use the interactive path instead, then configure Trusted Publishing."
+            echo ""
             echo "Remove/revoke NPM_TOKEN ONLY AFTER npm Trusted Publishing is actually configured and proven."
             exit 1
           fi
-          echo "NPM_TOKEN is configured — bootstrap publication can proceed."
+          echo "NPM_TOKEN is configured — CI bootstrap publication can proceed."
 
       - name: Publish to npm (bootstrap, non-dry-run only)
         if: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == 'false') }}
@@ -261,22 +314,31 @@ jobs:
           echo "  - clean npm consumer install + ESM import + SSR-safe import OK"
           echo "  - clean Bun consumer install + ESM import + SSR-safe import OK"
           echo "  - installed version matches package.json (${PKG_VERSION})"
-          echo "  - registry state checked (fail-closed): not currently published publicly"
+          echo "  - registry exact-version check (fail-closed): not currently published publicly"
           echo "  - Node $(node --version) / npm $(npm --version) — Trusted-Publishing-ready"
           echo ""
           echo "The package is NOT yet published to npm."
-          echo "A registry 404 proves only that the package is not currently published publicly."
-          echo "Claimability by the intended npm publisher account remains an external operator check."
+          echo "The package is not currently published on the public npm registry."
+          echo "Claimability by the intended publisher account remains an external operator check."
           echo ""
-          echo "To publish ${PKG_VERSION}:"
-          echo "  1. Sign in to npmjs.com with the intended publisher account."
-          echo "  2. Ensure account 2FA is enabled."
-          echo "  3. Confirm the npm account can publish 'sukhan-widget' (external claimability check)."
-          echo "  4. Create the least-privileged practical bootstrap publish credential the account state supports"
-          echo "     (classic automation token, or — after the package exists — a package-scoped granular token)."
-          echo "  5. Store it ONLY as the GitHub Actions secret 'NPM_TOKEN'."
-          echo "  6. Trigger this workflow from main with dry_run=false (or publish a GitHub Release tagged v${PKG_VERSION})."
-          echo "  7. Never expose the token in logs/chat/source."
+          echo "First publication is an external npm operator action. TWO valid bootstrap paths:"
+          echo ""
+          echo "  PREFERRED — interactive local first publication (npm account 2FA):"
+          echo "    npm login"
+          echo "    cd packages/widget-npm"
+          echo "    npm publish --access public"
+          echo "    (The owner performs any required interactive 2FA challenge.)"
+          echo ""
+          echo "  OPTIONAL CI bootstrap — only if the owner wants first publication through GitHub Actions:"
+          echo "    Use a temporary Granular Access Token (GAT) supported by the current npm account state:"
+          echo "      - minimum practical WRITE permission"
+          echo "      - shortest practical expiration"
+          echo "      - Bypass 2FA ONLY if required for non-interactive publishing (being deprecated)"
+          echo "      - store ONLY as the GitHub Actions secret 'NPM_TOKEN'"
+          echo "      - never printed, never committed"
+          echo "      - revoke AFTER Trusted Publishing is proven"
+          echo "    NOTE: npm may not be able to scope a GAT to the unpublished package before it exists."
+          echo "    If so, use the interactive path instead, then configure Trusted Publishing."
           echo ""
           echo "After publication, run the 'Verify NPM Release' workflow for registry-backed smoke verification."
 
@@ -308,12 +370,12 @@ jobs:
 #
 #    and the "Verify publication credential configured" step is removed
 #    (no token to check). The `id-token: write` permission above is
-#    already present. Node 24 + npm 11 (validated above) satisfy the
-#    npm Trusted Publishing runtime requirements.
+#    already present. Node >= 22.14.0 + npm >= 11.5.1 (validated above)
+#    satisfy the npm Trusted Publishing runtime requirements.
 #
-# 3. The owner revokes the long-lived NPM_TOKEN GitHub Actions secret
+# 3. The owner revokes the temporary NPM_TOKEN Granular Access Token
 #    (do NOT revoke it yourself — the owner performs external cleanup).
 #
-# Do NOT remove NPM_TOKEN before the first publication succeeds and the
-# npm-side Trusted Publisher configuration is complete.
+# Do NOT remove the NPM_TOKEN bootstrap path before the first publication
+# succeeds and the npm-side Trusted Publisher configuration is complete.
 # ─────────────────────────────────────────────────────────────────────
