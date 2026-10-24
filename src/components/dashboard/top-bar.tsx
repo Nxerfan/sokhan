@@ -78,7 +78,7 @@ export function TopBar({ workspaceName }: { workspaceName: string }) {
               className="text-destructive focus:text-destructive"
             >
               <LogOut className="me-2 h-4 w-4" />
-              {t('auth.login')}
+              {t('auth.signOut')}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>

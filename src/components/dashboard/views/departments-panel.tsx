@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { useTranslations } from 'next-intl'
+import { useTranslations, useLocale } from 'next-intl'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -13,6 +13,7 @@ type Department = { id: string; name: string }
 
 export function DepartmentsPanel() {
   const t = useTranslations('settings')
+  const locale = useLocale()
   const tc = useTranslations('common')
   const [depts, setDepts] = useState<Department[]>([])
   const [name, setName] = useState('')
@@ -49,10 +50,11 @@ export function DepartmentsPanel() {
   async function onDelete(id: string) {
     const res = await fetch(`/api/departments?id=${id}`, { method: 'DELETE' })
     if (!res.ok) {
-      toast.error('Failed')
+      toast.error(locale === 'fa' ? 'حذف ناموفق بود' : 'Failed to delete')
       return
     }
-    toast.success(t('saved'))
+    // Truthful copy: this is a DELETE — say "Deleted", not "Saved".
+    toast.success(locale === 'fa' ? 'حذف شد' : 'Deleted')
     load()
   }
 

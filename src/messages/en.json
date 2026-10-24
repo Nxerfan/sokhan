@@ -67,7 +67,8 @@
     "invalidCredentials": "Invalid email or password",
     "emailTaken": "This email is already registered",
     "slugTaken": "This workspace URL is taken",
-    "demoNote": "Demo: create a workspace to get started instantly — no card required."
+    "demoNote": "Demo: create a workspace to get started instantly — no card required.",
+    "signOut": "Sign out"
   },
   "dashboard": {
     "greeting": "Welcome, {name}",
@@ -80,7 +81,10 @@
     "noConversationsHint": "Embed your widget to start chatting with visitors.",
     "comingSoon": "Coming Soon",
     "comingSoonHint": "Integrations will be added soon. Real-time messaging and automation are already live.",
-    "integrationsHint": "Integrations will be coming soon."
+    "integrationsHint": "Integrations will be coming soon.",
+    "typing": "typing…",
+    "replyPlaceholder": "Type your reply…",
+    "statusChangeFailed": "Failed to change status"
   },
   "settings": {
     "generalTitle": "General",

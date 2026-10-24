@@ -51,7 +51,11 @@ export function WebsitesPanel() {
   }
 
   async function deleteDomain(id: string) {
-    await fetch(`/api/widget-domains?id=${id}`, { method: 'DELETE' })
+    const res = await fetch(`/api/widget-domains?id=${id}`, { method: 'DELETE' })
+    if (!res.ok) {
+      toast.error(locale === 'fa' ? 'حذف ناموفق بود' : 'Failed to delete')
+      return
+    }
     toast.success(locale === 'fa' ? 'حذف شد' : 'Deleted')
     load()
   }
