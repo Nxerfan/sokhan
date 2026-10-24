@@ -173,7 +173,11 @@ function buildScript(socketUrlOverride: string | null, isVercel: boolean): strin
     state.locale = config.defaultLocale === 'en' ? 'en' : 'fa';
     state.dir = config.defaultDirection === 'ltr' ? 'ltr' : 'rtl';
     var accent = config.accentColor || '#E09A2B';
-    var pos = config.position || 'bottom-start';
+    // CUST-C: canonical product default is 'bottom-end' (matches the
+    // signup-created rows, free-lock effective config, PATCH fallback,
+    // and the slug script runtime). Stored explicit positions are
+    // never rewritten — this fallback only fires on a missing field.
+    var pos = config.position || 'bottom-end';
     var side = pos === 'bottom-start' ? 'left' : 'right';
     if (state.dir === 'rtl') side = pos === 'bottom-start' ? 'right' : 'left';
 
@@ -212,6 +216,14 @@ function buildScript(socketUrlOverride: string | null, isVercel: boolean): strin
     });
     panel.style[side] = '0';
 
+    // Safe image URL check (CUST-B): only absolute http(s) URLs are ever
+    // assigned to img.src. The backend validates these too — this is
+    // defense-in-depth at the runtime boundary.
+    function safeImg(u){
+      if (typeof u !== 'string' || u.length > 500 || !/^https?:\/\//i.test(u)) return null;
+      try { new URL(u); return u; } catch (e) { return null; }
+    }
+
     // Header
     var header = el('div', 'sk-header');
     css(header, { display:'flex', alignItems:'center', gap:'10px', padding:'12px 16px', color:'#fff', background:accent, flexShrink:'0' });
@@ -226,6 +238,30 @@ function buildScript(socketUrlOverride: string | null, isVercel: boolean): strin
     css(closeBtn, { background:'none', border:'none', color:'#fff', fontSize:'20px', cursor:'pointer', padding:'0', lineHeight:'1' });
     closeBtn.onclick = toggle;
     header.appendChild(logo); header.appendChild(titleText); header.appendChild(closeBtn);
+    // CUST-B: render the configured logo/avatar when they are SAFE image
+    // URLs. DOM APIs only (createElement + .src property) — never
+    // innerHTML with tenant-controlled content. The default SVG logo
+    // stays until a custom logo actually loads; a broken avatar image
+    // is removed on error.
+    var logoImgSrc = safeImg(config.logoUrl);
+    if (logoImgSrc) {
+      var limg = document.createElement('img');
+      limg.alt = ''; limg.referrerPolicy = 'no-referrer';
+      css(limg, { width: '100%', height: '100%', objectFit: 'cover', borderRadius: '50%', display: 'none' });
+      limg.onload = function(){ logo.innerHTML = ''; limg.style.display = 'block'; logo.appendChild(limg); };
+      limg.src = logoImgSrc;
+    }
+    var avatarSrc = safeImg(config.avatarUrl);
+    if (avatarSrc) {
+      var av = document.createElement('img');
+      av.alt = state.locale === 'fa' ? 'کارشناس' : 'Agent';
+      av.referrerPolicy = 'no-referrer';
+      css(av, { width: '28px', height: '28px', borderRadius: '50%', objectFit: 'cover', flexShrink: '0' });
+      av.onerror = function(){ if (av.parentNode) av.parentNode.removeChild(av); };
+      av.src = avatarSrc;
+      header.insertBefore(av, titleText);
+    }
+
 
     // Messages area
     bodyEl = el('div', 'sk-body');
@@ -270,8 +306,11 @@ function buildScript(socketUrlOverride: string | null, isVercel: boolean): strin
 
     panel.appendChild(header); panel.appendChild(bodyEl);
 
-    // Free-plan "Powered by" badge
-    if (!config.plan || config.plan === 'free') {
+    // Free-plan "Powered by" badge (CUST-F): the old condition
+    // (!config.plan || config.plan === 'free') was ALWAYS true — the
+    // backend never sends `plan`; it sends the effective-config flags
+    // `poweredBy`/`isLocked`. Render the badge only when poweredBy:true.
+    if (config.poweredBy) {
       var badge = el('a', 'sk-powered');
       badge.href = 'https://sukhan.chat';
       badge.target = '_blank';

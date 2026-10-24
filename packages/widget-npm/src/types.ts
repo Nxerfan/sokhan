@@ -19,7 +19,14 @@ export interface WidgetConfig {
   greetingTexts: Record<string, string>
   defaultLocale: string
   defaultDirection: 'rtl' | 'ltr'
-  plan?: 'free' | 'pro' | 'business' | 'enterprise'
+  /**
+   * Backend-supplied plan-lock flags (effective config). true when
+   * the tenant's plan does not include customization (free plan) —
+   * the widget then renders the "Powered by Sukhan" badge. The old
+   * `plan` enum was stale: the backend never sends it.
+   */
+  isLocked?: boolean
+  poweredBy?: boolean
   /**
    * Backend-supplied realtime endpoint config (additive field). The widget
    * uses this as the PRIMARY runtime source. Older backends omit the
