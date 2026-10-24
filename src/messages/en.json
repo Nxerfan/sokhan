@@ -153,7 +153,9 @@
     "switchFailed": "Failed to switch workspace. Please try again.",
     "pendingInvitations": "Pending invitations",
     "accept": "Accept",
-    "checkEmailForInvite": "Accept through the invitation link emailed to you."
+    "checkEmailForInvite": "Accept through the invitation link emailed to you.",
+    "customizationLocked": "Customization is locked on your current plan",
+    "customizationLockedHint": "Your workspace uses the Sukhan brand look. Upgrade to a paid plan to customize the widget appearance."
   },
   "invite": {
     "title": "Join {workspace}",
