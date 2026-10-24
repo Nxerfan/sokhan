@@ -1,0 +1,141 @@
+name: Verify NPM Release
+
+# ─────────────────────────────────────────────────────────────────────
+# Registry release smoke verification for sukhan-widget.
+#
+# Validates an ALREADY-PUBLISHED version from the PUBLIC npm registry
+# (not a local tarball). Safe to run independently after publication.
+#
+# Trigger: manual workflow_dispatch with a version input (default 1.0.0).
+#
+# This workflow NEVER publishes. It only reads from the public registry
+# and verifies a clean consumer can install + import the published
+# artifact. Fails if the registry artifact differs from the expected
+# version, or if initSukhan is not exported, or if SSR import crashes.
+# ─────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Exact published version to verify (e.g. 1.0.0)'
+        required: true
+        default: '1.0.0'
+
+permissions:
+  contents: read
+
+jobs:
+  verify-registry:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Resolve expected version
+        id: versions
+        run: |
+          REQUESTED="${{ inputs.version }}"
+          DECLARED=$(node -p "require('./packages/widget-npm/package.json').version")
+          echo "Requested (registry):  ${REQUESTED}"
+          echo "Declared (package.json): ${DECLARED}"
+          echo "requested=${REQUESTED}" >> $GITHUB_OUTPUT
+          echo "declared=${DECLARED}" >> $GITHUB_OUTPUT
+
+      - name: Query public registry metadata
+        run: |
+          REQUESTED="${{ steps.versions.outputs.requested }}"
+          echo "=== npm view sukhan-widget@${REQUESTED} ==="
+          npm view "sukhan-widget@${REQUESTED}" --json > /tmp/npm-view.json 2>/tmp/npm-view.err || {
+            echo "::error::npm view sukhan-widget@${REQUESTED} failed — the version may not be published yet."
+            cat /tmp/npm-view.err
+            exit 1
+          }
+          echo "--- key metadata ---"
+          node -e "const m=require('/tmp/npm-view.json'); console.log('name:', m.name); console.log('version:', m.version); console.log('license:', m.license); console.log('repository:', JSON.stringify(m.repository)); console.log('homepage:', m.homepage); console.log('dist.tarball:', m.dist && m.dist.tarball); console.log('dist.integrity:', m.dist && m.dist.integrity);"
+          # Assert the registry name/version match the request exactly.
+          REG_NAME=$(node -p "require('/tmp/npm-view.json').name")
+          REG_VER=$(node -p "require('/tmp/npm-view.json').version")
+          if [ "$REG_NAME" != "sukhan-widget" ]; then
+            echo "::error::Registry name mismatch: got '$REG_NAME', expected 'sukhan-widget'"
+            exit 1
+          fi
+          if [ "$REG_VER" != "$REQUESTED" ]; then
+            echo "::error::Registry version mismatch: got '$REG_VER', expected '$REQUESTED'"
+            exit 1
+          fi
+          echo "Registry metadata matches requested version."
+
+      - name: Clean npm consumer — install exact version from registry
+        run: |
+          REQUESTED="${{ steps.versions.outputs.requested }}"
+          rm -rf /tmp/verify-npm
+          mkdir -p /tmp/verify-npm
+          cd /tmp/verify-npm
+          npm init -y
+          npm install "sukhan-widget@${REQUESTED}" --no-audit --no-fund
+          # Verify the installed version matches the requested version exactly.
+          INSTALLED=$(node -p "require('./node_modules/sukhan-widget/package.json').version")
+          echo "Installed version (npm): ${INSTALLED}"
+          if [ "$INSTALLED" != "$REQUESTED" ]; then
+            echo "::error::Installed npm version '${INSTALLED}' differs from registry requested '${REQUESTED}'."
+            exit 1
+          fi
+          echo "npm installed version matches."
+
+      - name: Clean npm consumer — ESM import + SSR-safe
+        run: |
+          cd /tmp/verify-npm
+          # ESM import + initSukhan export
+          node --input-type=module -e "import { initSukhan } from 'sukhan-widget'; if (typeof initSukhan !== 'function') throw new Error('initSukhan not exported'); console.log('npm ESM import OK');"
+          # SSR-safe: server import must not crash (no window/document)
+          node --input-type=module -e "import 'sukhan-widget'; console.log('npm SSR import OK (no crash)');"
+          # initSukhan rejects a missing API key deterministically
+          node --input-type=module -e "import { initSukhan } from 'sukhan-widget'; try { initSukhan(); throw new Error('should have thrown for missing key'); } catch (e) { if (!/no API key/i.test(e.message)) throw e; console.log('initSukhan missing-key rejection OK'); }"
+
+      - name: Clean Bun consumer — install exact version from registry
+        run: |
+          REQUESTED="${{ steps.versions.outputs.requested }}"
+          rm -rf /tmp/verify-bun
+          mkdir -p /tmp/verify-bun
+          cd /tmp/verify-bun
+          echo '{"name":"verify-bun"}' > package.json
+          bun add "sukhan-widget@${REQUESTED}"
+          INSTALLED=$(node -p "require('./node_modules/sukhan-widget/package.json').version")
+          echo "Installed version (bun): ${INSTALLED}"
+          if [ "$INSTALLED" != "$REQUESTED" ]; then
+            echo "::error::Installed bun version '${INSTALLED}' differs from registry requested '${REQUESTED}'."
+            exit 1
+          fi
+          echo "bun installed version matches."
+
+      - name: Clean Bun consumer — ESM import + SSR-safe
+        run: |
+          cd /tmp/verify-bun
+          bun -e "import { initSukhan } from 'sukhan-widget'; if (typeof initSukhan !== 'function') throw new Error('initSukhan not exported'); console.log('bun ESM import OK');"
+          bun -e "import 'sukhan-widget'; console.log('bun SSR import OK (no crash)');"
+
+      - name: Summary
+        run: |
+          REQUESTED="${{ steps.versions.outputs.requested }}"
+          DECLARED="${{ steps.versions.outputs.declared }}"
+          echo "============================================================"
+          echo "  REGISTRY VERIFICATION PASSED"
+          echo "============================================================"
+          echo "  Public registry version verified: sukhan-widget@${REQUESTED}"
+          echo "  package.json declared version:    ${DECLARED}"
+          if [ "$REQUESTED" != "$DECLARED" ]; then
+            echo "  NOTE: requested registry version differs from package.json declared version"
+            echo "  (verification targets a specific published release)."
+          fi
+          echo "  Clean npm consumer install + import + SSR-safe: OK"
+          echo "  Clean Bun consumer install + import + SSR-safe: OK"
+          echo "  Registry name/version metadata: correct"
+          echo "============================================================"
