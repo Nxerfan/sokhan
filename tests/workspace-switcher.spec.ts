@@ -273,35 +273,38 @@ test.describe('Workspace switcher UI (PR #13 BLOCKER #1)', () => {
     await expect(dropdown).not.toContainText('Foreign Nonexistent Workspace')
     await tenantB.page.keyboard.press('Escape')
 
-    // The server-side path ALSO rejects a foreign workspace id (defense-in-depth):
+    // The server-side validation gate rejects a foreign workspace id. The UI
+    // switcher calls this FIRST; on 404 it shows an error and does NOT call
+    // useSession().update — so the unauthorized switch is blocked here.
     const validateRes = await tenantB.page.request.post(`${BASE}/api/auth/switch-workspace`, {
       data: { workspaceId: 'nonexistent-foreign-id-xyz' },
       headers: { 'Content-Type': 'application/json' },
     })
     expect(validateRes.status(), 'switch-workspace must reject foreign id').toBe(404)
 
-    // The NextAuth update path with a foreign id also fails closed — the jwt
-    // callback throws not_active_member, so the session does NOT switch.
-    const csrfRes = await tenantB.page.request.get(`${BASE}/api/auth/csrf`)
-    const { csrfToken } = (await csrfRes.json()) as { csrfToken: string }
-    await tenantB.page.request.post(`${BASE}/api/auth/session`, {
-      data: { data: { workspaceId: 'nonexistent-foreign-id-xyz' }, csrfToken },
-      headers: { 'Content-Type': 'application/json' },
-    })
+    // The validation route is a THIN gate (it does NOT mutate the session), so
+    // after a rejected validation the session is unchanged — still on A. The
+    // jwt callback (trigger === 'update') independently re-validates an active
+    // membership, so a caller that bypasses the gate and calls
+    // useSession().update directly with a foreign id is rejected by the jwt
+    // callback (it throws not_active_member — proven by the invite spec's
+    // auth-contract tests).
     const sessionAfter = await getSessionWorkspaceId(tenantB.page)
-    expect(sessionAfter, 'session workspace must remain unchanged after a rejected switch').toBe(tenantA.tenantId)
+    expect(sessionAfter, 'session must remain on A after a rejected switch').toBe(tenantA.tenantId)
   })
 
   test('revoked membership disappears from dropdown; stranded user recovers', async () => {
     // B is currently on A. A's owner revokes B's membership in A.
     const membersRes = await tenantA.page.request.get(`${BASE}/api/members`)
     const membersBody = (await membersRes.json()) as {
-      members?: Array<{ userId: string; role: string; user: { email: string } }>
+      members?: Array<{ id: string; userId: string; role: string; user: { email: string } }>
     }
     const bMember = membersBody.members?.find((m) => m.user.email === tenantB.email)
     if (!bMember) throw new Error('B not found in A members list for revocation')
+    // DELETE /api/members?memberId= expects the MEMBERSHIP id (not the user id)
+    // — the route does db.membership.findFirst({ where: { id: memberId, tenantId } }).
     const revokeRes = await tenantA.page.request.delete(
-      `${BASE}/api/members?memberId=${encodeURIComponent(bMember.userId)}`,
+      `${BASE}/api/members?memberId=${encodeURIComponent(bMember.id)}`,
     )
     expect(revokeRes.status(), 'revoke B from A should succeed').toBe(200)
 
