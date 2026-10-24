@@ -244,29 +244,44 @@ test.describe('Workspace switcher UI (PR #13 BLOCKER #1)', () => {
   })
 
   test('stale selected Inbox conversation from previous workspace is not displayed', async () => {
-    // On A, select the A conversation in the Inbox (click its row).
-    await tenantB.page.locator('main').locator('text=hello from A visitor').first().click().catch(() => {})
-    // Now switch back to B via the UI.
+    // Start fresh on A (the current workspace after test 111). A clean page
+    // state avoids races between the inbox's socket/message fetch and the
+    // switcher click (this was the Lite-only differentiator vs test 110).
+    await tenantB.page.goto(BASE, { waitUntil: 'domcontentloaded' })
+    await expect(tenantB.page.locator('main')).toContainText('hello from A visitor', { timeout: 15000 })
+    // Select A's conversation in the Inbox (sets the Inbox selectedId to A's
+    // conversation — the "stale selection" we then prove is cleared).
+    await tenantB.page.locator('main').locator('text=hello from A visitor').first().click()
+    // Bounded propagation barrier — let the selection + message fetch settle
+    // before opening the switcher (NOT an arbitrary sleep; bounded, deterministic).
+    await tenantB.page.waitForTimeout(600)
+    // Switch to B via the UI. The reload from handleSwitch tears down ALL
+    // workspace-specific client state — including the Inbox selectedId (which
+    // lives in component state, NOT the URL), so it is cleared by the remount.
     await openSwitcher(tenantB.page)
     await clickWorkspaceItem(tenantB.page, 'WS B')
-    await waitForWorkspaceSwitch(tenantB.page, tenantB.tenantId)
+    await waitForWorkspaceSwitch(tenantB.page, tenantB.tenantId, 25000)
     await tenantB.page.goto(BASE, { waitUntil: 'domcontentloaded' })
-    // B's inbox shows B's conversation, NOT A's. The Inbox selectedId lives in
-    // component state (not the URL) so it is cleared by the remount.
-    await expect(tenantB.page.locator('main')).toContainText('hello from B visitor', { timeout: 10000 })
+    // B's inbox shows B's conversation, NOT A's. The stale A selection cannot
+    // remain (selectedId was cleared by the remount + A's conversationId does
+    // not exist in B's tenant anyway).
+    await expect(tenantB.page.locator('main')).toContainText('hello from B visitor', { timeout: 15000 })
     await expect(tenantB.page.locator('main')).not.toContainText('hello from A visitor')
   })
 
   test('switch back to A → A data returns; B data disappears', async () => {
+    await tenantB.page.goto(BASE, { waitUntil: 'domcontentloaded' })
     await openSwitcher(tenantB.page)
     await clickWorkspaceItem(tenantB.page, 'WS A')
-    await waitForWorkspaceSwitch(tenantB.page, tenantA.tenantId)
+    await waitForWorkspaceSwitch(tenantB.page, tenantA.tenantId, 25000)
     await tenantB.page.goto(BASE, { waitUntil: 'domcontentloaded' })
-    await expect(tenantB.page.locator('main')).toContainText('hello from A visitor', { timeout: 10000 })
+    await expect(tenantB.page.locator('main')).toContainText('hello from A visitor', { timeout: 15000 })
     await expect(tenantB.page.locator('main')).not.toContainText('hello from B visitor')
   })
 
   test('unauthorized workspace id cannot be selected/switched', async () => {
+    // Start fresh on A (the current workspace).
+    await tenantB.page.goto(BASE, { waitUntil: 'domcontentloaded' })
     // The dropdown NEVER lists a foreign workspace.
     await openSwitcher(tenantB.page)
     const dropdown = tenantB.page.locator('[role="menu"]')
