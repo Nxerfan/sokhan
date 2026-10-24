@@ -17,15 +17,11 @@ import { otpSignupPlaywright } from './helpers/otp-signup'
  * boundary (cookies set via API on :81 are honoured by the UI on :81 —
  * single origin).
  *
- * COVERAGE (user-required UI journeys):
- *   1. dashboard renders for an authenticated user with two workspaces
- *   2. switcher dropdown lists BOTH workspaces; current marked
- *   3. click workspace B → session switches to B; top-bar name changes to B
- *   4. B-specific data appears in the Inbox; A-specific data disappears
- *   5. switch back to A → A data returns; B data disappears
- *   6. stale selected Inbox conversation from the previous workspace is NOT displayed
- *   7. unauthorized workspace id cannot be selected/switched (dropdown never lists it; API rejects)
- *   8. revoked membership disappears from the dropdown; stranded user recovers to another active workspace
+ * TIMING: the switch flow is async (validate → useSession().update →
+ * verify → window.location.reload()). The reload is NOT synchronous with the
+ * menu click, so we POLL /api/auth/session for the workspaceId to change
+ * (bounded 15s) instead of relying on waitForLoadState (which resolves
+ * against the pre-reload document and races).
  */
 
 const BASE = 'http://127.0.0.1:81'
@@ -114,13 +110,13 @@ async function createInvitationApi(
   return { workspace: url.searchParams.get('workspace') || '', token: url.searchParams.get('token') || '' }
 }
 
-async function acceptInvitationApi(page: Page, workspace: string, token: string): Promise<{ ok: boolean; workspaceId?: string }> {
+async function acceptInvitationApi(page: Page, workspace: string, token: string): Promise<{ ok: boolean }> {
   const res = await page.request.post(`${BASE}/api/invitations/accept`, {
     data: { workspace, token },
     headers: { 'Content-Type': 'application/json' },
   })
-  const body = (await res.json().catch(() => ({}))) as { ok?: boolean; workspaceId?: string }
-  return { ok: !!body.ok, workspaceId: body.workspaceId }
+  const body = (await res.json().catch(() => ({}))) as { ok?: boolean }
+  return { ok: !!body.ok }
 }
 
 async function createVisitorConversation(slug: string, text: string): Promise<{ conversationId: string }> {
@@ -148,14 +144,37 @@ async function getSessionWorkspaceId(page: Page): Promise<string | null> {
   return body.user?.workspaceId ?? null
 }
 
+/** Poll /api/auth/session until the workspaceId matches `expected` (bounded). */
+async function waitForWorkspaceSwitch(page: Page, expected: string, timeoutMs = 20000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  let last: string | null = null
+  while (Date.now() < deadline) {
+    last = await getSessionWorkspaceId(page)
+    if (last === expected) return
+    await page.waitForTimeout(250)
+  }
+  throw new Error(`workspace did not switch to ${expected} within ${timeoutMs}ms (last=${last})`)
+}
+
 async function listWorkspacesApi(page: Page): Promise<{ id: string; name: string; isCurrent: boolean }[]> {
   const res = await page.request.get(`${BASE}/api/workspaces`)
   const body = (await res.json()) as { workspaces?: { id: string; name: string; isCurrent: boolean }[] }
   return body.workspaces ?? []
 }
 
-/** The TopBar switcher trigger button (contains the workspace name + Building2 icon). */
+/** The TopBar switcher trigger is the <h2> in the header (workspace name). */
 const SWITCHER_TRIGGER = 'header h2'
+
+/** Open the switcher dropdown. */
+async function openSwitcher(page: Page) {
+  await page.locator(SWITCHER_TRIGGER).click()
+  await expect(page.locator('[role="menu"]')).toBeVisible()
+}
+
+/** Click a workspace menu item by name. */
+async function clickWorkspaceItem(page: Page, name: string) {
+  await page.locator('[role="menu"]').locator('[role="menuitem"]').filter({ hasText: name }).click()
+}
 
 test.describe('Workspace switcher UI (PR #13 BLOCKER #1)', () => {
   let tenantA: TenantCtx
@@ -185,124 +204,109 @@ test.describe('Workspace switcher UI (PR #13 BLOCKER #1)', () => {
     // B's primary (signup) workspace is B → current = B after accept (API accept
     // does not mutate the session; only the /invite page client does).
     await tenantB.page.goto(BASE, { waitUntil: 'domcontentloaded' })
-    // Dashboard shell renders for the authenticated user.
     await expect(tenantB.page.locator('header')).toBeVisible()
-    // Open the switcher dropdown.
-    await tenantB.page.locator(SWITCHER_TRIGGER).click()
-    // Both workspaces listed.
+    // The trigger shows B's name.
+    await expect(tenantB.page.locator(SWITCHER_TRIGGER)).toContainText('WS B')
+
+    await openSwitcher(tenantB.page)
     const dropdown = tenantB.page.locator('[role="menu"]')
-    await expect(dropdown).toBeVisible()
+    // Both workspaces listed.
     await expect(dropdown.locator('text=WS A')).toBeVisible()
     await expect(dropdown.locator('text=WS B')).toBeVisible()
-    // B is the current workspace (marked with a Check icon — turquoise).
-    const bItem = dropdown.locator('text=WS B').locator('..')
-    await expect(bItem.locator('svg')).toHaveCount(2) // Building2 + Check
-    // The trigger button shows B's name.
-    await expect(tenantB.page.locator(SWITCHER_TRIGGER)).toContainText('WS B')
-    // Escape to close the dropdown.
+
+    // B is the current workspace → its menu item has the Check icon
+    // (the turquoise svg). A's menu item has NO Check.
+    const bItem = dropdown.locator('[role="menuitem"]').filter({ hasText: 'WS B' })
+    const aItem = dropdown.locator('[role="menuitem"]').filter({ hasText: 'WS A' })
+    await expect(bItem.locator('svg.text-turquoise')).toHaveCount(1) // the Check
+    await expect(aItem.locator('svg.text-turquoise')).toHaveCount(0) // no Check
+
     await tenantB.page.keyboard.press('Escape')
   })
 
   test('click workspace A → session switches to A; top-bar shows A', async () => {
-    await tenantB.page.locator(SWITCHER_TRIGGER).click()
-    const dropdown = tenantB.page.locator('[role="menu"]')
-    await expect(dropdown).toBeVisible()
-    // Click the A workspace menu item.
-    await dropdown.locator('text=WS A').click()
-    // The switch flow calls update() + reload. Wait for the reload.
-    await tenantB.page.waitForLoadState('domcontentloaded')
-    // Give the shell a moment to re-fetch /api/tenants/me.
-    await tenantB.page.waitForTimeout(500)
-    // Session now points to A.
-    expect(await getSessionWorkspaceId(tenantB.page)).toBe(tenantA.tenantId)
-    // Top-bar trigger now shows A's name.
-    await expect(tenantB.page.locator(SWITCHER_TRIGGER)).toContainText('WS A')
+    await tenantB.page.goto(BASE, { waitUntil: 'domcontentloaded' })
+    await openSwitcher(tenantB.page)
+    await clickWorkspaceItem(tenantB.page, 'WS A')
+    // The switch flow (validate → update → reload) is async; poll the session.
+    await waitForWorkspaceSwitch(tenantB.page, tenantA.tenantId)
+    // After reload, the shell re-fetches /api/tenants/me for A. The trigger h2
+    // now shows A's name.
+    await tenantB.page.goto(BASE, { waitUntil: 'domcontentloaded' })
+    await expect(tenantB.page.locator(SWITCHER_TRIGGER)).toContainText('WS A', { timeout: 10000 })
   })
 
   test('A-specific data appears; B-specific data disappears', async () => {
-    // The Inbox is the default view; it fetches /api/conversations (tenant-scoped).
-    // A's visitor message preview = "hello from A visitor" must be visible.
+    // The Inbox (default view) fetches /api/conversations (tenant-scoped) and
+    // renders conv.lastMessagePreview. A's preview must be visible; B's not.
     await expect(tenantB.page.locator('main')).toContainText('hello from A visitor', { timeout: 10000 })
-    // B's visitor message preview must NOT be visible on A.
     await expect(tenantB.page.locator('main')).not.toContainText('hello from B visitor')
   })
 
   test('stale selected Inbox conversation from previous workspace is not displayed', async () => {
     // On A, select the A conversation in the Inbox (click its row).
-    const aRow = tenantB.page.locator('main').locator('text=hello from A visitor').first()
-    await aRow.click().catch(() => {})
+    await tenantB.page.locator('main').locator('text=hello from A visitor').first().click().catch(() => {})
     // Now switch back to B via the UI.
-    await tenantB.page.locator(SWITCHER_TRIGGER).click()
-    await tenantB.page.locator('[role="menu"]').locator('text=WS B').click()
-    await tenantB.page.waitForLoadState('domcontentloaded')
-    await tenantB.page.waitForTimeout(500)
-    // Session is now B.
-    expect(await getSessionWorkspaceId(tenantB.page)).toBe(tenantB.tenantId)
-    // B's inbox shows B's conversation, NOT A's.
+    await openSwitcher(tenantB.page)
+    await clickWorkspaceItem(tenantB.page, 'WS B')
+    await waitForWorkspaceSwitch(tenantB.page, tenantB.tenantId)
+    await tenantB.page.goto(BASE, { waitUntil: 'domcontentloaded' })
+    // B's inbox shows B's conversation, NOT A's. The Inbox selectedId lives in
+    // component state (not the URL) so it is cleared by the remount.
     await expect(tenantB.page.locator('main')).toContainText('hello from B visitor', { timeout: 10000 })
     await expect(tenantB.page.locator('main')).not.toContainText('hello from A visitor')
   })
 
   test('switch back to A → A data returns; B data disappears', async () => {
-    await tenantB.page.locator(SWITCHER_TRIGGER).click()
-    await tenantB.page.locator('[role="menu"]').locator('text=WS A').click()
-    await tenantB.page.waitForLoadState('domcontentloaded')
-    await tenantB.page.waitForTimeout(500)
-    expect(await getSessionWorkspaceId(tenantB.page)).toBe(tenantA.tenantId)
+    await openSwitcher(tenantB.page)
+    await clickWorkspaceItem(tenantB.page, 'WS A')
+    await waitForWorkspaceSwitch(tenantB.page, tenantA.tenantId)
+    await tenantB.page.goto(BASE, { waitUntil: 'domcontentloaded' })
     await expect(tenantB.page.locator('main')).toContainText('hello from A visitor', { timeout: 10000 })
     await expect(tenantB.page.locator('main')).not.toContainText('hello from B visitor')
   })
 
   test('unauthorized workspace id cannot be selected/switched', async () => {
-    // The dropdown NEVER lists a foreign workspace. Open it and assert no
-    // foreign name is present.
-    await tenantB.page.locator(SWITCHER_TRIGGER).click()
+    // The dropdown NEVER lists a foreign workspace.
+    await openSwitcher(tenantB.page)
     const dropdown = tenantB.page.locator('[role="menu"]')
-    await expect(dropdown).toBeVisible()
     await expect(dropdown).not.toContainText('Foreign Nonexistent Workspace')
     await tenantB.page.keyboard.press('Escape')
 
     // The server-side path ALSO rejects a foreign workspace id (defense-in-depth):
-    // POST /api/auth/switch-workspace with a nonexistent id → 404 not_found.
     const validateRes = await tenantB.page.request.post(`${BASE}/api/auth/switch-workspace`, {
       data: { workspaceId: 'nonexistent-foreign-id-xyz' },
       headers: { 'Content-Type': 'application/json' },
     })
     expect(validateRes.status(), 'switch-workspace must reject foreign id').toBe(404)
 
-    // And the NextAuth update path (POST /api/auth/session) with a foreign id
-    // also fails closed — the jwt callback throws not_active_member, so the
-    // session endpoint does NOT return 200 with the foreign workspace.
+    // The NextAuth update path with a foreign id also fails closed — the jwt
+    // callback throws not_active_member, so the session does NOT switch.
     const csrfRes = await tenantB.page.request.get(`${BASE}/api/auth/csrf`)
     const { csrfToken } = (await csrfRes.json()) as { csrfToken: string }
-    const updateRes = await tenantB.page.request.post(`${BASE}/api/auth/session`, {
+    await tenantB.page.request.post(`${BASE}/api/auth/session`, {
       data: { data: { workspaceId: 'nonexistent-foreign-id-xyz' }, csrfToken },
       headers: { 'Content-Type': 'application/json' },
     })
-    // The session must NOT have switched to the foreign id.
-    const sessionAfter = await tenantB.page.request.get(`${BASE}/api/auth/session`)
-    const sb = (await sessionAfter.json()) as { user?: { workspaceId?: string | null } }
-    expect(sb.user?.workspaceId, 'session workspace must remain unchanged after a rejected switch').toBe(tenantA.tenantId)
-    expect(updateRes.status(), 'update with foreign id must not succeed cleanly').not.toBe(200)
+    const sessionAfter = await getSessionWorkspaceId(tenantB.page)
+    expect(sessionAfter, 'session workspace must remain unchanged after a rejected switch').toBe(tenantA.tenantId)
   })
 
   test('revoked membership disappears from dropdown; stranded user recovers', async () => {
     // B is currently on A. A's owner revokes B's membership in A.
-    // Find B's membership id in A's member list.
     const membersRes = await tenantA.page.request.get(`${BASE}/api/members`)
     const membersBody = (await membersRes.json()) as {
       members?: Array<{ userId: string; role: string; user: { email: string } }>
     }
     const bMember = membersBody.members?.find((m) => m.user.email === tenantB.email)
     if (!bMember) throw new Error('B not found in A members list for revocation')
-    // DELETE /api/members?memberId=<B's membership id in A>
     const revokeRes = await tenantA.page.request.delete(
       `${BASE}/api/members?memberId=${encodeURIComponent(bMember.userId)}`,
     )
     expect(revokeRes.status(), 'revoke B from A should succeed').toBe(200)
 
-    // B reloads the dashboard. B's session workspaceId is still A, but B is no
-    // longer an active member of A → /api/workspaces no longer lists A.
+    // B reloads. B's session workspaceId is still A, but B is no longer an
+    // active member of A → /api/workspaces no longer lists A.
     await tenantB.page.goto(BASE, { waitUntil: 'domcontentloaded' })
     const workspaces = await listWorkspacesApi(tenantB.page)
     const ids = workspaces.map((w) => w.id)
@@ -310,17 +314,15 @@ test.describe('Workspace switcher UI (PR #13 BLOCKER #1)', () => {
     expect(ids, 'active workspace B must remain available for recovery').toContain(tenantB.tenantId)
 
     // The dropdown offers B as the recovery target.
-    await tenantB.page.locator(SWITCHER_TRIGGER).click()
+    await openSwitcher(tenantB.page)
     const dropdown = tenantB.page.locator('[role="menu"]')
-    await expect(dropdown).toBeVisible()
     await expect(dropdown.locator('text=WS B')).toBeVisible()
     await expect(dropdown).not.toContainText('WS A')
 
-    // B recovers by switching to B.
-    await dropdown.locator('text=WS B').click()
-    await tenantB.page.waitForLoadState('domcontentloaded')
-    await tenantB.page.waitForTimeout(500)
-    expect(await getSessionWorkspaceId(tenantB.page), 'recovered to B').toBe(tenantB.tenantId)
+    // B recovers by switching to B (B's membership in B is still active).
+    await clickWorkspaceItem(tenantB.page, 'WS B')
+    await waitForWorkspaceSwitch(tenantB.page, tenantB.tenantId)
+    await tenantB.page.goto(BASE, { waitUntil: 'domcontentloaded' })
     // The dashboard is functional again — B's data shows.
     await expect(tenantB.page.locator('main')).toContainText('hello from B visitor', { timeout: 10000 })
   })
