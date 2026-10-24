@@ -252,7 +252,11 @@ export class SukhanWidget implements SukhanInstance {
     const dir = this.direction || (config.defaultDirection === 'ltr' ? 'ltr' : 'rtl')
     this.state.dir = dir as 'rtl' | 'ltr'
     const accent = config.accentColor || '#E09A2B'
-    const pos = config.position || 'bottom-start'
+    // CUST-C: canonical product default is 'bottom-end' (matches the
+    // signup-created rows, free-lock effective config, PATCH fallback,
+    // and the script-tag runtimes). Stored explicit positions are
+    // never rewritten — this fallback only fires on a missing field.
+    const pos = config.position || 'bottom-end'
     let side: 'left' | 'right' = pos === 'bottom-start' ? 'left' : 'right'
     if (this.state.dir === 'rtl') side = pos === 'bottom-start' ? 'right' : 'left'
 
@@ -364,6 +368,46 @@ export class SukhanWidget implements SukhanInstance {
     header.appendChild(logo)
     header.appendChild(titleText)
     header.appendChild(closeBtn)
+    // CUST-B: render the configured logo/avatar when they are SAFE image
+    // URLs. DOM APIs only (createElement + .src property) — never
+    // innerHTML with tenant-controlled content. The default SVG logo
+    // stays until a custom logo actually loads; a broken avatar image
+    // is removed on error.
+    const safeImg = (u: unknown): string | null => {
+      if (typeof u !== 'string' || u.length > 500 || !/^https?:\/\//i.test(u)) return null
+      try {
+        new URL(u)
+        return u
+      } catch {
+        return null
+      }
+    }
+    const logoImgSrc = safeImg(config.logoUrl)
+    if (logoImgSrc) {
+      const limg = document.createElement('img')
+      limg.alt = ''
+      limg.referrerPolicy = 'no-referrer'
+      css(limg, { width: '100%', height: '100%', objectFit: 'cover', borderRadius: '50%', display: 'none' })
+      limg.onload = () => {
+        logo.innerHTML = ''
+        ;(limg as HTMLElement).style.display = 'block'
+        logo.appendChild(limg)
+      }
+      limg.src = logoImgSrc
+    }
+    const avatarSrc = safeImg(config.avatarUrl)
+    if (avatarSrc) {
+      const av = document.createElement('img')
+      av.alt = this.state.locale === 'fa' ? 'کارشناس' : 'Agent'
+      av.referrerPolicy = 'no-referrer'
+      css(av, { width: '28px', height: '28px', borderRadius: '50%', objectFit: 'cover', flexShrink: '0' })
+      av.onerror = () => {
+        av.parentNode?.removeChild(av)
+      }
+      av.src = avatarSrc
+      header.insertBefore(av, titleText)
+    }
+
 
     const bodyEl = el('div', 'sk-body')
     css(bodyEl, {
@@ -496,8 +540,15 @@ export class SukhanWidget implements SukhanInstance {
     this.identifyVisitor()
   }
 
+  /**
+   * Free-plan brand lock (CUST-F). The backend never sends a `plan`
+   * field — it sends the effective-config flags `poweredBy`/
+   * `isLocked`. The old `plan`-based check was therefore ALWAYS
+   * true and rendered the "Powered by Sukhan" badge for every
+   * plan, including paid ones.
+   */
   private isFreePlan(): boolean {
-    return !this.config?.plan || this.config.plan === 'free'
+    return this.config?.poweredBy === true || this.config?.isLocked === true
   }
 
   // ---------- Panel open/close ----------

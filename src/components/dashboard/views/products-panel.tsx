@@ -40,14 +40,18 @@ export function ProductsPanel() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, price: Number(price) || 0, description, availability }),
     })
-    if (!res.ok) { toast.error('Failed'); return }
+    if (!res.ok) { toast.error(locale === 'fa' ? 'ناموفق بود' : 'Failed'); return }
     toast.success(locale === 'fa' ? 'ذخیره شد' : 'Saved')
     setName(''); setPrice(''); setDescription(''); setAvailability('in_stock'); setShowForm(false)
     load()
   }
 
   async function deleteProduct(id: string) {
-    await fetch(`/api/products?id=${id}`, { method: 'DELETE' })
+    const res = await fetch(`/api/products?id=${id}`, { method: 'DELETE' })
+    if (!res.ok) {
+      toast.error(locale === 'fa' ? 'حذف ناموفق بود' : 'Failed to delete')
+      return
+    }
     toast.success(locale === 'fa' ? 'حذف شد' : 'Deleted')
     load()
   }

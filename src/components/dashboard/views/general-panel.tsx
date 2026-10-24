@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { useTranslations } from 'next-intl'
+import { useTranslations, useLocale } from 'next-intl'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -20,6 +20,7 @@ type TenantInfo = {
 
 export function GeneralPanel() {
   const t = useTranslations('settings')
+  const locale = useLocale()
   const tc = useTranslations('common')
   const [tenant, setTenant] = useState<TenantInfo | null>(null)
   const [saving, setSaving] = useState(false)
@@ -47,7 +48,7 @@ export function GeneralPanel() {
       }),
     })
     if (!res.ok) {
-      toast.error('Failed to save')
+      toast.error(locale === 'fa' ? 'ذخیره ناموفق بود' : 'Failed to save')
       setSaving(false)
       return
     }

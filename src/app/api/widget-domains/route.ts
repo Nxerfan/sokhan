@@ -70,11 +70,19 @@ export async function DELETE(req: NextRequest) {
     const tid = getCurrentTenantId()!
     const id = new URL(req.url).searchParams.get('id')
     if (!id) return { error: 'invalid_id' as const }
-    await db.widgetDomain.deleteMany({ where: { id, tenantId: tid } })
+    // Tenant-scoped delete: a cross-tenant (or nonexistent) id matches
+    // nothing. Report the miss explicitly (404) instead of a silent
+    // no-op 200 — the role/tenant audit requires cross-tenant ids to be
+    // REJECTED, and this matches the faqs route's updateMany pattern.
+    const deleted = await db.widgetDomain.deleteMany({ where: { id, tenantId: tid } })
+    if (deleted.count === 0) return { error: 'not_found' as const }
     return { ok: true as const }
   })
   if (!result) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
   if ('forbidden' in result.result) return NextResponse.json({ error: 'forbidden' }, { status: 403 })
-  if ('error' in result.result) return NextResponse.json({ error: result.result.error }, { status: 400 })
+  if ('error' in result.result) {
+    const status = result.result.error === 'not_found' ? 404 : 400
+    return NextResponse.json({ error: result.result.error }, { status })
+  }
   return NextResponse.json({ ok: true })
 }

@@ -459,11 +459,17 @@ export function InboxView() {
   // Change conversation status
   const changeStatus = async (status: string) => {
     if (!selectedId) return
-    await fetch(`/api/conversations/${selectedId}`, {
+    const res = await fetch(`/api/conversations/${selectedId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ status }),
     })
+    if (!res.ok) {
+      toast.error(t('dashboard.statusChangeFailed'))
+    }
+    // Refresh either way so the Select reflects the
+    // server-authoritative status — a failed change reverts to
+    // the persisted value instead of showing a false state.
     loadConversations()
   }
 
@@ -620,7 +626,7 @@ export function InboxView() {
                       <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground" style={{ animationDelay: '150ms' }} />
                       <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground" style={{ animationDelay: '300ms' }} />
                     </span>
-                    {t('dashboard.comingSoon')}
+                    {t('dashboard.typing')}
                   </div>
                 )}
                 <div ref={messagesEndRef} />
@@ -639,7 +645,7 @@ export function InboxView() {
                       sendReply()
                     }
                   }}
-                  placeholder={t('command.placeholder')}
+                  placeholder={t('dashboard.replyPlaceholder')}
                   className="flex-1"
                   dir="auto"
                 />

@@ -57,6 +57,10 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
   const tc = useTranslations('common')
   const locale = useLocale()
   const [config, setConfig] = useState<WidgetConfig | null>(null)
+  // Effective widget state (what the public widget actually serves) +
+  // the plan lock flag — the truthful customization contract.
+  const [effective, setEffective] = useState<WidgetConfig | null>(null)
+  const [isLocked, setIsLocked] = useState(false)
   const [saving, setSaving] = useState(false)
   const [copiedHtml, setCopiedHtml] = useState(false)
   const [copiedNpm, setCopiedNpm] = useState(false)
@@ -89,6 +93,13 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
     ])
     const cfgData = await cfgRes.json()
     if (cfgData.config) setConfig(cfgData.config)
+    // Truthful customization contract: `effective` is what the public
+    // widget actually serves (locked Sukhan-brand defaults when the
+    // tenant's plan has no customization). The customization tab gates
+    // its controls on `isLocked` and previews the EFFECTIVE state —
+    // never an impossible paid appearance.
+    if (cfgData.effective) setEffective(cfgData.effective as WidgetConfig)
+    setIsLocked(Boolean(cfgData.isLocked))
     const domData = await domRes.json()
     setDomains(domData.domains ?? [])
     setDomainLimit(domData.limit ?? 0)
@@ -108,10 +119,26 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
   }, [load])
 
   async function save() {
-    if (!config) return
+    if (!config || isLocked) return
     setSaving(true)
-    const res = await fetch('/api/widget-config', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config) })
-    if (!res.ok) { toast.error('Failed to save'); setSaving(false); return }
+    let res: Response
+    try {
+      res = await fetch('/api/widget-config', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config) })
+    } catch {
+      toast.error(locale === 'fa' ? 'ذخیره ناموفق بود' : 'Failed to save')
+      setSaving(false)
+      return
+    }
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      toast.error(
+        data.error === 'customization_locked'
+          ? t('customizationLockedHint')
+          : locale === 'fa' ? 'ذخیره ناموفق بود' : 'Failed to save',
+      )
+      setSaving(false)
+      return
+    }
     toast.success(t('saved'))
     setSaving(false)
   }
@@ -122,6 +149,12 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
   function updateGreeting(lo: string, value: string) {
     setConfig((c) => (c ? { ...c, greetingTexts: { ...c.greetingTexts, [lo]: value } } : c))
   }
+
+  // Display config for the customization form + preview: the EFFECTIVE
+  // widget state when the plan locks customization (what visitors
+  // actually see), otherwise the stored config (which IS the effective
+  // state on plans that include customization).
+  const disp = isLocked && effective ? effective : config
 
   const htmlSnippet = `<script async defer src="${apiUrl}/api/widget/${slug}/script"></script>`
   // NPM package is NOT yet published. The npmInstall/npmInit variables
@@ -181,7 +214,11 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
   }
 
   async function deleteDomain(id: string) {
-    await fetch(`/api/widget-domains?id=${id}`, { method: 'DELETE' })
+    const res = await fetch(`/api/widget-domains?id=${id}`, { method: 'DELETE' })
+    if (!res.ok) {
+      toast.error(locale === 'fa' ? 'حذف ناموفق بود' : 'Failed to delete')
+      return
+    }
     toast.success(locale === 'fa' ? 'حذف شد' : 'Deleted')
     const domRes = await fetch('/api/widget-domains')
     const domData = await domRes.json()
@@ -516,8 +553,19 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
         </div>
       )}
 
-      {tab === 'customization' && (
+      {tab === 'customization' && config && (
         <div className="grid gap-4 lg:grid-cols-2">
+          {isLocked && (
+            <Card data-testid="customization-locked-banner" className="border-amber-600/40 bg-amber-500/5 lg:col-span-2">
+              <CardContent className="flex items-start gap-3 p-4">
+                <Lock className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
+                <div className="space-y-1">
+                  <p className="text-sm font-semibold">{t('customizationLocked')}</p>
+                  <p className="text-xs text-muted-foreground">{t('customizationLockedHint')}</p>
+                </div>
+              </CardContent>
+            </Card>
+          )}
           <div className="flex flex-col gap-4">
             <Card>
               <CardHeader>
@@ -528,22 +576,22 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
                 <div className="space-y-2">
                   <Label>{t('accentColor')}</Label>
                   <div className="flex items-center gap-3">
-                    <input type="color" value={config.accentColor} onChange={(e) => update('accentColor', e.target.value)} className="h-9 w-12 cursor-pointer rounded border border-border bg-transparent" />
-                    <Input value={config.accentColor} onChange={(e) => update('accentColor', e.target.value)} dir="ltr" className="font-mono" />
+                    <input type="color" value={(disp ?? config).accentColor} onChange={(e) => update('accentColor', e.target.value)} disabled={isLocked} className="h-9 w-12 cursor-pointer rounded border border-border bg-transparent disabled:cursor-not-allowed disabled:opacity-50" />
+                    <Input data-testid="customization-accent" value={(disp ?? config).accentColor} onChange={(e) => update('accentColor', e.target.value)} dir="ltr" className="font-mono" disabled={isLocked} />
                   </div>
                 </div>
                 <div className="grid grid-cols-2 gap-3">
                   <div className="space-y-2">
                     <Label>{t('launcherShape')}</Label>
-                    <Select value={config.launcherShape} onValueChange={(v) => update('launcherShape', v)}>
-                      <SelectTrigger><SelectValue /></SelectTrigger>
+                    <Select value={(disp ?? config).launcherShape} onValueChange={(v) => update('launcherShape', v)} disabled={isLocked}>
+                      <SelectTrigger data-testid="customization-shape"><SelectValue /></SelectTrigger>
                       <SelectContent>{SHAPES.map((s) => (<SelectItem key={s} value={s}>{t(`shapes.${s}` as any)}</SelectItem>))}</SelectContent>
                     </Select>
                   </div>
                   <div className="space-y-2">
                     <Label>{t('position')}</Label>
-                    <Select value={config.position} onValueChange={(v) => update('position', v)}>
-                      <SelectTrigger><SelectValue /></SelectTrigger>
+                    <Select value={(disp ?? config).position} onValueChange={(v) => update('position', v)} disabled={isLocked}>
+                      <SelectTrigger data-testid="customization-position"><SelectValue /></SelectTrigger>
                       <SelectContent>{POSITIONS.map((p) => (<SelectItem key={p} value={p}>{t(`positions.${p}` as any)}</SelectItem>))}</SelectContent>
                     </Select>
                   </div>
@@ -551,24 +599,24 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
                 <div className="grid grid-cols-2 gap-3">
                   <div className="space-y-2">
                     <Label>{t('avatarUrl')}</Label>
-                    <Input value={config.avatarUrl ?? ''} onChange={(e) => update('avatarUrl', e.target.value || null)} dir="ltr" placeholder="https://\u2026" />
+                    <Input data-testid="customization-avatar" value={(disp ?? config).avatarUrl ?? ''} onChange={(e) => update('avatarUrl', e.target.value || null)} disabled={isLocked} dir="ltr" placeholder="https://\u2026" />
                   </div>
                   <div className="space-y-2">
                     <Label>{t('logoUrl')}</Label>
-                    <Input value={config.logoUrl ?? ''} onChange={(e) => update('logoUrl', e.target.value || null)} dir="ltr" placeholder="https://\u2026" />
+                    <Input data-testid="customization-logo" value={(disp ?? config).logoUrl ?? ''} onChange={(e) => update('logoUrl', e.target.value || null)} disabled={isLocked} dir="ltr" placeholder="https://\u2026" />
                   </div>
                 </div>
                 <div className="grid grid-cols-2 gap-3">
                   <div className="space-y-2">
                     <Label>{t('greetingFa')}</Label>
-                    <Input value={config.greetingTexts.fa ?? ''} onChange={(e) => updateGreeting('fa', e.target.value)} dir="rtl" />
+                    <Input data-testid="customization-greeting-fa" value={(disp ?? config).greetingTexts.fa ?? ''} onChange={(e) => updateGreeting('fa', e.target.value)} dir="rtl" disabled={isLocked} />
                   </div>
                   <div className="space-y-2">
                     <Label>{t('greetingEn')}</Label>
-                    <Input value={config.greetingTexts.en ?? ''} onChange={(e) => updateGreeting('en', e.target.value)} dir="ltr" />
+                    <Input data-testid="customization-greeting-en" value={(disp ?? config).greetingTexts.en ?? ''} onChange={(e) => updateGreeting('en', e.target.value)} dir="ltr" disabled={isLocked} />
                   </div>
                 </div>
-                <Button onClick={save} disabled={saving} className="w-full gap-2">
+                <Button data-testid="customization-save" onClick={save} disabled={saving || isLocked} className="w-full gap-2">
                   {saving ? tc('loading') : tc('save')}
                 </Button>
               </CardContent>
@@ -586,21 +634,27 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
                   <div className="mt-2 h-3 w-1/3 rounded bg-muted" />
                   <div className="mt-4 h-20 w-full rounded bg-muted/60" />
                 </div>
-                <button type="button" className={cn('absolute', config.position === 'bottom-start' ? 'start-4' : 'end-4', 'bottom-4 flex items-center justify-center bg-ink text-ink-foreground shadow-lg transition-transform hover:scale-105', config.launcherShape === 'tab' ? 'h-12 w-16 rounded-lg rounded-be-none' : config.launcherShape === 'pill' ? 'h-12 w-16 rounded-full' : 'h-12 w-12 rounded-xl')} style={{ borderInlineStart: config.launcherShape === 'tab' ? `3px solid ${config.accentColor}` : undefined }} aria-label="Open chat">
+                <button type="button" className={cn('absolute', (disp ?? config).position === 'bottom-start' ? 'start-4' : 'end-4', 'bottom-4 flex items-center justify-center bg-ink text-ink-foreground shadow-lg transition-transform hover:scale-105', (disp ?? config).launcherShape === 'tab' ? 'h-12 w-16 rounded-lg rounded-be-none' : (disp ?? config).launcherShape === 'pill' ? 'h-12 w-16 rounded-full' : 'h-12 w-12 rounded-xl')} style={{ borderInlineStart: (disp ?? config).launcherShape === 'tab' ? `3px solid ${(disp ?? config).accentColor}` : undefined }} aria-label="Open chat">
                   <MessageSquareText className="h-5 w-5" />
                 </button>
-                <div className={cn('absolute', config.position === 'bottom-start' ? 'start-4' : 'end-4', 'bottom-20 w-56 rounded-xl border border-border bg-card shadow-xl')}>
-                  <div className="flex items-center gap-2 border-b border-border p-3" style={{ backgroundColor: config.accentColor + '22' }}>
-                    <div className="flex h-7 w-7 items-center justify-center rounded-full" style={{ backgroundColor: config.accentColor }}>
-                      <MessageSquareText className="h-4 w-4 text-white" />
-                    </div>
+                <div className={cn('absolute', (disp ?? config).position === 'bottom-start' ? 'start-4' : 'end-4', 'bottom-20 w-56 rounded-xl border border-border bg-card shadow-xl')}>
+                  <div className="flex items-center gap-2 border-b border-border p-3" style={{ backgroundColor: (disp ?? config).accentColor + '22' }}>
+                    {(disp ?? config).logoUrl ? (
+                      <img src={(disp ?? config).logoUrl!} alt="" className="h-7 w-7 rounded-full object-cover" referrerPolicy="no-referrer" />
+                    ) : (
+                      <div className="flex h-7 w-7 items-center justify-center rounded-full" style={{ backgroundColor: (disp ?? config).accentColor }}>
+                        <MessageSquareText className="h-4 w-4 text-white" />
+                      </div>
+                    )}
+                    {(disp ?? config).avatarUrl && (
+                      <img src={(disp ?? config).avatarUrl!} alt="" className="h-7 w-7 rounded-full object-cover" referrerPolicy="no-referrer" />
+                    )}
                     <span className="text-xs font-medium">{tc('appName')}</span>
                   </div>
                   <div className="space-y-2 p-3">
                     <div className="max-w-[80%] rounded-lg rounded-bs-sm bg-muted p-2 text-xs">
-                      {config.greetingTexts[config.defaultLocale] || '\uD83D\uDC4B'}
+                      {(disp ?? config).greetingTexts[(disp ?? config).defaultLocale] || '\uD83D\uDC4B'}
                     </div>
-                    <div className="ms-auto max-w-[60%] rounded-lg rounded-be-sm p-2 text-xs text-white" style={{ backgroundColor: config.accentColor }}>=</div>
                   </div>
                 </div>
               </div>
