@@ -43,6 +43,28 @@ jobs:
           NIXIFY_MOCK: 'true'
           NEXTAUTH_SECRET: 'ci-test-secret-not-for-production'
 
+  # === Widget NPM package qualification (non-publishing) ===
+  # Verifies the sukhan-widget package builds, packs cleanly, and installs
+  # in clean npm + Bun consumers on the PR exact SHA. This is the SHARED
+  # qualification also used by the publish workflow, so the two paths cannot
+  # drift. NEVER publishes. Requires NO npm credential.
+  widget-package-qualification:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Run shared widget package qualification
+        run: bash scripts/qualify-widget-package.sh
+        env:
+          REPO_ROOT: ${{ github.workspace }}
+
   docker-regression:
     runs-on: ubuntu-latest
     timeout-minutes: 30
