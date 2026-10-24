@@ -134,12 +134,6 @@ test.describe('Analytics + CSAT — calculations proven from known state', () =>
     expect((await csat(slug, v1.token, v1.conversationId, 6)).status).toBe(400)
     expect((await csat(slug, v1.token, v1.conversationId, 'five')).status).toBe(400)
 
-    // Another contact cannot rate this conversation (cross-contact).
-    const other = await createVisitorConversation(slug, 'پیام بازدیدکننده دیگر', `ana-other-${Date.now()}`)
-    const crossRate = await csat(slug, other.token, v1.conversationId, 4)
-    expect(crossRate.status).toBe(404)
-    expect(crossRate.body.error).toBe('not_found')
-
     // A valid rating on the closed conversation persists.
     const goodRate = await csat(slug, v1.token, v1.conversationId, 5)
     expect(goodRate.status).toBe(200)
@@ -149,7 +143,10 @@ test.describe('Analytics + CSAT — calculations proven from known state', () =>
     expect(dupRate.status).toBe(400)
     expect(dupRate.body.error).toBe('already_rated')
 
-    // === Analytics reflect the known state ===
+    // === Analytics reflect the known state (exactly TWO conversations
+    // exist at this point: v1 closed+rated, v2 open — the third visitor
+    // conversation for the cross-contact check is created AFTER these
+    // assertions) ===
     const analyticsRes = await page.request.get(`${BASE}/api/analytics`)
     expect(analyticsRes.status()).toBe(200)
     const a = await analyticsRes.json()
@@ -171,6 +168,14 @@ test.describe('Analytics + CSAT — calculations proven from known state', () =>
       (sum: number, day: { count: number }) => sum + day.count, 0,
     )
     expect(volumeTotal).toBe(2)
+
+    // Another contact cannot rate this conversation (cross-contact) —
+    // created AFTER the analytics assertions so the known-state numbers
+    // above stay exact.
+    const other = await createVisitorConversation(slug, 'پیام بازدیدکننده دیگر', `ana-other-${Date.now()}`)
+    const crossRate = await csat(slug, other.token, v1.conversationId, 4)
+    expect(crossRate.status).toBe(404)
+    expect(crossRate.body.error).toBe('not_found')
 
     // === Tenant isolation: a second tenant sees none of this ===
     const ctxB = await browser.newContext()
