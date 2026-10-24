@@ -299,6 +299,17 @@ here.
 9. Monthly conversations plan limit (display-only; paid pricing is Coming Soon)
 10. Login-OTP server-side session issuance
 
+## Observed one-time flake (recorded for observation)
+
+The pre-existing `invite-workspace-switching.spec.ts` B1-B2 test
+("pre-verification credentials sign-in must fail") failed exactly once
+during this PR's CI (run #210) with an unexpected 200. The identical
+spec code passed in the two adjacent runs of this same branch (#208,
+#209) and every prior run on main, and this branch contains **zero**
+changes to auth/signup/login/users/invitations — so it is recorded as a
+one-time flake of the credentials-callback path, not a regression. If
+it recurs, it warrants a dedicated investigation.
+
 ## Verification summary at the final SHA
 
 - **lint**: clean · **typecheck**: clean · **unit**: 520 pass / 0 fail
