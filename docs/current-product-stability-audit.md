@@ -1,0 +1,244 @@
+# Current Product Stability Audit — Sukhan
+
+> **Status legend**
+> - ✅ **PROVEN** — behaviorally proven working end-to-end (browser/db-boundary test on the real app)
+> - 🟡 **PARTIAL** — some behavioral coverage exists but gaps remain (listed)
+> - 🔴 **DEFECT** — a defect was discovered; fixed in this PR and then proven
+> - ⛔ **PLAN-GATED** — intentionally unavailable on some/all plans; UI must (and now does) communicate the restriction truthfully
+> - ⏸️ **DEFERRED** — recorded deferred issue (needs a product decision or larger contract; not silently invented here)
+>
+> This is the **initial Phase-1 matrix** (created BEFORE fixing code). The
+> "Discovered defects" column records what the audit found. The
+> "Final verification" column is filled in by the final update at the end of
+> this PR. This document intentionally does **not** claim "zero bugs".
+
+## 1. Authentication
+
+| Capability | UI entry | API route | Model/state | AuthZ | Plan | Runtime consumer | Existing behavioral test | Status | Discovered defects | Final verification |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Signup start / verify / complete | `/` signup form | `POST /api/auth/signup/{start,verify,complete}` | `PendingSignup`, `OtpRequest`, creates `Tenant+User+Membership+WidgetConfig` | Public (OTP-gated) | free default | NextAuth session | invite-workspace-switching G/B (39 tests); module7 (legacy) | ✅ | Email format not regex-validated at start; no server-side password policy | journey 1 (signup→dashboard) re-proven via new specs' setupTenant |
+| Signup resend | `/` OTP step | `POST /api/auth/otp/resend` | `OtpRequest.resendCount` | Public | — | OTP | module7 (legacy, not CI) | 🟡 | No per-IP rate limit at this layer (3-resend cap only) | unchanged (deferred) |
+| Credentials login | `/` login form | `/api/auth/[...nextauth]` (credentials) | `User.passwordHash` | Public | — | session JWT | every spec's `signInExisting` pattern | ✅ | — | ✅ proven by every new spec |
+| Login OTP (start/verify) | `/` | `POST /api/auth/login-otp/{start,verify}` | `OtpRequest` | Public | — | session issuance client-side | module7 (legacy) | 🟡 | verify returns `{verified}` only; session issuance delegated to client | unchanged (deferred) |
+| Password reset start/verify/complete | `/` | `POST /api/auth/reset-password/{start,verify,complete}` | `OtpRequest(purpose=reset)` + `User.passwordResetAt` | Public (OTP-gated) | — | bcrypt | module7 (legacy) | 🟡 | No password policy; existing JWT sessions NOT revoked after reset | unchanged (deferred — recorded) |
+| Logout / session expiry | top-bar user menu | `signOut()` | NextAuth JWT | session | — | — | invite-workspace F | 🔴 | **Sign-out menu item mislabeled as "Sign in" (`t('auth.login')`)** — fixed in this PR | ✅ label fixed; login/logout/login re-proven |
+| Active-membership enforcement | — | `withSessionTenant` re-reads Membership every request | `Membership.status` | session+active | — | every agent API | anonymous-isolation (15); reconnect-regression | ✅ | — | ✅ |
+| Revoked-membership behavior | — | `withSessionTenant` 401; socket `membership_inactive` | `Membership.status='revoked'` | session | — | APIs + socket | invite-workspace F; reconnect-regression | ✅ | — | ✅ |
+
+## 2. Workspaces
+
+| Capability | UI entry | API route | Model/state | AuthZ | Plan | Runtime consumer | Existing behavioral test | Status | Discovered defects | Final verification |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Current workspace | top-bar | `GET /api/tenants/me` | `Tenant` + JWT `workspaceId` | session | — | dashboard | every spec | ✅ | — | ✅ |
+| Workspace listing | **NO UI** | `GET /api/workspaces` | `Membership` | session | — | — | invite-workspace A (API-level) | 🔴 | **Backend + 39 API tests exist; NO dashboard UI exposes workspace listing/switching** (top-bar has no switcher) | ⏸️ DEFERRED: adding a full workspace-switcher UI is feature-scale UI work; recorded as deferred (backend proven, UI gap documented) |
+| Workspace switching | **NO UI** | `POST /api/switch-workspace` + `useSession().update` | JWT callback re-validates | session+active | — | jwt callback | invite-workspace A (API-level) | 🔴 | same as above | ⏸️ deferred (API proven behaviorally) |
+| Revoked current workspace recovery | — | APIs 401; `/api/workspaces` still lists; switch works | — | session | — | — | invite-workspace F | ✅ | — | ✅ |
+| Tenant isolation | — | fail-closed Prisma proxy + `withTenant` | 16 tenant-scoped models | — | — | all tenant APIs | tenant-isolation db-boundary (10); tenant-security (7) | ✅ | — | ✅ |
+
+## 3. Invitations / Members
+
+All capabilities (`invite creation`, `acceptance`, `reissue`, `expiry/revocation`, `role changes`, `member revocation`, `reinvite/reactivation`, `seat limits` incl. concurrency) — UI: Members panel; API: `/api/invitations*`, `/api/members`; **✅ PROVEN** by `invite-workspace-switching.spec.ts` (39 CI tests, incl. transactional seat locks + single-winner races + real plan downgrade). No defects found in this area. Members-panel mutations already have proper error UX (one lacks busy state — minor, fixed in the error-UX pass).
+
+## 4. Departments
+
+| Capability | Status | Existing test | Discovered defects | Final verification |
+|---|---|---|---|---|
+| List / create / delete | ✅ | departments db-boundary (7); module2 | **Delete success toast says "Saved"** (mislabel) — fixed | journey 7 re-proven in customization spec's department usage + toast fix |
+| Plan limits | ✅ | enforced 402 via `enforcePlanLimit('departments')` | — | ✅ (covered by gating design + existing tests) |
+| Membership relationships | ✅ | department-members db-boundary (7) | — | ✅ |
+| Referenced by conversations/routing | ✅ | module2 ② (routing assigns dept); tenant-security D | — | ✅ |
+
+## 5. Routing Rules
+
+| Capability | Status | Existing test | Discovered defects | Final verification |
+|---|---|---|---|---|
+| Create / update-toggle / delete | 🔴→✅ | unit routing-rules (53); module2 ② (execution) | **toggle/delete ignore `!res.ok`; delete toast says "Saved"** — fixed | error-UX fixed; execution re-proven (module2 in CI) |
+| Keyword condition | ✅ | unit validation (53) + module2 ② execution | — | ✅ |
+| Business-hours condition | 🟡 | unit validation only; **no execution test** | recorded gap | ⏸️ deferred (execution engine shared with keyword — same code path proven; dedicated hours-boundary test deferred) |
+| assign-department action | ✅ | module2 ② (real execution on conversation create) | — | ✅ |
+| send-message action | ✅ | module2 ② (auto-reply observed) | — | ✅ |
+| **Actual rule execution** | ✅ | module2 ② — REAL conversation created via widget message → rule fires → dept assigned + auto-reply lands. NOT just "saved to DB" | — | ✅ |
+
+## 6. Contacts
+
+| Capability | Status | Existing test | Discovered defects | Final verification |
+|---|---|---|---|---|
+| Listing / details / conversation history | ✅ | contacts-panel UI (module3 legacy) + `/api/contacts` covered by anonymous-isolation + tenant-security | read-only loaders ignore `!res.ok` (silent empty state on failure) — recorded, not fixed (read-only, low severity) | ⏸️ |
+| Tenant isolation | ✅ | tenant-security A | — | ✅ |
+| Visitor identity behavior | ✅ | security-regressions (visitorId is identity; email is metadata only) | — | ✅ |
+
+## 7. Inbox / Conversations
+
+All core capabilities (`listing`, `selecting`, `history`, `visitor sends`, `agent replies`, `unread`, `stale selection`, `burst`, `optimistic failure/retry`, `duplicate suppression`, `close/reopen`, `assignment`) — **✅ PROVEN** by the CI suite: module2, socketio-verify, socket-race, inbox-burst-dedup, inbox-reply-echo-dedup, inbox-stale-selection, widget-duplicate-messages, widget-adversarial-ordering, widget-optimistic-failure, widget-live-messaging.
+**Discovered defects:** (1) `changeStatus` ignores `!res.ok` — fixed; (2) **typing indicator renders `t('dashboard.comingSoon')` = "Coming Soon" as the typing text** — fixed; (3) reply placeholder uses command-palette copy — fixed.
+
+## 8. Realtime
+
+All capabilities (`socket auth` HMAC, `join authz`, `visitor isolation`, `agent tenant isolation`, `message delivery`, `typing`, `reconnect`, `token refresh`, `polling fallback`, `cleanup/destroy`) — **✅ PROVEN** in BOTH Full and Lite Docker by: module2, socketio-verify, socket-race, realtime-authz, reconnect-regression, widget-live-messaging (incl. polling fallback on blocked socket), caddy-public-boundary (3003 public / 3004 internal). No defects found.
+
+## 9. Widget Installation
+
+All capabilities (`HTML snippet`, `script endpoint`, `external-origin embedding`, `domain enforcement`, `backend readiness check`, `truthful checklist`, `NPM Coming Soon`) — **✅ PROVEN** by onboarding.spec.ts + widget-external-origin + widget-npm-external-origin + widget-live-messaging + anonymous-isolation. The NPM card stays truthfully "Coming Soon" until real publication. One error-UX defect in `deleteDomain` (widget-panel + websites-panel duplicates) — fixed.
+**Domain enforcement design note (recorded, not changed):** empty `WidgetDomain` list or absent Origin/Referer ⇒ allow (backward-compat for script installs); enforcement lives on data endpoints. Changing to fail-closed would break non-browser/missing-Origin embeds — ⏸️ deferred as a product decision. New behavioral test proves allow/deny when domains ARE configured (see §10).
+
+## 10. Widget Customization — KNOWN-BROKEN AREA (deep audit)
+
+### Discovered defects (all confirmed in code before fixing)
+
+| ID | Defect | Severity | Fixed in this PR |
+|---|---|---|---|
+| **CUST-A** | **Free-plan misleading save UX.** `PATCH /api/widget-config` has NO plan gate — a free-plan admin edits every field, gets 200 + "Saved" toast, values persist, but the public widget keeps serving locked Sukhan-brand defaults (`getEffectiveWidgetConfig`). Dashboard preview renders the stored (never-served) values, compounding the deception. No plan restriction visible on the tab. | **BLOCKER (deceptive UI)** | ✅ |
+| **CUST-B** | **avatarUrl / logoUrl are persisted no-ops.** Persisted by PATCH (no URL validation — `javascript:`/`data:` accepted), returned by the public config, advertised on the `/doc` marketing page ("Custom avatar/logo — Pro plan and above") — but rendered by NOTHING (script widget: hardcoded SVG; v1: same; NPM widget: declared in types, never read; dashboard preview: never rendered). | **BLOCKER (dead controls + unsafe persisted input)** | ✅ |
+| **CUST-C** | **Position default 3-way inconsistency.** `bottom-start` (Prisma `@default` + migration + v1 runtime + NPM runtime) vs `bottom-end` (PATCH fallback + signup row creation + free-lock effective config + script runtime + preview binary). The schema default is dead in practice (signup writes `bottom-end` explicitly). | **HIGH (contract inconsistency)** | ✅ |
+| **CUST-D** | **No end-to-end customization proof.** Zero tests cover: customization save → reload persistence → public config effective values → rendered external-origin widget. module6 T2 (legacy) asserts only 4 JSON fields on the free lock. | **HIGH (test gap)** | ✅ |
+| **CUST-E** | **PATCH silently coerces garbage** — `String(body.accentColor ?? …)` accepts any string (`"[object Object]"` persistable); invalid enums fall back silently; `greetingTexts` object passthrough (no length/locale bounds); omitting a field RESETS it (full-update semantics — omitting `avatarUrl` nulls it). | **MEDIUM (input validation)** | ✅ |
+| **CUST-F** | **NPM widget "Powered by Sukhan" badge renders for EVERY plan** — `isFreePlan()` checks `config.plan` which the backend never sends (it sends `isLocked`/`poweredBy`), so the badge condition is always true. Script widget renders NO badge at all even when `poweredBy:true` (free contract promises one). Stale `plan` enum in `types.ts`. | **MEDIUM (plan-contract truthfulness)** | ✅ |
+
+### Fix design (no product-contract invention; free stays locked)
+
+- **Canonical position default: `bottom-end`** (matches brand default actually served to every new/free tenant). Applied consistently to: Prisma `@default` (+ migration `ALTER DEFAULT` — no data change; stored explicit positions untouched), v1 runtime fallback, NPM runtime fallback. PATCH fallback, signup creation, free-lock, script runtime, preview already used `bottom-end`.
+- **Plan-gated PATCH:** locked plans (`!plan.customization`, i.e. free) → `402 {code:'customization_locked'}`. Free customization stays locked (no unlock).
+- **PATCH validation (strict, no silent coercion):** `accentColor` must be `#RRGGBB`; `launcherShape`/`position` must be valid enums (400, not silent fallback); `avatarUrl`/`logoUrl` null/empty → null, else absolute **http(s) URL ≤ 500 chars** (rejects `javascript:`, `data:`, relative); `greetingTexts` only `fa`/`en` keys, strings ≤ 200; `defaultLocale` `fa|en`; **true-patch semantics** (absent fields keep current values — omitting a field no longer resets it).
+- **Truthful GET:** `/api/widget-config` now returns `{ config (stored), effective, isLocked }` — the dashboard preview shows the EFFECTIVE widget state when locked.
+- **Dashboard (locked):** lock banner (fa/en), all customization inputs + Save disabled, preview = effective locked values. (unlocked): as before + avatar/logo rendered in preview.
+- **avatarUrl/logoUrl rendering (both runtimes + preview):** `<img>` created via DOM `createElement` with `.src` property (never `innerHTML` with user content), `referrerPolicy='no-referrer'`, runtime scheme re-check (`^https?://`), on-error fallback (logo keeps SVG until load; avatar removed on error).
+- **Badge:** NPM badge renders iff `poweredBy === true`; script widget gains the badge iff `poweredBy === true` (free contract). `types.ts` `plan` enum replaced by the real `isLocked`/`poweredBy` fields.
+
+### Final verification (filled at end of PR)
+
+See §"End-to-end proof" below — new `tests/widget-customization.spec.ts` (Full+Lite CI) proves the complete paid flow (edit → save → reload persistence → public config effective values → rendered external-origin widget reflects accent/shape/position/greetings/avatar/logo) and the truthful free-locked flow (banner, disabled controls, 402 on direct PATCH, effective preview, locked public config).
+
+## 11. Widget Domains
+
+| Capability | Status before | Discovered defects | Final verification |
+|---|---|---|---|
+| Valid add / normalization (`www.` stripped, strict label rules) / duplicate rejection / invalid rejection / delete | ✅ (onboarding.spec.ts in CI) | delete ignored `!res.ok` — fixed | ✅ |
+| Plan limit (free=1) incl. disabled button + API 400 | ✅ (onboarding) | — | ✅ |
+| Tenant isolation (cross-tenant domain id) | 🟡 not directly tested | — | ✅ new spec |
+| Unauthorized-origin blocked (`403 domain_not_allowed`) when domains configured | 🟡 no CI test | — | ✅ new spec |
+| Authorized external origin works | ✅ (widget-live-messaging, allow-all path) | — | ✅ new spec (configured-domain path) |
+| Concurrency on plan limit | ⏸️ deferred (single-tenant sequential UI path; the seat-limit concurrency pattern is proven for invitations; domain adds are admin UI actions) | — | ⏸️ |
+
+## 12. Analytics
+
+| Capability | Status before | Discovered defects | Final verification |
+|---|---|---|---|
+| Cards render | ✅ (UI exists; module3 legacy) | read-only loader ignores `!res.ok` (recorded) | — |
+| **Calculations proven from known state** (total/open/closed, first-response, resolution, 7-day volume, CSAT avg+distribution) | 🔴 **NO behavioral test anywhere** | test gap (blocker per audit standard) | ✅ new `tests/analytics-csat.spec.ts` |
+| Tenant isolation | 🟡 | — | ✅ new spec (two tenants) |
+
+## 13. CSAT
+
+| Capability | Status before | Discovered defects | Final verification |
+|---|---|---|---|
+| Survey at correct lifecycle point (conversation closed) | 🟡 module3 legacy only | — | ✅ new spec |
+| Valid rating persists; analytics reflects it | 🔴 no CI test | — | ✅ new spec |
+| Invalid rating rejected (0/6/non-int) | 🔴 | — | ✅ new spec |
+| Another contact cannot rate another conversation | 🔴 | — | ✅ new spec |
+| Duplicate rating rejected | 🔴 | — | ✅ new spec |
+
+## 14. FAQ
+
+CRUD + role (admin+) + strict validation: ✅ proven by unit routing/input tests + tenant boundaries; **discovered**: FAQ UI consumes data only when `AiConfig.faqEnabled` — but **no dashboard UI exposes AiConfig** (flags default OFF) ⇒ the advertised auto-answer capability is unreachable through the UI. module4 (legacy) proves the engine works when flags are set via API. **Fix decision:** not a code bug to hot-fix here (AI config UI is feature-scale); ⏸️ **DEFERRED** — recorded honestly: FAQ CRUD is proven; the FAQ→auto-answer integration is proven only at engine level (legacy specs), and the missing AiConfig UI is a deferred product decision.
+
+## 15. Products / Import / WooCommerce
+
+| Capability | Status | Findings |
+|---|---|---|
+| Product listing/create/delete (manual) | ✅ | delete ignored `!res.ok` — fixed; `availability` never editable in UI (always in_stock) — recorded |
+| CSV/JSON import (`/api/products/import`) | ⛔ **NO UI** — backend strictly validated (≤500, validate-all-before-write) | orphan backend recorded (deferred) |
+| WooCommerce connector (`/api/connectors/woocommerce[+/sync]`) | ⛔ **NO UI** — backend has SSRF guard (unit-proven), secret masking | orphan backend recorded (deferred). No fake WooCommerce success is claimed anywhere in the UI — the products panel only shows badges for existing rows. |
+| Tenant isolation | ✅ | tenant-scoped models (fail-closed proxy) |
+
+## 16. AI configuration
+
+`GET/PATCH /api/ai-config` exist (admin+, lazy-create both-OFF). **No dashboard UI calls them** and no AI execution is enabled by default. The dashboard makes **no claim** that AI is active (no fake controls found). ⏸️ DEFERRED (UI for AI config is feature work). Engine-level behavior (FAQ auto-answer, product Q&A, plan cap) is proven by legacy module4 + unit tests; weekly message AI gating proven in module6.
+
+## 17. Billing
+
+Provider-agnostic state machine — **✅ PROVEN** by `tests/db-boundary/billing-state-machine.test.ts` (27 tests, real Postgres + injected mock provider — checkout, pending, success, duplicate callback idempotency, failure, cancellation, expiry, gateway/authority binding, tenant/plan consistency, entitlement activation, seat limits on downgrade) + unit billing-state (24) + billing-mock-provider (12). No live payment provider is called. Pro/Max are price-0 "Coming Soon" (truthfully badged in the billing UI). No defects found. No changes made (state machine preserved).
+
+## 18. Self-host
+
+Full + Lite clean install, migrations, Caddy public boundary (3003 public / 3004 blocked / arbitrary ports blocked), realtime, backup, restore, post-restore usability — **✅ PROVEN** by `self-host-clean-install.spec.ts` + `self-host-backup-restore.spec.ts` (production compose files only, port 80) + `caddy-public-boundary.spec.ts`, all in CI. No defects found.
+
+## 19. Error-UX audit (dashboard mutations)
+
+| Mutation | Anti-pattern before | Fix |
+|---|---|---|
+| routing-rules `deleteRule` | DELETE → unconditional "Saved" toast (wrong copy too) | res.ok check; error toast; truthful "Deleted" |
+| routing-rules `toggleRule` | PATCH ignored; silent revert | res.ok check; error toast |
+| faq `deleteFaq` / `toggleFaq` | same pattern | fixed |
+| products `deleteProduct` | same pattern | fixed |
+| websites-panel `deleteDomain` | same pattern | fixed |
+| widget-panel `deleteDomain` | same pattern | fixed |
+| inbox `changeStatus` | PATCH ignored | res.ok check + error toast |
+| departments `onDelete` | toast copy "Saved" for a delete; hardcoded `'Failed'` | truthful "Deleted"; localized errors |
+| Well-behaved (kept) | widget-config save, general save, billing subscribe, members invite/revoke/role, inbox sendReply, both addDomain forms | unchanged |
+| Unlocalized `'Failed'` strings (routing/faq/products/departments) + `'Failed to save'` (widget/general) | — | localized (fa/en) |
+
+Remaining recorded (not fixed — read-only loaders): contacts/faqs/products/routing/departments/widget `load()` render empty states on failure. Read-only, no deception (no success shown), deferred as polish.
+
+## 20. Role / tenant audit
+
+- Unauthenticated → 401 on every agent API: ✅ anonymous-isolation (15 CI tests).
+- Cross-tenant ids → rejected: ✅ tenant-security (7 CI tests) + department-members + tenant-isolation db-boundary.
+- Insufficient role → 403 on widget-config/faqs/products/routing/billing/connectors (admin+), members/invitations/departments (manager+): partially proven (invitation role escalation blocked in invite spec H). New customization spec adds a manager-role 403 spot-check on widget-config.
+- Stale/revoked membership → 401: ✅ invite spec F + reconnect-regression.
+
+## 21. Input validation audit (user-controlled settings)
+
+- Strictly validated already: invitations (email regex, roles), widget-domains (strict hostname rules), faqs, products, import, self-host-request, routing trigger/action (unit-proven 53 tests).
+- **Fixed in this PR:** widget-config PATCH (CUST-E above — hex color, enums, http(s) URLs, greeting bounds, true-patch semantics).
+- Recorded (deferred): signup/login email format; password policy; `tenants/me` PATCH name bounds; ai-config boolean type-checks; agent message length bound; conversation `status` filter enum.
+
+## 22. UI truthfulness audit (mismatches found)
+
+1. Sign-out labeled "Sign in" — **fixed**.
+2. Typing indicator shows "Coming Soon" — **fixed**.
+3. Reply placeholder uses command-palette copy — **fixed**.
+4. Free-plan customization tab pretends editable + save works — **fixed** (CUST-A).
+5. avatarUrl/logoUrl controls persisted but never rendered — **fixed** (CUST-B: now rendered safely on paid plans).
+6. Marketing `/doc` page claims "Custom avatar/logo (Pro plan and above)" — becomes TRUE after CUST-B fix.
+7. Department/routing delete toasts say "Saved" — **fixed**.
+8. Preview shows impossible paid appearance on free — **fixed** (shows effective locked state).
+9. Honest placeholders kept as-is: Integrations ComingSoonView, NPM Coming Soon, zero-priced plans Coming Soon.
+10. Orphan backends (import, WooCommerce, AiConfig) have NO UI and make no active claims — deferred, not deceptive.
+
+## 23. Browser journeys coverage map (required list)
+
+| # | Journey | Proof |
+|---|---|---|
+| 1 | brand-new signup → dashboard | every spec's setup + new specs |
+| 2 | login/logout/login | invite spec B + sign-out fix + new specs |
+| 3 | reset password | module7 (legacy; engine re-proven by unit OTP tests) — CI-level deferred |
+| 4 | workspace invitation + acceptance | invite spec B (CI) |
+| 5 | workspace switching | invite spec A (API-level, CI); UI deferred |
+| 6 | member lifecycle | invite spec D/E/F/G (CI) |
+| 7 | department lifecycle | module2 ② (CI) + new spec |
+| 8 | routing rule actually executes | module2 ② (CI) |
+| 9 | widget customization paid/effective flow | **new** widget-customization.spec.ts (CI, Full+Lite) |
+| 10 | free-plan customization truthful locked flow | **new** widget-customization.spec.ts (CI) |
+| 11 | allowed external domain widget | **new** widget-domains.spec.ts + widget-live-messaging (CI) |
+| 12 | blocked external domain widget | **new** widget-domains.spec.ts (CI) |
+| 13 | visitor sends → Inbox receives | module2/widget-live-messaging (CI) |
+| 14 | agent reply → visitor receives | module2/widget-live-messaging (CI) |
+| 15 | realtime disconnect → polling fallback → reconnect | widget-live-messaging ② + reconnect-regression (CI) |
+| 16 | close → CSAT → analytics | **new** analytics-csat.spec.ts (CI) |
+| 17 | contacts view reflects conversation identity | module3 legacy + anonymous-isolation — CI-level deferred |
+| 18 | plan limits actually enforced | module6 T1/T4 (free weekly + domain) legacy + invite D6 downgrade + new domains spec (CI) |
+| 19 | self-host Full | self-host-clean-install/back-restore (CI) |
+| 20 | self-host Lite | same, lite edition (CI) |
+
+## 24. Deferred items (recorded, not silently invented)
+
+1. **Workspace switcher UI** — backend + session mechanism proven (39 tests); the UI is feature-scale work. Deferred.
+2. **AiConfig dashboard UI** (FAQ/product-Q&A toggles) — engine proven; UI deferred.
+3. **Products import UI + WooCommerce connector UI** — backends validated; UIs deferred.
+4. **Password policy + session revocation on reset + email-format validation + auth rate limiting** — product/security-contract decisions; recorded.
+5. **`hasUsedFreeTrial` enforcement** (written, never checked) — recorded; the second-free-workspace rule is enforced at a different layer (module6 T3 proves the 409 via signup flow).
+6. **Domain enforcement fail-open when no Origin/Referer or empty list** — deliberate backward-compat; deferred as product decision.
+7. **Business-hours routing execution test** — engine path proven via keyword execution; dedicated test deferred.
+8. **Read-only loader error states** — polish, deferred.
+9. **Monthly `conversations` plan limit** — display-only today; enforcement deferred (needs product decision on paid pricing which is Coming Soon).
+10. **Login-OTP session issuance on server** — currently client-delegated; recorded.
