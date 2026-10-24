@@ -1,5 +1,6 @@
 import { db, withTenant } from '@/lib/db'
 import { publishToRealtime, room, EVENTS } from '@/lib/realtime-publish'
+import { isWithinBusinessHours, currentHour } from '@/lib/routing-hours'
 
 /**
  * Routing engine — evaluates trigger→action rules when a conversation is created.
@@ -51,6 +52,14 @@ export async function evaluateRoutingRules(
   conversationId: string,
   tenantId: string,
   firstMessageText: string,
+  /**
+   * Optional hour provider for DETERMINISTIC testing. Defaults to the
+   * server's current local hour (`new Date().getHours()`). Tests inject a
+   * fixed hour to prove business-hours routing executes inside/outside/at
+   * the boundary of a configured window WITHOUT depending on wall-clock
+   * luck. Production callers (the widget message route) never pass this.
+   */
+  getHour: () => number = currentHour,
 ): Promise<void> {
   try {
     await withTenant(tenantId, async () => {
@@ -61,7 +70,7 @@ export async function evaluateRoutingRules(
 
       if (rules.length === 0) return
 
-      const hour = new Date().getHours()
+      const hour = getHour()
 
       for (const rule of rules) {
         const config = rule.trigger as unknown as RoutingRule['trigger']
@@ -87,8 +96,9 @@ function matchConditions(conditions: RoutingCondition, text: string, hour: numbe
   }
 
   if (conditions.businessHours) {
-    const { start, end } = conditions.businessHours
-    if (hour < start || hour >= end) return false
+    // Deterministic half-open interval [start, end) — start INCLUSIVE,
+    // end EXCLUSIVE. See `src/lib/routing-hours.ts` for the contract.
+    if (!isWithinBusinessHours(conditions.businessHours, hour)) return false
   }
 
   return true

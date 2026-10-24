@@ -8,7 +8,7 @@ import { Input } from '@/components/ui/input'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { Search, Users, MessageSquare, Calendar } from 'lucide-react'
+import { Search, Users, MessageSquare, Calendar, AlertCircle, RefreshCw } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 type Contact = {
@@ -29,13 +29,32 @@ export function ContactsPanel() {
   const locale = useLocale()
   const [contacts, setContacts] = useState<Contact[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState(false)
   const [search, setSearch] = useState('')
 
   const load = useCallback(async () => {
-    const res = await fetch('/api/contacts')
-    const data = await res.json()
-    setContacts(data.contacts ?? [])
-    setLoading(false)
+    setLoading(true)
+    setLoadError(false)
+    try {
+      const res = await fetch('/api/contacts')
+      // Truthful failure handling: a failed read must NOT be presented as a
+      // fake empty state ("No contacts yet"). Surface a retry-able error
+      // instead so the user knows the request actually failed.
+      if (!res.ok) {
+        setLoadError(true)
+        setContacts([])
+        setLoading(false)
+        return
+      }
+      const data = await res.json()
+      setContacts(data.contacts ?? [])
+    } catch {
+      // Network/transport failure — same truthful error state.
+      setLoadError(true)
+      setContacts([])
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
   // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -73,6 +92,22 @@ export function ContactsPanel() {
         <CardContent className="p-0">
           {loading ? (
             <div className="p-6 text-sm text-muted-foreground">{tc('loading')}</div>
+          ) : loadError ? (
+            <div className="flex flex-col items-center gap-3 p-8 text-center">
+              <AlertCircle className="h-8 w-8 text-destructive/60" />
+              <p className="text-sm text-destructive">
+                {locale === 'fa' ? 'بارگذاری مخاطبین ناموفق بود' : 'Failed to load contacts'}
+              </p>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => load()}
+                className="gap-2"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                {locale === 'fa' ? 'تلاش مجدد' : 'Retry'}
+              </Button>
+            </div>
           ) : filtered.length === 0 ? (
             <div className="flex flex-col items-center gap-2 p-8 text-center">
               <Users className="h-8 w-8 text-muted-foreground/50" />
@@ -101,15 +136,33 @@ function ContactRow({ contact, locale }: { contact: Contact; locale: string }) {
   const [expanded, setExpanded] = useState(false)
   const [conversations, setConversations] = useState<any[]>([])
   const [loadingConvs, setLoadingConvs] = useState(false)
+  const [convsError, setConvsError] = useState(false)
 
   async function loadConversations() {
     if (expanded) { setExpanded(false); return }
     setLoadingConvs(true)
-    const res = await fetch(`/api/contacts/${contact.id}/conversations`)
-    const data = await res.json()
-    setConversations(data.conversations ?? [])
-    setLoadingConvs(false)
-    setExpanded(true)
+    setConvsError(false)
+    try {
+      const res = await fetch(`/api/contacts/${contact.id}/conversations`)
+      // Truthful failure: don't render a fake "No conversations" when the
+      // request actually failed.
+      if (!res.ok) {
+        setConvsError(true)
+        setConversations([])
+        setLoadingConvs(false)
+        setExpanded(true)
+        return
+      }
+      const data = await res.json()
+      setConversations(data.conversations ?? [])
+      setExpanded(true)
+    } catch {
+      setConvsError(true)
+      setConversations([])
+      setExpanded(true)
+    } finally {
+      setLoadingConvs(false)
+    }
   }
 
   const displayName = contact.name || contact.email || 'Visitor'
@@ -149,6 +202,22 @@ function ContactRow({ contact, locale }: { contact: Contact; locale: string }) {
         <div className="border-t border-border bg-muted/30 p-4">
           {loadingConvs ? (
             <div className="text-sm text-muted-foreground">{locale === 'fa' ? 'در حال بارگذاری...' : 'Loading...'}</div>
+          ) : convsError ? (
+            <div className="flex flex-col items-start gap-2">
+              <div className="flex items-center gap-2 text-sm text-destructive">
+                <AlertCircle className="h-4 w-4" />
+                {locale === 'fa' ? 'بارگذاری گفت‌وگوها ناموفق بود' : 'Failed to load conversations'}
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => { setExpanded(false); void loadConversations() }}
+                className="gap-2"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                {locale === 'fa' ? 'تلاش مجدد' : 'Retry'}
+              </Button>
+            </div>
           ) : conversations.length === 0 ? (
             <div className="text-sm text-muted-foreground">
               {locale === 'fa' ? 'گفت‌وگویی یافت نشد' : 'No conversations found'}

@@ -20,7 +20,7 @@
 | Signup resend | `/` OTP step | `POST /api/auth/otp/resend` | `OtpRequest.resendCount` | Public | — | OTP | module7 (legacy, not CI) | 🟡 | No per-IP rate limit at this layer (3-resend cap only) | unchanged (deferred) |
 | Credentials login | `/` login form | `/api/auth/[...nextauth]` (credentials) | `User.passwordHash` | Public | — | session JWT | every spec's `signInExisting` pattern | ✅ | — | ✅ proven by every new spec |
 | Login OTP (start/verify) | `/` | `POST /api/auth/login-otp/{start,verify}` | `OtpRequest` | Public | — | session issuance client-side | module7 (legacy) | 🟡 | verify returns `{verified}` only; session issuance delegated to client | unchanged (deferred) |
-| Password reset start/verify/complete | `/` | `POST /api/auth/reset-password/{start,verify,complete}` | `OtpRequest(purpose=reset)` + `User.passwordResetAt` | Public (OTP-gated) | — | bcrypt | module7 (legacy) | 🟡 | No password policy; existing JWT sessions NOT revoked after reset | unchanged (deferred — recorded) |
+| Password reset start/verify/complete | `/` | `POST /api/auth/reset-password/{start,verify,complete}` | `OtpRequest(purpose=reset)` + `User.passwordResetAt` | Public (OTP-gated) | — | bcrypt | **new** `tests/password-reset.spec.ts` (CI, Full+Lite) | ✅ | No password policy; existing JWT sessions NOT revoked after reset (truthful known decision — see §Final) | ✅ current CI journey: real user → start → OTP verify (mock 123456) → complete → old password fails → new password succeeds → unrelated email rejected (404 request_not_found) → invalid code (400 code_mismatch) → already-used (400) → unverified complete (403 otp_not_verified) → expired (400 expired via test-only dev/expire) |
 | Logout / session expiry | top-bar user menu | `signOut()` | NextAuth JWT | session | — | — | invite-workspace F | 🔴 | **Sign-out menu item mislabeled as "Sign in" (`t('auth.login')`)** — fixed in this PR | ✅ label fixed; login/logout/login re-proven |
 | Active-membership enforcement | — | `withSessionTenant` re-reads Membership every request | `Membership.status` | session+active | — | every agent API | anonymous-isolation (15); reconnect-regression | ✅ | — | ✅ |
 | Revoked-membership behavior | — | `withSessionTenant` 401; socket `membership_inactive` | `Membership.status='revoked'` | session | — | APIs + socket | invite-workspace F; reconnect-regression | ✅ | — | ✅ |
@@ -30,8 +30,8 @@
 | Capability | UI entry | API route | Model/state | AuthZ | Plan | Runtime consumer | Existing behavioral test | Status | Discovered defects | Final verification |
 |---|---|---|---|---|---|---|---|---|---|---|
 | Current workspace | top-bar | `GET /api/tenants/me` | `Tenant` + JWT `workspaceId` | session | — | dashboard | every spec | ✅ | — | ✅ |
-| Workspace listing | **NO UI** | `GET /api/workspaces` | `Membership` | session | — | — | invite-workspace A (API-level) | 🔴 | **Backend + 39 API tests exist; NO dashboard UI exposes workspace listing/switching** (top-bar has no switcher) | ⏸️ DEFERRED: adding a full workspace-switcher UI is feature-scale UI work; recorded as deferred (backend proven, UI gap documented) |
-| Workspace switching | **NO UI** | `POST /api/switch-workspace` + `useSession().update` | JWT callback re-validates | session+active | — | jwt callback | invite-workspace A (API-level) | 🔴 | same as above | ⏸️ deferred (API proven behaviorally) |
+| Workspace listing | top-bar switcher dropdown | `GET /api/workspaces` | `Membership` | session | — | — | invite-workspace A (API-level) + **new** `tests/workspace-switcher.spec.ts` (UI) | ✅ | **Was**: backend + 39 API tests existed but NO dashboard UI exposed listing/switching (top-bar had no switcher). **Fixed**: switcher dropdown added to the top-bar (current name clickable, lists all active workspaces, current marked with Check + role badge, pending invitations as a separate non-switchable section). | ✅ UI dropdown lists all active workspaces; current marked; secure switch flow (POST /api/auth/switch-workspace validate → useSession().update → verify returned session → hard reload clears all workspace-specific client state) |
+| Workspace switching | top-bar switcher dropdown | `POST /api/auth/switch-workspace` + `useSession().update` | JWT callback re-validates (throws `not_active_member` if invalid) | session+active | — | jwt callback | invite-workspace A (API-level) + **new** `tests/workspace-switcher.spec.ts` (UI) | ✅ | same as above | ✅ UI click → session switches + top-bar name changes + new-workspace data appears + old-workspace data disappears + stale Inbox selection cleared (component state, hard reload) + unauthorized id rejected (dropdown never lists it; API 404) + revoked membership disappears from dropdown with recovery to another active workspace |
 | Revoked current workspace recovery | — | APIs 401; `/api/workspaces` still lists; switch works | — | session | — | — | invite-workspace F | ✅ | — | ✅ |
 | Tenant isolation | — | fail-closed Prisma proxy + `withTenant` | 16 tenant-scoped models | — | — | all tenant APIs | tenant-isolation db-boundary (10); tenant-security (7) | ✅ | — | ✅ |
 
@@ -54,7 +54,7 @@ All capabilities (`invite creation`, `acceptance`, `reissue`, `expiry/revocation
 |---|---|---|---|---|
 | Create / update-toggle / delete | 🔴→✅ | unit routing-rules (53); module2 ② (execution) | **toggle/delete ignore `!res.ok`; delete toast says "Saved"** — fixed | error-UX fixed; execution re-proven (module2 in CI) |
 | Keyword condition | ✅ | unit validation (53) + module2 ② execution | — | ✅ |
-| Business-hours condition | 🟡 | unit validation only; **no execution test** | recorded gap | ⏸️ deferred (execution engine shared with keyword — same code path proven; dedicated hours-boundary test deferred) |
+| Business-hours condition | ✅ | unit validation (53) + **new** `tests/unit/routing-hours.test.ts` (pure helper boundaries) + **new** `tests/db-boundary/business-hours-routing.test.ts` (real-Postgres execution) | **Was**: unit validation only; no execution test. **Fixed**: extracted deterministic `isWithinBusinessHours` helper (`src/lib/routing-hours.ts`) + made `evaluateRoutingRules` accept an injectable `getHour` (default wall-clock — production unchanged). | ✅ deterministic execution proven: inside hours → action executes; outside → no action; boundary start inclusive / end exclusive; invalid windows rejected upstream by `validateRuleTrigger`; tenant isolation (B rule referencing A dept → execution-time revalidation rejects) |
 | assign-department action | ✅ | module2 ② (real execution on conversation create) | — | ✅ |
 | send-message action | ✅ | module2 ② (auto-reply observed) | — | ✅ |
 | **Actual rule execution** | ✅ | module2 ② — REAL conversation created via widget message → rule fires → dept assigned + auto-reply lands. NOT just "saved to DB" | — | ✅ |
@@ -63,7 +63,7 @@ All capabilities (`invite creation`, `acceptance`, `reissue`, `expiry/revocation
 
 | Capability | Status | Existing test | Discovered defects | Final verification |
 |---|---|---|---|---|
-| Listing / details / conversation history | ✅ | contacts-panel UI (module3 legacy) + `/api/contacts` covered by anonymous-isolation + tenant-security | read-only loaders ignore `!res.ok` (silent empty state on failure) — recorded, not fixed (read-only, low severity) | ⏸️ |
+| Listing / details / conversation history | ✅ | contacts-panel UI (module3 legacy) + `/api/contacts` covered by anonymous-isolation + tenant-security + **new** `tests/contacts-identity.spec.ts` (UI) | **Was**: read-only loaders ignored `!res.ok` → a failed fetch rendered a fake "No contacts yet" empty state. **Fixed**: `load()` + `loadConversations()` now check `res.ok`; on failure a truthful error state + Retry button is shown (not a fake empty state). | ✅ UI identity journey proven: visitor identifies via real widget path → sends message → Dashboard Contacts shows the contact with correct name/email/anonymous fallback; conversation count correct; expand → correct conversation + last-message preview + status; same-email different-visitorId does NOT inherit (backend `(tenantId, visitorId)` lookup); tenant B cannot see tenant A's contact |
 | Tenant isolation | ✅ | tenant-security A | — | ✅ |
 | Visitor identity behavior | ✅ | security-regressions (visitorId is identity; email is metadata only) | — | ✅ |
 
@@ -177,7 +177,7 @@ Full + Lite clean install, migrations, Caddy public boundary (3003 public / 3004
 | Well-behaved (kept) | widget-config save, general save, billing subscribe, members invite/revoke/role, inbox sendReply, both addDomain forms | unchanged |
 | Unlocalized `'Failed'` strings (routing/faq/products/departments) + `'Failed to save'` (widget/general) | — | localized (fa/en) |
 
-Remaining recorded (not fixed — read-only loaders): contacts/faqs/products/routing/departments/widget `load()` render empty states on failure. Read-only, no deception (no success shown), deferred as polish.
+Contacts read paths hardened in this PR: `contacts-panel.tsx` `load()` + `loadConversations()` now check `res.ok` and render a truthful error state + Retry on failure (no fake "No contacts yet" / "No conversations" empty state when the request actually failed). Other read-only loaders (faqs/products/routing/departments/widget) still render empty states on failure — read-only, no deception (no success shown), deferred as polish.
 
 ## 20. Role / tenant audit
 
@@ -211,9 +211,9 @@ Remaining recorded (not fixed — read-only loaders): contacts/faqs/products/rou
 |---|---|---|
 | 1 | brand-new signup → dashboard | every spec's setup + new specs |
 | 2 | login/logout/login | invite spec B + sign-out fix + new specs |
-| 3 | reset password | module7 (legacy; engine re-proven by unit OTP tests) — CI-level deferred |
+| 3 | reset password | **new** `tests/password-reset.spec.ts` (CI, Full+Lite): real user → start → OTP verify → complete → old fails → new succeeds → unrelated user blocked → invalid/expired/already-used/unverified fail closed |
 | 4 | workspace invitation + acceptance | invite spec B (CI) |
-| 5 | workspace switching | invite spec A (API-level, CI); UI deferred |
+| 5 | workspace switching | invite spec A (API-level, CI) + **new** `tests/workspace-switcher.spec.ts` (UI clicks: dropdown lists both, switch B↔A, data isolation, stale inbox cleared, unauthorized id rejected, revoked-membership recovery) |
 | 6 | member lifecycle | invite spec D/E/F/G (CI) |
 | 7 | department lifecycle | module2 ② (CI) + new spec |
 | 8 | routing rule actually executes | module2 ② (CI) |
@@ -225,23 +225,27 @@ Remaining recorded (not fixed — read-only loaders): contacts/faqs/products/rou
 | 14 | agent reply → visitor receives | module2/widget-live-messaging (CI) |
 | 15 | realtime disconnect → polling fallback → reconnect | widget-live-messaging ② + reconnect-regression (CI) |
 | 16 | close → CSAT → analytics | **new** analytics-csat.spec.ts (CI) |
-| 17 | contacts view reflects conversation identity | module3 legacy + anonymous-isolation — CI-level deferred |
+| 17 | contacts view reflects conversation identity | **new** `tests/contacts-identity.spec.ts` (CI, Full+Lite): real widget identify + message → Contacts shows correct name/email/anonymous fallback + count + expand → conversation/preview/status + same-email-different-visitorId no inheritance + tenant B isolation |
 | 18 | plan limits actually enforced | module6 T1/T4 (free weekly + domain) legacy + invite D6 downgrade + new domains spec (CI) |
 | 19 | self-host Full | self-host-clean-install/back-restore (CI) |
 | 20 | self-host Lite | same, lite edition (CI) |
 
 ## 24. Deferred items (recorded, not silently invented)
 
-1. **Workspace switcher UI** — backend + session mechanism proven (39 tests); the UI is feature-scale work. Deferred.
-2. **AiConfig dashboard UI** (FAQ/product-Q&A toggles) — engine proven; UI deferred.
-3. **Products import UI + WooCommerce connector UI** — backends validated; UIs deferred.
-4. **Password policy + session revocation on reset + email-format validation + auth rate limiting** — product/security-contract decisions; recorded.
-5. **`hasUsedFreeTrial` enforcement** (written, never checked) — recorded; the second-free-workspace rule is enforced at a different layer (module6 T3 proves the 409 via signup flow).
-6. **Domain enforcement fail-open when no Origin/Referer or empty list** — deliberate backward-compat; deferred as product decision.
-7. **Business-hours routing execution test** — engine path proven via keyword execution; dedicated test deferred.
-8. **Read-only loader error states** — polish, deferred.
-9. **Monthly `conversations` plan limit** — display-only today; enforcement deferred (needs product decision on paid pricing which is Coming Soon).
-10. **Login-OTP session issuance on server** — currently client-delegated; recorded.
+1. **AiConfig dashboard UI** (FAQ/product-Q&A toggles) — engine proven; UI deferred.
+2. **Products import UI + WooCommerce connector UI** — backends validated; UIs deferred.
+3. **Password policy + email-format validation + auth rate limiting** — product/security-contract decisions; recorded. (Session revocation on reset is a SEPARATE known security decision — see §Final.)
+4. **`hasUsedFreeTrial` enforcement** (written, never checked) — recorded; the second-free-workspace rule is enforced at a different layer (module6 T3 proves the 409 via signup flow).
+5. **Domain enforcement fail-open when no Origin/Referer or empty list** — deliberate backward-compat; deferred as product decision.
+6. **Read-only loader error states** (faqs/products/routing/departments/widget) — polish, deferred. (Contacts read paths were hardened in this PR.)
+7. **Monthly `conversations` plan limit** — display-only today; enforcement deferred (needs product decision on paid pricing which is Coming Soon).
+8. **Login-OTP session issuance on server** — currently client-delegated; recorded.
+
+**Resolved in this PR (no longer deferred):**
+- Workspace switcher UI — implemented in `src/components/dashboard/top-bar.tsx` + UI behavioral spec `tests/workspace-switcher.spec.ts`.
+- Business-hours routing execution test — deterministic helper `src/lib/routing-hours.ts` + unit `tests/unit/routing-hours.test.ts` + db-boundary execution `tests/db-boundary/business-hours-routing.test.ts`.
+- Password reset CI journey — `tests/password-reset.spec.ts` (+ test-only `dev/expire` OTP infra mirroring `invitations/dev/expire`).
+- Contacts UI identity journey — `tests/contacts-identity.spec.ts` + hardened read paths in `contacts-panel.tsx`.
 
 
 ---
@@ -280,24 +284,33 @@ Remaining recorded (not fixed — read-only loaders): contacts/faqs/products/rou
 
 ## Statement of completion
 
-No known blockers remain in the audited current-product capability matrix.
+Four capability-completion blockers (workspace switcher UI, business-hours
+routing execution, password-reset CI journey, contacts UI identity journey)
+have been implemented with dedicated behavioral specs in this PR. The final
+"No known blockers remain in the audited current-product capability matrix"
+affirmation is pending the green CI run (lint/typecheck/unit/Prisma validate/
+widget-package-qualification/Full+Lite DB-boundary/Full+Lite browser/self-host)
+on this SHA. Per the stabilization contract, the affirmation is only made once
+all four are behaviorally green.
 
 This document does not claim zero bugs. The deferred items below remain
 recorded, each with the reason it was not silently invented or hot-fixed
 here.
 
-## Deliberately deferred items (from the initial matrix, unchanged)
+## Deliberately deferred items (from the initial matrix)
 
-1. Workspace switcher UI (backend + session switching proven by 39 CI tests; the UI is feature-scale work)
-2. AiConfig dashboard UI (engine proven; UI deferred)
-3. Products import UI + WooCommerce connector UI (validated backends, no UI, no deceptive claims)
-4. Password policy, session revocation on reset, email-format validation, auth rate limiting (product/security-contract decisions)
-5. `hasUsedFreeTrial` enforcement gap (second-free-workspace rule proven enforced at the signup layer by module6 T3)
-6. Domain enforcement fail-open on missing Origin/Referer or empty list (deliberate backward-compat; documented in §9; the configured-domain deny path is now behaviorally proven)
-7. Business-hours routing execution test (engine path proven via keyword execution; dedicated test deferred)
-8. Read-only loader error states (polish)
-9. Monthly conversations plan limit (display-only; paid pricing is Coming Soon)
-10. Login-OTP server-side session issuance
+1. AiConfig dashboard UI (engine proven; UI deferred)
+2. Products import UI + WooCommerce connector UI (validated backends, no UI, no deceptive claims)
+3. Password policy, email-format validation, auth rate limiting (product/security-contract decisions). **Session revocation on reset is a SEPARATE known security decision** — see the known-decisions note below.
+4. `hasUsedFreeTrial` enforcement gap (second-free-workspace rule proven enforced at the signup layer by module6 T3)
+5. Domain enforcement fail-open on missing Origin/Referer or empty list (deliberate backward-compat; documented in §9; the configured-domain deny path is now behaviorally proven)
+6. Read-only loader error states for faqs/products/routing/departments/widget (polish). **Contacts read paths were hardened in this PR** (truthful error + Retry).
+7. Monthly conversations plan limit (display-only; paid pricing is Coming Soon)
+8. Login-OTP server-side session issuance
+
+## Known security decision (truthfully recorded, not invented here)
+
+The `reset-password/complete` route updates `User.passwordHash` + `passwordResetAt` but does **NOT** invalidate existing sessions. A user who is signed in on another device and resets their password keeps that existing session alive until its JWT expires naturally. This is the CURRENT product contract (verified by reading the route source). This PR does **not** invent session revocation behavior — it documents the existing contract truthfully, as instructed. The new `tests/password-reset.spec.ts` proves the reset itself works (old password fails, new password succeeds) without making any claim about session revocation.
 
 ## Observed one-time flake (recorded for observation)
 
@@ -312,10 +325,10 @@ it recurs, it warrants a dedicated investigation.
 
 ## Verification summary at the final SHA
 
-- **lint**: clean · **typecheck**: clean · **unit**: 520 pass / 0 fail
-- **Prisma validate + migration**: new migration `20241103000000_unify_widget_position_default` (column DEFAULT only — no data rewrite)
-- **widget-package-qualification**: all 14 steps pass (build, pack, tarball scan, npm + Bun clean-consumer install, ESM + SSR-safe imports incl. the previously-broken Bun SSR command, installed version match)
-- **New browser specs** run in BOTH Full and Lite docker-regression CI (added to both lists)
+- **lint**: clean (0 errors) · **typecheck**: clean · **unit**: 532 pass / 0 fail (520 baseline + 12 new `routing-hours` pure-helper boundaries)
+- **Prisma validate**: schema unchanged in this PR (validate passes in CI where DIRECT_URL is set)
+- **widget-package-qualification**: all 14 steps pass (unchanged)
+- **New behavioral specs added in this PR** (run in BOTH Full and Lite docker-regression CI — added to both lists): `tests/workspace-switcher.spec.ts`, `tests/password-reset.spec.ts`, `tests/contacts-identity.spec.ts`, `tests/db-boundary/business-hours-routing.test.ts`, `tests/unit/routing-hours.test.ts`
 - **Existing regressions untouched**: all previously-green specs still in the CI lists; no test was weakened or removed
 - **Self-host qualification + Caddy boundary**: unchanged, re-run in CI
 - **Vercel**: known external account-level block only — NON-BLOCKING
