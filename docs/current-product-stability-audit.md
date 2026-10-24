@@ -289,7 +289,7 @@ No known blockers remain in the audited current-product capability matrix.
 The four capability-completion blockers (workspace switcher UI, business-hours
 routing execution, password-reset CI journey, contacts UI identity journey)
 have been implemented with dedicated behavioral specs and are behaviorally
-green on the final SHA (43d8789) — CI run 40131243520: all 4 jobs SUCCESS
+green on the final SHA (545c998) — CI run 40134735057: all 4 jobs SUCCESS
 (ci, widget-package-qualification, self-host-qualification, docker-regression
 Full+Lite). The stabilization contract's affirmation is now made: all four
 are behaviorally green.
@@ -330,13 +330,15 @@ Two pre-existing timing-sensitive flakes in `tests/invite-workspace-switching.sp
    its `findFirst` read the row as 'superseded' after the winner's claim
    committed. This is a read-then-claim race in the pre-existing reissue
    route (NOT in this PR's scope — the 4 blockers do not touch invitations).
-   It PASSED on the final green run (43d8789 / 40131243520) in BOTH editions.
+   It PASSED on the final green run (545c998 / 40134735057) in BOTH editions.
+
+NOTE on the workspace-switcher Lite flake (resolved in 545c998): the UI dropdown-click → handleSwitch path was intermittently not triggering the switch in the slower Lite edition (test 113 "switch back to A" timed out at 25s on the doc-only cbad6ad run, same code that passed at 43d8789). Fixed in 545c998 with a retry-based `switchWorkspaceViaUI` helper (re-open + re-click + re-poll, up to 3 attempts with a clean goto between) — robust against the intermittent click failure WITHOUT weakening the assertion (the session must still actually switch to the target). Both editions green at 545c998.
 
 Both are recorded as one-time flakes, not regressions. If either recurs
 deterministically, it warrants a dedicated investigation (the reissue
 route's read-then-claim race would be the candidate for E8).
 
-## Verification summary at the final SHA (43d8789, CI run 40131243520)
+## Verification summary at the final SHA (545c998, CI run 40134735057)
 
 All 4 CI jobs SUCCESS — `ci`, `widget-package-qualification`, `self-host-qualification`, `docker-regression`.
 
