@@ -220,7 +220,13 @@ function buildScript(socketUrlOverride: string | null, isVercel: boolean): strin
     // assigned to img.src. The backend validates these too — this is
     // defense-in-depth at the runtime boundary.
     function safeImg(u){
-      if (typeof u !== 'string' || u.length > 500 || !/^https?:\/\//i.test(u)) return null;
+      // NOTE: this code is served inside a template literal — no regex
+      // escapes and no backticks allowed here. Scheme check is done with
+      // plain string comparisons so the served script is byte-identical
+      // to this source.
+      if (typeof u !== 'string' || u.length > 500) return null;
+      var low = u.slice(0, 8).toLowerCase();
+      if (low !== 'https://' && low.slice(0, 7) !== 'http://') return null;
       try { new URL(u); return u; } catch (e) { return null; }
     }
 
@@ -308,8 +314,9 @@ function buildScript(socketUrlOverride: string | null, isVercel: boolean): strin
 
     // Free-plan "Powered by" badge (CUST-F): the old condition
     // (!config.plan || config.plan === 'free') was ALWAYS true — the
-    // backend never sends `plan`; it sends the effective-config flags
-    // `poweredBy`/`isLocked`. Render the badge only when poweredBy:true.
+    // backend never sends a plan field; it sends the effective-config
+    // flags poweredBy and isLocked. Render the badge only when the
+    // effective config sets poweredBy to true.
     if (config.poweredBy) {
       var badge = el('a', 'sk-powered');
       badge.href = 'https://sukhan.chat';

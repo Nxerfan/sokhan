@@ -640,7 +640,6 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
                 <div className={cn('absolute', (disp ?? config).position === 'bottom-start' ? 'start-4' : 'end-4', 'bottom-20 w-56 rounded-xl border border-border bg-card shadow-xl')}>
                   <div className="flex items-center gap-2 border-b border-border p-3" style={{ backgroundColor: (disp ?? config).accentColor + '22' }}>
                     {(disp ?? config).logoUrl ? (
-                      // eslint-disable-next-line @next/next/no-img-element
                       <img src={(disp ?? config).logoUrl!} alt="" className="h-7 w-7 rounded-full object-cover" referrerPolicy="no-referrer" />
                     ) : (
                       <div className="flex h-7 w-7 items-center justify-center rounded-full" style={{ backgroundColor: (disp ?? config).accentColor }}>
@@ -648,7 +647,6 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
                       </div>
                     )}
                     {(disp ?? config).avatarUrl && (
-                      // eslint-disable-next-line @next/next/no-img-element
                       <img src={(disp ?? config).avatarUrl!} alt="" className="h-7 w-7 rounded-full object-cover" referrerPolicy="no-referrer" />
                     )}
                     <span className="text-xs font-medium">{tc('appName')}</span>

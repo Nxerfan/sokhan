@@ -446,7 +446,13 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
     // assigned to img.src. The backend validates these too — this is
     // defense-in-depth at the runtime boundary.
     function safeImg(u){
-      if (typeof u !== 'string' || u.length > 500 || !/^https?:\/\//i.test(u)) return null;
+      // NOTE: this code is served inside a template literal — no regex
+      // escapes and no backticks allowed here. Scheme check is done with
+      // plain string comparisons so the served script is byte-identical
+      // to this source.
+      if (typeof u !== 'string' || u.length > 500) return null;
+      var low = u.slice(0, 8).toLowerCase();
+      if (low !== 'https://' && low.slice(0, 7) !== 'http://') return null;
       try { new URL(u); return u; } catch (e) { return null; }
     }
 
