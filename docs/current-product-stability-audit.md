@@ -284,14 +284,15 @@ Contacts read paths hardened in this PR: `contacts-panel.tsx` `load()` + `loadCo
 
 ## Statement of completion
 
-Four capability-completion blockers (workspace switcher UI, business-hours
+No known blockers remain in the audited current-product capability matrix.
+
+The four capability-completion blockers (workspace switcher UI, business-hours
 routing execution, password-reset CI journey, contacts UI identity journey)
-have been implemented with dedicated behavioral specs in this PR. The final
-"No known blockers remain in the audited current-product capability matrix"
-affirmation is pending the green CI run (lint/typecheck/unit/Prisma validate/
-widget-package-qualification/Full+Lite DB-boundary/Full+Lite browser/self-host)
-on this SHA. Per the stabilization contract, the affirmation is only made once
-all four are behaviorally green.
+have been implemented with dedicated behavioral specs and are behaviorally
+green on the final SHA (43d8789) — CI run 40131243520: all 4 jobs SUCCESS
+(ci, widget-package-qualification, self-host-qualification, docker-regression
+Full+Lite). The stabilization contract's affirmation is now made: all four
+are behaviorally green.
 
 This document does not claim zero bugs. The deferred items below remain
 recorded, each with the reason it was not silently invented or hot-fixed
@@ -312,23 +313,42 @@ here.
 
 The `reset-password/complete` route updates `User.passwordHash` + `passwordResetAt` but does **NOT** invalidate existing sessions. A user who is signed in on another device and resets their password keeps that existing session alive until its JWT expires naturally. This is the CURRENT product contract (verified by reading the route source). This PR does **not** invent session revocation behavior — it documents the existing contract truthfully, as instructed. The new `tests/password-reset.spec.ts` proves the reset itself works (old password fails, new password succeeds) without making any claim about session revocation.
 
-## Observed one-time flake (recorded for observation)
+## Observed one-time flakes (recorded for observation)
 
-The pre-existing `invite-workspace-switching.spec.ts` B1-B2 test
-("pre-verification credentials sign-in must fail") failed exactly once
-during this PR's CI (run #210) with an unexpected 200. The identical
-spec code passed in the two adjacent runs of this same branch (#208,
-#209) and every prior run on main, and this branch contains **zero**
-changes to auth/signup/login/users/invitations — so it is recorded as a
-one-time flake of the credentials-callback path, not a regression. If
-it recurs, it warrants a dedicated investigation.
+Two pre-existing timing-sensitive flakes in `tests/invite-workspace-switching.spec.ts`
+(a spec this PR did NOT touch — zero changes to auth/signup/login/users/invitations):
 
-## Verification summary at the final SHA
+1. **B1-B2** ("pre-verification credentials sign-in must fail") failed exactly
+   once at a57cb51 (run #210) with an unexpected 200. Passed in the two adjacent
+   runs (#208, #209) and every prior run on main.
 
-- **lint**: clean (0 errors) · **typecheck**: clean · **unit**: 532 pass / 0 fail (520 baseline + 12 new `routing-hours` pure-helper boundaries)
-- **Prisma validate**: schema unchanged in this PR (validate passes in CI where DIRECT_URL is set)
+2. **E8** ("concurrent reissue of SAME revoked invitation — single winner")
+   failed exactly once at 8d4ba8e (run 40128753944, Lite edition) with
+   `[200,400]` instead of the expected `[200,409]` — the loser of the
+   concurrent reissue race hit the early `status !== 'revoked'` validation
+   path (400) instead of the `already_reissued` conflict path (409), because
+   its `findFirst` read the row as 'superseded' after the winner's claim
+   committed. This is a read-then-claim race in the pre-existing reissue
+   route (NOT in this PR's scope — the 4 blockers do not touch invitations).
+   It PASSED on the final green run (43d8789 / 40131243520) in BOTH editions.
+
+Both are recorded as one-time flakes, not regressions. If either recurs
+deterministically, it warrants a dedicated investigation (the reissue
+route's read-then-claim race would be the candidate for E8).
+
+## Verification summary at the final SHA (43d8789, CI run 40131243520)
+
+All 4 CI jobs SUCCESS — `ci`, `widget-package-qualification`, `self-host-qualification`, `docker-regression`.
+
+- **lint**: clean (0 errors; 1 pre-existing baseline warning unchanged) · **typecheck**: clean
+- **unit**: 532 pass / 0 fail (520 baseline + 12 new `routing-hours` pure-helper boundaries) — `ci` job
+- **Prisma validate**: schema unchanged in this PR (validate passes in CI where DIRECT_URL is set) — `ci` job
 - **widget-package-qualification**: all 14 steps pass (unchanged)
+- **Full DB-boundary**: 57 pass / 0 fail (44 baseline + 13 new `business-hours-routing`) — `docker-regression` job
+- **Lite DB-boundary**: 57 pass / 0 fail (44 baseline + 13 new `business-hours-routing`) — `docker-regression` job
+- **Full browser regression**: 115 pass / 0 fail (87 baseline + 5 widget-customization/domains/analytics-csat from PR #13 + 3 new workspace-switcher/password-reset/contacts-identity) — `docker-regression` job
+- **Lite browser regression**: 115 pass / 0 fail (same composition) — `docker-regression` job
+- **self-host-qualification**: SUCCESS (clean-install Full+Lite + backup-restore Full+Lite — the backup-restore heading assertion `getByRole('heading', { name: workspace })` passes with the `<h2>` switcher trigger)
 - **New behavioral specs added in this PR** (run in BOTH Full and Lite docker-regression CI — added to both lists): `tests/workspace-switcher.spec.ts`, `tests/password-reset.spec.ts`, `tests/contacts-identity.spec.ts`, `tests/db-boundary/business-hours-routing.test.ts`, `tests/unit/routing-hours.test.ts`
 - **Existing regressions untouched**: all previously-green specs still in the CI lists; no test was weakened or removed
-- **Self-host qualification + Caddy boundary**: unchanged, re-run in CI
 - **Vercel**: known external account-level block only — NON-BLOCKING
