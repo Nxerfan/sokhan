@@ -155,7 +155,7 @@ async function listWorkspacesApi(page: Page): Promise<{ id: string; name: string
 }
 
 /** The TopBar switcher trigger button (contains the workspace name + Building2 icon). */
-const SWITCHER_TRIGGER = 'header button[aria-label="Switch workspace"]'
+const SWITCHER_TRIGGER = 'header h2'
 
 test.describe('Workspace switcher UI (PR #13 BLOCKER #1)', () => {
   let tenantA: TenantCtx

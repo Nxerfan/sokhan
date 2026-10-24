@@ -164,23 +164,22 @@ export function TopBar({ workspaceName }: { workspaceName: string }) {
       <div className="flex items-center gap-3">
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="gap-2 px-2 font-display text-sm font-semibold tracking-tight"
-              disabled={switching}
-              aria-label={t('settings.switchWorkspace')}
+            <h2
+              className={`flex cursor-pointer select-none items-center gap-2 rounded-md px-2 py-1 font-display text-sm font-semibold tracking-tight outline-none transition-colors hover:bg-sidebar-accent/50 focus-visible:ring-2 focus-visible:ring-ring ${
+                switching ? 'opacity-50' : ''
+              }`}
+              tabIndex={switching ? -1 : 0}
             >
-              <Building2 className="h-4 w-4 text-muted-foreground" />
+              <Building2 className="h-4 w-4 shrink-0 text-muted-foreground" />
               <span className="max-w-[40vw] truncate sm:max-w-[260px]">
                 {workspaceName}
               </span>
               <ChevronDown
-                className={`h-3.5 w-3.5 text-muted-foreground transition-transform ${
+                className={`h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform ${
                   switching ? 'animate-pulse' : ''
                 }`}
               />
-            </Button>
+            </h2>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-72">
             <DropdownMenuLabel className="text-xs text-muted-foreground">
