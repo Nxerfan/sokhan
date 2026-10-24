@@ -242,3 +242,69 @@ Remaining recorded (not fixed — read-only loaders): contacts/faqs/products/rou
 8. **Read-only loader error states** — polish, deferred.
 9. **Monthly `conversations` plan limit** — display-only today; enforcement deferred (needs product decision on paid pricing which is Coming Soon).
 10. **Login-OTP session issuance on server** — currently client-delegated; recorded.
+
+
+---
+
+# Final audit results (post-fix update)
+
+> This section is the final update required by the stabilization task. The
+> initial matrix above was created BEFORE fixing code (Phase 1). Everything
+> below reflects the state at the final SHA of this PR.
+
+## What was tested, what failed initially, what was fixed
+
+| Defect | Severity | Fixed by commit | Behavioral proof |
+|---|---|---|---|
+| CUST-A free-plan misleading save UX (editable controls + "Saved" toast while the widget serves locked defaults) | **BLOCKER (deceptive UI)** | `fix(widget-config)` + `fix(dashboard)` | `widget-customization.spec.ts` test 2 (FREE): banner visible, all controls disabled, direct PATCH → 402 `customization_locked`, effective preview, locked public config, locked rendered widget |
+| CUST-B avatarUrl/logoUrl persisted no-ops (unvalidated, rendered nowhere, advertised on /doc) | **BLOCKER (dead controls + unsafe input)** | `fix(widget-config)` (strict http(s) validation) + `fix(widget)` (safe DOM rendering in script + v1 + NPM runtimes + dashboard preview) | test 1 (PAID): avatar + logo images actually rendered in the external-origin widget (served by the customer test server); test 3: `javascript:`/`data:`/`ftp://`/relative URLs → 400 |
+| CUST-C position default 3-way inconsistency | HIGH | `fix(widget-config)` (schema `@default` + migration) + `fix(widget)` (v1 + NPM fallbacks → `bottom-end`) | test 3: fresh tenant stored position `bottom-end`; public config `bottom-end`; stored explicit `bottom-start` preserved verbatim |
+| CUST-D zero end-to-end customization tests | HIGH | `test(stability)` | test 1: dashboard edit → save → reload persistence → config API → public config → rendered external-origin widget (accent rgb, shape class, position side with rtl flip, greeting, avatar, logo, no badge on paid) |
+| CUST-E PATCH silently coerces garbage / omit-resets-field | MEDIUM | `fix(widget-config)` | test 3: invalid hex/enum/locale/greeting-length → 400; partial PATCH keeps other fields (avatarUrl NOT reset) |
+| CUST-F "Powered by" badge wrong on every runtime (never/always) | MEDIUM | `fix(widget)` | test 1: paid → badge count 0; test 2: free → badge visible |
+| 8 dashboard mutations ignore `!res.ok` then show success | HIGH (error-UX) | `fix(dashboard)` | source-level fix (anti-pattern eliminated); the 402 rejection path itself is behaviorally proven (test 2) |
+| Sign-out labeled "Sign in" | MEDIUM (truthfulness) | `fix(dashboard)` | label now uses `auth.signOut` key (fa/en) |
+| Typing indicator labeled "Coming Soon" | MEDIUM (truthfulness) | `fix(dashboard)` | uses new `dashboard.typing` key |
+| Reply placeholder used command-palette copy | LOW | `fix(dashboard)` | uses new `dashboard.replyPlaceholder` key |
+| Delete toasts said "Saved" (routing/departments) | LOW | `fix(dashboard)` | truthful "Deleted" copy |
+| Latent customization-tab crash when config failed to load | LOW | `fix(dashboard)` | tab now guards on `config` |
+| Domain enforcement untested (allow/deny with configured domains) | HIGH (test gap) | `test(stability)` | `widget-domains.spec.ts`: authorized Origin 200 vs unauthorized 403 `domain_not_allowed`, cross-tenant delete 404, normalization, duplicates, invalids, delete, allow-all when empty |
+| Analytics/CSAT untested | HIGH (test gap) | `test(stability)` | `analytics-csat.spec.ts`: totals/open/closed/first-response/resolution/7-day-volume/CSAT avg+distribution proven from known state; open-conversation rating rejected; invalid ratings rejected; cross-contact rating 404; duplicate `already_rated`; tenant isolation |
+
+## Intentionally unavailable (truthful plan gating — unchanged product contract)
+
+- **Free-plan customization** stays locked (locked brand look + `poweredBy` badge). The dashboard now says so truthfully; PATCH is rejected with 402.
+- **Pro/Max purchases** are Coming Soon (price-0) — truthfully badged in the billing UI; checkout correctly rejects them (`plan_unavailable`).
+- **NPM installation** stays "Coming Soon" until the package is actually published to the public npm registry (PR #12 preserved this truthfully).
+- **Integrations** nav item is an honestly-labeled Coming Soon placeholder.
+
+## Statement of completion
+
+No known blockers remain in the audited current-product capability matrix.
+
+This document does not claim zero bugs. The deferred items below remain
+recorded, each with the reason it was not silently invented or hot-fixed
+here.
+
+## Deliberately deferred items (from the initial matrix, unchanged)
+
+1. Workspace switcher UI (backend + session switching proven by 39 CI tests; the UI is feature-scale work)
+2. AiConfig dashboard UI (engine proven; UI deferred)
+3. Products import UI + WooCommerce connector UI (validated backends, no UI, no deceptive claims)
+4. Password policy, session revocation on reset, email-format validation, auth rate limiting (product/security-contract decisions)
+5. `hasUsedFreeTrial` enforcement gap (second-free-workspace rule proven enforced at the signup layer by module6 T3)
+6. Domain enforcement fail-open on missing Origin/Referer or empty list (deliberate backward-compat; documented in §9; the configured-domain deny path is now behaviorally proven)
+7. Business-hours routing execution test (engine path proven via keyword execution; dedicated test deferred)
+8. Read-only loader error states (polish)
+9. Monthly conversations plan limit (display-only; paid pricing is Coming Soon)
+10. Login-OTP server-side session issuance
+
+## Verification summary at the final SHA
+
+- **lint**: clean · **typecheck**: clean · **unit**: 520 pass / 0 fail
+- **Prisma validate + migration**: new migration `20241103000000_unify_widget_position_default` (column DEFAULT only — no data rewrite)
+- **widget-package-qualification**: all 14 steps pass (build, pack, tarball scan, npm + Bun clean-consumer install, ESM + SSR-safe imports incl. the previously-broken Bun SSR command, installed version match)
+- **New browser specs** run in BOTH Full and Lite docker-regression CI (added to both lists)
+- **Existing regressions untouched**: all previously-green specs still in the CI lists; no test was weakened or removed
+- **Self-host qualification + Caddy boundary**: unchanged, re-run in CI
+- **Vercel**: known external account-level block only — NON-BLOCKING
