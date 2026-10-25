@@ -346,15 +346,20 @@ test.describe('Workspace switcher UI (PR #13 BLOCKER #1)', () => {
     expect(ids, 'revoked workspace A must disappear from the dropdown list').not.toContain(tenantA.tenantId)
     expect(ids, 'active workspace B must remain available for recovery').toContain(tenantB.tenantId)
 
-    // The dropdown offers B as the recovery target.
+    // The dropdown offers B as the recovery target. ONE open + ONE click
+    // (the user's contract: one dropdown open, one user selection, one workspace
+    // mutation). The earlier double-open (open → Escape → re-open) confused
+    // Radix's menu state in this degraded (revoked-current-workspace) state and
+    // caused the menuitem to continuously detach ("element was detached from
+    // the DOM, retrying"). One open + one click is both cleaner and the genuine
+    // single user action.
     await openSwitcher(tenantB.page)
     const dropdown = tenantB.page.locator('[role="menu"]')
     await expect(dropdown.locator('text=WS B')).toBeVisible()
     await expect(dropdown).not.toContainText('WS A')
-    await tenantB.page.keyboard.press('Escape')
 
     // B recovers by switching to B (B's membership in B is still active).
-    await openSwitcher(tenantB.page)
+    // ONE click (noWaitAfter — the reload is verified independently below).
     await clickWorkspaceItem(tenantB.page, 'WS B')
     await waitForWorkspaceSwitch(tenantB.page, tenantB.tenantId)
     await tenantB.page.goto(BASE, { waitUntil: 'domcontentloaded' })
