@@ -2,11 +2,10 @@ import { NextRequest, NextResponse } from 'next/server'
 import { db, withTenant } from '@/lib/db'
 import { verifyOtp, NixifyError } from '@/lib/nixify/client'
 import { checkRateLimit, getClientIP } from '@/lib/rate-limit'
-import { coerceAccessMode } from '@/lib/widget-access-policy'
+import { parseAccessMode } from '@/lib/widget-access-policy'
 import { signResumeCredential } from '@/lib/widget-identity-tokens'
 import { signToken } from '@/lib/realtime-token'
 
-/** CORS headers. */
 function widgetHeaders(res: NextResponse): NextResponse {
   res.headers.set('Access-Control-Allow-Origin', '*')
   res.headers.set('Access-Control-Allow-Methods', 'POST, OPTIONS')
@@ -18,28 +17,33 @@ export async function OPTIONS() {
   return new NextResponse(null, { status: 204, headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type, Authorization' } })
 }
 
+/** BLOCKER 6: bounded max verification attempts. */
+const MAX_VERIFY_ATTEMPTS = 5
+
 /**
  * Verified Visitor OTP — VERIFY (verified_visitor access mode).
  *
  *   POST /api/widget/<slug>/verify-identity/verify
- *   body: { email, code, requestId }
+ *   body: { visitorId (REQUIRED), email (REQUIRED), code (REQUIRED), requestId (REQUIRED) }
  *
- * Verifies the OTP code (reusing Nixify verifyOtp). On success:
- *   - marks the OtpRequest verified (one-time consumption)
- *   - marks the Contact.emailVerifiedAt = now (establishes verified_contact)
- *   - issues a resume credential (~30d) bound to the Contact + tenant +
- *     CURRENT policyVersion (so a stricter policy transition invalidates it)
- *   - issues a realtime visitor token (identityLevel=verified_contact) so the
- *     visitor can immediately start chatting
+ * BLOCKER 5: the lookup is scoped by tenant + Contact + providerRequestId +
+ * normalized email + widget-verify purpose. The Contact is revalidated as
+ * belonging to the same tenant + same visitor identity (visitorId) that
+ * initiated verification. No global requestId-only authority.
  *
- * Negative cases (all fail closed — no partial verification):
- *   - invalid code → 400 code_mismatch
- *   - expired OTP → 400 expired
- *   - already-used OTP → 400 already_used
- *   - wrong email (requestId mismatch) → 404 request_not_found
+ * BLOCKER 6: a bounded max attempt limit (5) is enforced — attempts >= MAX
+ * → fail closed with 'attempt_limit_reached' (no Nixify call after the limit).
  *
- * No email-based Contact merging — the OTP is tied to the contactId from the
- * start route, so verification marks THAT Contact only.
+ * BLOCKER 8: after successful provider verification, the local WidgetOtpRequest
+ * is atomically claimed via a conditional write (updateMany WHERE verified=false
+ * AND expiresAt>now). Exactly one request may transition to verified; a
+ * concurrent loser gets 'already_used' + no second resume credential.
+ *
+ * BLOCKER 9: never falls back to policyVersion ?? 1 — if WidgetConfig is
+ * missing or policyVersion invalid, FAIL CLOSED (no credential minted).
+ *
+ * BLOCKER 4: the local purpose is 'widget_verify' (a login/signup/reset OTP
+ * can never satisfy this — different model + purpose).
  */
 export async function POST(
   req: NextRequest,
@@ -63,12 +67,9 @@ export async function POST(
     return widgetHeaders(NextResponse.json({ error: 'not_found' }, { status: 404 }))
   }
 
-  const accessMode = coerceAccessMode(tenant.widgetConfig?.accessMode)
+  const accessMode = parseAccessMode(tenant.widgetConfig?.accessMode)
   if (accessMode !== 'verified_visitor') {
-    return widgetHeaders(NextResponse.json(
-      { error: 'mode_mismatch' },
-      { status: 409 },
-    ))
+    return widgetHeaders(NextResponse.json({ error: 'mode_mismatch' }, { status: 409 }))
   }
 
   const body = await req.json().catch(() => null)
@@ -76,36 +77,53 @@ export async function POST(
     return widgetHeaders(NextResponse.json({ error: 'invalid_body' }, { status: 400 }))
   }
 
-  const email = String(body.email ?? '').trim().toLowerCase()
-  const code = String(body.code ?? '').trim()
-  const requestId = String(body.requestId ?? '').trim()
-  if (!email || !code || !requestId) {
+  const visitorId = typeof body.visitorId === 'string' ? body.visitorId.trim().slice(0, 100) : ''
+  const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : ''
+  const code = typeof body.code === 'string' ? body.code.trim() : ''
+  const requestId = typeof body.requestId === 'string' ? body.requestId.trim() : ''
+  if (!visitorId || !email || !code || !requestId) {
     return widgetHeaders(NextResponse.json({ error: 'missing_fields' }, { status: 400 }))
   }
 
-  // Find the OtpRequest (tied to this tenant + email + purpose).
-  const otpReq = await db.otpRequest.findFirst({
-    where: { requestId, email, purpose: 'visitor_verification' },
+  // BLOCKER 5: tenant-scoped lookup by providerRequestId + email + purpose.
+  // The db proxy (withTenant) injects tenantId; the WidgetOtpRequest must
+  // belong to THIS tenant. The contactId (for the Contact revalidation) is
+  // resolved from the record itself — NOT from the browser.
+  const lookup = await withTenant(tenant.id, async () => {
+    const otpReq = await db.widgetOtpRequest.findFirst({
+      where: { providerRequestId: requestId, email, purpose: 'widget_verify' },
+    })
+    if (!otpReq) return { notFound: true as const }
+    return { otpReq }
   })
-  if (!otpReq) {
+  if (!lookup || ('notFound' in lookup)) {
+    // Do not reveal whether the requestId vs email is wrong (enumeration resistance).
     return widgetHeaders(NextResponse.json({ error: 'request_not_found' }, { status: 404 }))
   }
+  const otpReq = lookup.otpReq
+
   if (otpReq.verified) {
     return widgetHeaders(NextResponse.json({ error: 'already_used' }, { status: 400 }))
   }
   if (otpReq.expiresAt < new Date()) {
     return widgetHeaders(NextResponse.json({ error: 'expired' }, { status: 400 }))
   }
+  // BLOCKER 6: enforce the max attempt limit BEFORE calling Nixify.
+  if (otpReq.attempts >= MAX_VERIFY_ATTEMPTS) {
+    return widgetHeaders(NextResponse.json({ error: 'attempt_limit_reached' }, { status: 429 }))
+  }
 
-  // Bounded attempts (rate-limit the verify attempts per request).
-  await db.otpRequest.update({
-    where: { id: otpReq.id },
-    data: { attempts: { increment: 1 } },
+  // Increment attempts (bookkeeping; the limit check above is authoritative).
+  await withTenant(tenant.id, async () => {
+    await db.widgetOtpRequest.update({
+      where: { id: otpReq.id },
+      data: { attempts: { increment: 1 } },
+    })
   })
 
-  // Reuse the Nixify verifyOtp — it throws NixifyError('code_mismatch') on wrong code.
+  // Verify the code via Nixify (reuses the existing infrastructure).
   try {
-    const result = await verifyOtp(email, code, 'visitor_verification', requestId)
+    const result = await verifyOtp(email, code, 'widget_verify', requestId)
     if (!result.verified) {
       return widgetHeaders(NextResponse.json({ error: 'code_mismatch' }, { status: 400 }))
     }
@@ -117,47 +135,56 @@ export async function POST(
     return widgetHeaders(NextResponse.json({ error: 'internal_error' }, { status: 500 }))
   }
 
-  // Mark the OtpRequest verified (one-time consumption).
-  await db.otpRequest.update({
-    where: { id: otpReq.id },
-    data: { verified: true, verifiedAt: new Date() },
+  // BLOCKER 8: atomically claim/consume the local record. Exactly one request
+  // may transition verified=false → true; a concurrent loser gets count=0.
+  const now = new Date()
+  const claim = await withTenant(tenant.id, async () => {
+    const claimed = await db.widgetOtpRequest.updateMany({
+      where: { id: otpReq.id, verified: false, expiresAt: { gt: now } },
+      data: { verified: true, verifiedAt: now },
+    })
+    return claimed.count
   })
+  if (claim === 0) {
+    // A concurrent verifier already claimed it (or it expired between the check + the claim).
+    return widgetHeaders(NextResponse.json({ error: 'already_used' }, { status: 400 }))
+  }
 
-  // Establish the verified_contact identity: mark the Contact.emailVerifiedAt.
-  // The otpReq.contactId ties THIS OTP to THAT Contact (no email-based merging).
-  const policyVersion = tenant.widgetConfig?.policyVersion ?? 1
-  const { contactId, realtimeToken } = await withTenant(tenant.id, async () => {
-    if (otpReq.contactId) {
-      await db.contact.update({
-        where: { id: otpReq.contactId },
-        data: { emailVerifiedAt: new Date(), email },
-      })
+  // BLOCKER 5: revalidate the Contact belongs to the same tenant + same visitor
+  // identity (visitorId) that initiated verification. The visitorId from the
+  // request body must match the Contact's identifier.
+  const result = await withTenant(tenant.id, async () => {
+    const contact = await db.contact.findUnique({ where: { id: otpReq.contactId } })
+    if (!contact || contact.identifier !== visitorId) {
+      return { invalid: true as const }
     }
-    // Issue the resume credential (~30d) bound to the Contact + tenant + CURRENT
-    // policyVersion (stricter-policy invalidation on the next protected action).
-    return {
-      contactId: otpReq.contactId!,
-      realtimeToken: signToken({
-        type: 'visitor',
-        contactId: otpReq.contactId!,
-        tenantId: tenant.id,
-        slug,
-        identityLevel: 'verified_contact',
-        policyVersion,
-      }),
-    }
+    // Establish the verified_contact identity: mark emailVerifiedAt.
+    await db.contact.update({
+      where: { id: contact.id },
+      data: { emailVerifiedAt: now, email },
+    })
+    return { contactId: contact.id }
   })
+  if (!result || ('invalid' in result)) {
+    // The Contact does not match the visitor identity — fail closed (no credential).
+    return widgetHeaders(NextResponse.json({ error: 'identity_mismatch' }, { status: 403 }))
+  }
 
-  const resumeCredential = signResumeCredential({
-    contactId: otpReq.contactId!,
-    tenantId: tenant.id,
-    policyVersion,
+  // BLOCKER 9: never fall back to policyVersion ?? 1. If WidgetConfig is
+  // missing or policyVersion is invalid/missing, FAIL CLOSED (no credential).
+  if (!tenant.widgetConfig || typeof tenant.widgetConfig.policyVersion !== 'number') {
+    return widgetHeaders(NextResponse.json({ error: 'policy_unavailable' }, { status: 503 }))
+  }
+  const policyVersion = tenant.widgetConfig.policyVersion
+
+  const contactId = result.contactId
+  const resumeCredential = signResumeCredential({ contactId, tenantId: tenant.id, policyVersion })
+  const realtimeToken = signToken({
+    type: 'visitor', contactId, tenantId: tenant.id, slug,
+    identityLevel: 'verified_contact', policyVersion,
   })
 
   return widgetHeaders(NextResponse.json({
-    verified: true,
-    contactId,
-    resumeCredential,
-    realtimeToken,
+    verified: true, contactId, resumeCredential, realtimeToken,
   }))
 }

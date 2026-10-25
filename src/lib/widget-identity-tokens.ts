@@ -1,5 +1,6 @@
 import 'server-only'
 import crypto from 'crypto'
+import { getAuthSecret } from '@/lib/env-check'
 
 /**
  * Widget identity tokens — TWO distinct, strongly-separated credential classes
@@ -36,7 +37,7 @@ import crypto from 'crypto'
  * hashed on WidgetConfig — see widget-integration-credential.ts.)
  */
 
-const NEXTAUTH_SECRET = process.env.NEXTAUTH_SECRET || 'dev-insecure-secret-not-production'
+const NEXTAUTH_SECRET = getAuthSecret() // canonical loader — fails closed in production (no custom fallback)
 
 /** Resume credential lifetime: ~30 days. */
 export const RESUME_CREDENTIAL_TTL_SECONDS = 30 * 24 * 60 * 60

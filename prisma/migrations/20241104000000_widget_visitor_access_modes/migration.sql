@@ -1,71 +1,63 @@
 -- Widget Visitor Access Modes / Identity (feat/widget-visitor-access-modes)
+-- CORRECTED FOUNDATION (Blockers 2, 3, 12).
 --
--- FROZEN CONTRACT (accessMode):
---   * EXISTING WidgetConfig rows (pre-migration) → 'anonymous' (backfill —
---     preserves the current anonymous behavior for already-deployed workspaces;
---     no operator action required).
---   * ALL FUTURE WidgetConfig rows by DEFAULT → 'verified_visitor' (the DB
---     DEFAULT is set to 'verified_visitor' so correctness does NOT depend on
---     the signup route — any creation path that omits accessMode still gets
---     verified_visitor).
---   * Authoritative enum enforcement: a CHECK constraint restricts accessMode
---     to 'anonymous' | 'verified_visitor' | 'site_user_only'.
+-- WidgetConfig: accessMode (DB DEFAULT verified_visitor; existing backfilled
+--   anonymous; CHECK enum), policyVersion, integrationSecretHash (@unique),
+--   integrationSecretRotatedAt, loginUrl, loginButtonLabel, loginReturnUrlParam,
+--   identityEndpointPath.
+-- Contact: emailVerifiedAt, externalUserId (@@unique [tenantId, externalUserId]).
+-- OtpRequest: REVERTED widget-specific fields (contactId/tenantId/FK/index
+--   dropped if a prior migration run added them — idempotent).
+-- WidgetOtpRequest: NEW tenant-scoped widget verification state model.
 --
--- Safe migration sequence:
---   1. add the column backward-safe (nullable, no default)
---   2. backfill pre-existing rows to 'anonymous'
---   3. set NOT NULL
---   4. set the DB DEFAULT for FUTURE rows to 'verified_visitor'
---   5. add the authoritative CHECK constraint
---   (then the other access/identity columns + Contact.emailVerifiedAt +
---    OtpRequest visitor-verification link)
---
--- No destructive rewrite of explicit values. No Contacts/Conversations/Messages/
--- existing widget config are modified or deleted — purely additive.
+-- All idempotent (IF NOT EXISTS / DO blocks / IF EXISTS drops).
 
--- === accessMode: the corrected 5-step strategy ===
+-- === WidgetConfig access-policy fields ===
 ALTER TABLE "WidgetConfig" ADD COLUMN IF NOT EXISTS "accessMode" TEXT;
 UPDATE "WidgetConfig" SET "accessMode" = 'anonymous' WHERE "accessMode" IS NULL;
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='WidgetConfig' AND column_name='accessMode' AND is_nullable='NO') THEN
-    ALTER TABLE "WidgetConfig" ALTER COLUMN "accessMode" SET NOT NULL;
-  END IF;
-END $$;
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='WidgetConfig' AND column_name='accessMode' AND is_nullable='NO') THEN ALTER TABLE "WidgetConfig" ALTER COLUMN "accessMode" SET NOT NULL; END IF; END $$;
 ALTER TABLE "WidgetConfig" ALTER COLUMN "accessMode" SET DEFAULT 'verified_visitor';
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'WidgetConfig_accessMode_check') THEN
-    ALTER TABLE "WidgetConfig" ADD CONSTRAINT "WidgetConfig_accessMode_check"
-      CHECK ("accessMode" IN ('anonymous', 'verified_visitor', 'site_user_only'));
-  END IF;
-END $$;
-
--- === policyVersion (DEFAULT 1; incremented atomically on mode/secret changes) ===
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='WidgetConfig_accessMode_check') THEN ALTER TABLE "WidgetConfig" ADD CONSTRAINT "WidgetConfig_accessMode_check" CHECK ("accessMode" IN ('anonymous','verified_visitor','site_user_only')); END IF; END $$;
 ALTER TABLE "WidgetConfig" ADD COLUMN IF NOT EXISTS "policyVersion" INTEGER NOT NULL DEFAULT 1;
-
--- === Mode 2 integration secret (hash only; raw shown once at generation) ===
 ALTER TABLE "WidgetConfig" ADD COLUMN IF NOT EXISTS "integrationSecretHash" TEXT;
 ALTER TABLE "WidgetConfig" ADD COLUMN IF NOT EXISTS "integrationSecretRotatedAt" TIMESTAMP(3);
-
--- === Mode 2 login UX (safe public fields) ===
 ALTER TABLE "WidgetConfig" ADD COLUMN IF NOT EXISTS "loginUrl" TEXT;
 ALTER TABLE "WidgetConfig" ADD COLUMN IF NOT EXISTS "loginButtonLabel" TEXT;
 ALTER TABLE "WidgetConfig" ADD COLUMN IF NOT EXISTS "loginReturnUrlParam" TEXT;
 ALTER TABLE "WidgetConfig" ADD COLUMN IF NOT EXISTS "identityEndpointPath" TEXT;
+-- B12: unique index on integrationSecretHash (direct indexed lookup; multiple NULLs allowed)
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname='WidgetConfig_integrationSecretHash_key') THEN CREATE UNIQUE INDEX "WidgetConfig_integrationSecretHash_key" ON "WidgetConfig"("integrationSecretHash"); END IF; END $$;
 
--- === Contact: verified-visitor email-verification timestamp ===
+-- === Contact: emailVerifiedAt + externalUserId (B2) ===
 ALTER TABLE "Contact" ADD COLUMN IF NOT EXISTS "emailVerifiedAt" TIMESTAMP(3);
+ALTER TABLE "Contact" ADD COLUMN IF NOT EXISTS "externalUserId" TEXT;
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname='Contact_tenantId_externalUserId_key') THEN CREATE UNIQUE INDEX "Contact_tenantId_externalUserId_key" ON "Contact"("tenantId","externalUserId"); END IF; END $$;
 
--- === OtpRequest: visitor-verification link (Contact + tenant scope) ===
-ALTER TABLE "OtpRequest" ADD COLUMN IF NOT EXISTS "contactId" TEXT;
-ALTER TABLE "OtpRequest" ADD COLUMN IF NOT EXISTS "tenantId" TEXT;
-CREATE INDEX IF NOT EXISTS "OtpRequest_contactId_idx" ON "OtpRequest"("contactId");
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'OtpRequest_contactId_fkey') THEN
-    ALTER TABLE "OtpRequest"
-      ADD CONSTRAINT "OtpRequest_contactId_fkey"
-      FOREIGN KEY ("contactId") REFERENCES "Contact"("id") ON DELETE CASCADE;
-  END IF;
-END $$;
+-- === OtpRequest: REVERT widget-specific fields (B3 — OtpRequest is global auth) ===
+DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='OtpRequest' AND column_name='contactId') THEN ALTER TABLE "OtpRequest" DROP CONSTRAINT IF EXISTS "OtpRequest_contactId_fkey"; ALTER TABLE "OtpRequest" DROP COLUMN IF EXISTS "contactId"; END IF; END $$;
+DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='OtpRequest' AND column_name='tenantId') THEN ALTER TABLE "OtpRequest" DROP COLUMN IF EXISTS "tenantId"; END IF; END $$;
+DROP INDEX IF EXISTS "OtpRequest_contactId_idx";
+
+-- === WidgetOtpRequest: NEW tenant-scoped widget verification state (B3) ===
+CREATE TABLE IF NOT EXISTS "WidgetOtpRequest" (
+    "id" TEXT NOT NULL,
+    "tenantId" TEXT NOT NULL,
+    "contactId" TEXT NOT NULL,
+    "email" TEXT NOT NULL,
+    "purpose" TEXT NOT NULL DEFAULT 'widget_verify',
+    "providerRequestId" TEXT NOT NULL,
+    "expiresAt" TIMESTAMP(3) NOT NULL,
+    "attempts" INTEGER NOT NULL DEFAULT 0,
+    "resendCount" INTEGER NOT NULL DEFAULT 0,
+    "verified" BOOLEAN NOT NULL DEFAULT false,
+    "verifiedAt" TIMESTAMP(3),
+    "ipAddress" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "WidgetOtpRequest_pkey" PRIMARY KEY ("id")
+);
+CREATE UNIQUE INDEX IF NOT EXISTS "WidgetOtpRequest_providerRequestId_key" ON "WidgetOtpRequest"("providerRequestId");
+CREATE INDEX IF NOT EXISTS "WidgetOtpRequest_tenantId_idx" ON "WidgetOtpRequest"("tenantId");
+CREATE INDEX IF NOT EXISTS "WidgetOtpRequest_contactId_idx" ON "WidgetOtpRequest"("contactId");
+CREATE INDEX IF NOT EXISTS "WidgetOtpRequest_email_idx" ON "WidgetOtpRequest"("email");
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='WidgetOtpRequest_tenantId_fkey') THEN ALTER TABLE "WidgetOtpRequest" ADD CONSTRAINT "WidgetOtpRequest_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant"("id") ON DELETE CASCADE; END IF; END $$;
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='WidgetOtpRequest_contactId_fkey') THEN ALTER TABLE "WidgetOtpRequest" ADD CONSTRAINT "WidgetOtpRequest_contactId_fkey" FOREIGN KEY ("contactId") REFERENCES "Contact"("id") ON DELETE CASCADE; END IF; END $$;

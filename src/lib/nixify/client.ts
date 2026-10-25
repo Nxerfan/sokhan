@@ -44,13 +44,13 @@ const REQUEST_TIMEOUT_MS = 15_000
  * Nixify v1 accepts: "signup" | "login" | "reset"
  * Sokhan uses:       "signup" | "login" | "reset_password"
  */
-export type OtpPurpose = 'signup' | 'login' | 'reset_password' | 'visitor_verification'
+export type OtpPurpose = 'signup' | 'login' | 'reset_password' | 'widget_verify'
 
 const PURPOSE_MAP: Record<OtpPurpose, 'signup' | 'login' | 'reset'> = {
   signup: 'signup',
   login: 'login',
   reset_password: 'reset',
-  visitor_verification: 'login',
+  widget_verify: 'login',
 }
 
 function mapPurpose(p: OtpPurpose): 'signup' | 'login' | 'reset' {

@@ -147,18 +147,16 @@ export async function resolveTenantByIntegrationSecret(
   presentedRaw: string,
 ): Promise<{ tenantId: string; accessMode: string; policyVersion: number } | null> {
   if (!presentedRaw) return null
-  // Look up ALL WidgetConfig rows with a non-null integrationSecretHash + compare
-  // timing-safe. (A hash index would speed this; for now the tenant count is
-  // small. A future optimization: store the hash in a indexed column + do an
-  // exact-match lookup by the hash, then timing-safe-verify the match.)
-  const candidates = await globalDb.widgetConfig.findMany({
-    where: { integrationSecretHash: { not: null } },
+  // BLOCKER 12: direct indexed lookup — hash the presented secret + do an exact
+  // DB lookup by the hash (the hash column is @unique-indexed). No O(N tenant) scan.
+  // Then timing-safe-verify the returned hash as defense-in-depth (the exact
+  // match found it, but the compare guards against DB index quirks).
+  const presentedHash = hashIntegrationSecret(presentedRaw)
+  const match = await globalDb.widgetConfig.findFirst({
+    where: { integrationSecretHash: presentedHash },
     select: { tenantId: true, integrationSecretHash: true, accessMode: true, policyVersion: true },
   })
-  for (const c of candidates) {
-    if (verifyIntegrationSecret(presentedRaw, c.integrationSecretHash)) {
-      return { tenantId: c.tenantId, accessMode: c.accessMode, policyVersion: c.policyVersion }
-    }
-  }
-  return null
+  if (!match || !match.integrationSecretHash) return null
+  if (!verifyIntegrationSecret(presentedRaw, match.integrationSecretHash)) return null
+  return { tenantId: match.tenantId, accessMode: match.accessMode, policyVersion: match.policyVersion }
 }

@@ -2,9 +2,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { db, withTenant } from '@/lib/db'
 import { sendOtp, NixifyError } from '@/lib/nixify/client'
 import { checkRateLimit, getClientIP } from '@/lib/rate-limit'
-import { coerceAccessMode } from '@/lib/widget-access-policy'
+import { parseAccessMode } from '@/lib/widget-access-policy'
 
-/** CORS headers. */
 function widgetHeaders(res: NextResponse): NextResponse {
   res.headers.set('Access-Control-Allow-Origin', '*')
   res.headers.set('Access-Control-Allow-Methods', 'POST, OPTIONS')
@@ -24,20 +23,21 @@ export async function OPTIONS() {
  * Verified Visitor OTP — START (verified_visitor access mode).
  *
  *   POST /api/widget/<slug>/verify-identity/start
- *   body: { email (REQUIRED), contactId (REQUIRED — from the prior /contact call) }
+ *   body: { visitorId (REQUIRED), email (REQUIRED), name? }
  *
- * Sends an email OTP to the visitor's email. The visitor must then call
- * /verify-identity/verify with the code to establish a verified_contact
- * identity + receive a resume credential.
+ * BLOCKER 1: the browser does NOT supply a contactId. The server resolves
+ * the Contact itself by the anonymous identity namespace (tenant + visitorId)
+ * — NEVER by email, NEVER by a browser-provided Contact ID. A caller cannot
+ * nominate an arbitrary Contact to verify.
  *
- * The contactId MUST already exist (created by the prior /contact call with
- * the visitor's visitorId). The OTP is tied to THAT Contact so verification
- * marks that Contact's emailVerifiedAt — no email-based Contact merging.
+ * BLOCKER 3: the OTP state is stored in the tenant-scoped WidgetOtpRequest
+ * (NOT the global auth OtpRequest), with the Contact + tenant relation.
  *
- * Reuses the existing Nixify OTP infrastructure (sendOtp, purpose
- * 'visitor_verification' → mapped to Nixify 'login'). No parallel OTP
- * subsystem. Production OTP security (hashing, expiry, one-time, rate limit,
- * enumeration resistance) is inherited from the Nixify client + OtpRequest.
+ * BLOCKER 4: the local purpose is 'widget_verify' (canonical; maps to Nixify
+ * 'login' at the wire boundary). A login/signup/reset OTP can never satisfy
+ * a widget verification record (different model + purpose).
+ *
+ * Reuses the existing Nixify sendOtp infrastructure (no parallel OTP subsystem).
  */
 export async function POST(
   req: NextRequest,
@@ -61,9 +61,8 @@ export async function POST(
     return widgetHeaders(NextResponse.json({ error: 'not_found' }, { status: 404 }))
   }
 
-  const accessMode = coerceAccessMode(tenant.widgetConfig?.accessMode)
+  const accessMode = parseAccessMode(tenant.widgetConfig?.accessMode)
   if (accessMode !== 'verified_visitor') {
-    // OTP verification is for Mode 1 only.
     return widgetHeaders(NextResponse.json(
       { error: 'mode_mismatch', message: 'OTP verification is for verified_visitor mode' },
       { status: 409 },
@@ -75,42 +74,62 @@ export async function POST(
     return widgetHeaders(NextResponse.json({ error: 'invalid_body' }, { status: 400 }))
   }
 
-  const email = String(body.email ?? '').trim().toLowerCase().slice(0, 200)
-  const contactId = String(body.contactId ?? '').trim().slice(0, 100)
+  // visitorId + email are REQUIRED. name is optional profile metadata.
+  const visitorId = typeof body.visitorId === 'string' ? body.visitorId.trim().slice(0, 100) : ''
+  const email = typeof body.email === 'string' ? body.email.trim().toLowerCase().slice(0, 200) : ''
+  const name = typeof body.name === 'string' ? body.name.trim().slice(0, 100) : ''
+  if (!visitorId) {
+    return widgetHeaders(NextResponse.json({ error: 'visitorId_required' }, { status: 400 }))
+  }
   if (!email || !isValidEmail(email)) {
     return widgetHeaders(NextResponse.json({ error: 'invalid_email' }, { status: 400 }))
   }
-  if (!contactId) {
-    return widgetHeaders(NextResponse.json({ error: 'contactId_required' }, { status: 400 }))
-  }
 
-  // Verify the Contact exists (tenant-scoped) — it must have been created by
-  // the prior /contact call. Tie the OTP to THIS contactId (no email-based merging).
-  const contactExists = await withTenant(tenant.id, async () => {
-    const c = await db.contact.findUnique({
-      where: { tenantId_identifier: { tenantId: tenant.id, identifier: contactId } },
-      select: { id: true, identifier: true, tenantId: true },
+  // BLOCKER 1: the server resolves the Contact by (tenant, visitorId) — NOT by
+  // a browser-supplied contactId, NOT by email. The visitorId is the anonymous
+  // identity namespace; email is profile metadata only.
+  const contact = await withTenant(tenant.id, async () => {
+    let c = await db.contact.findUnique({
+      where: { tenantId_identifier: { tenantId: tenant.id, identifier: visitorId } },
     })
-    // The contactId passed is the actual Contact.id (cuid), not the visitorId.
-    // Look up by id instead.
-    return db.contact.findFirst({ where: { id: contactId, tenantId: tenant.id }, select: { id: true } })
+    if (!c) {
+      c = await db.contact.create({
+        data: {
+          tenantId: tenant.id,
+          identifier: visitorId,
+          identifierType: 'visitorId',
+          name: name || 'Visitor',
+          email,
+          locale: tenant.defaultLocale,
+          metadata: {},
+        },
+      })
+    } else {
+      // Update profile metadata (email/name) — NOT the identifier (visitorId is immutable identity).
+      c = await db.contact.update({
+        where: { id: c.id },
+        data: { email, ...(name ? { name } : {}) },
+      })
+    }
+    return c
   })
-  if (!contactExists) {
-    return widgetHeaders(NextResponse.json({ error: 'contact_not_found' }, { status: 404 }))
-  }
 
-  // Reuse the Nixify OTP infrastructure.
+  // Reuse the Nixify OTP infrastructure. purpose 'widget_verify' (local) → 'login' (wire).
   try {
-    const result = await sendOtp(email, 'visitor_verification')
-    await db.otpRequest.create({
-      data: {
-        email,
-        purpose: 'visitor_verification',
-        contactId: contactId,
-        tenantId: tenant.id,
-        requestId: result.otpRequestId,
-        expiresAt: new Date(result.expiresAt),
-      },
+    const result = await sendOtp(email, 'widget_verify')
+    // BLOCKER 3: store in the tenant-scoped WidgetOtpRequest (fail-closed db proxy).
+    await withTenant(tenant.id, async () => {
+      await db.widgetOtpRequest.create({
+        data: {
+          tenantId: tenant.id,
+          contactId: contact.id,
+          email,
+          purpose: 'widget_verify',
+          providerRequestId: result.otpRequestId,
+          expiresAt: new Date(result.expiresAt),
+          ipAddress: ip,
+        },
+      })
     })
     return widgetHeaders(NextResponse.json({ requestId: result.otpRequestId, expiresAt: result.expiresAt }))
   } catch (e) {

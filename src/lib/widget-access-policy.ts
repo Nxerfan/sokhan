@@ -75,6 +75,12 @@ export function requiresVerification(accessMode: AccessMode): boolean {
 }
 
 /** Coerce an arbitrary string into an AccessMode (defensive — defaults to anonymous). */
+export function parseAccessMode(value: unknown): AccessMode | null {
+  return typeof value === 'string' && (ACCESS_MODES as readonly string[]).includes(value)
+    ? (value as AccessMode)
+    : null
+}
+
 export function coerceAccessMode(value: unknown): AccessMode {
   return typeof value === 'string' && (ACCESS_MODES as readonly string[]).includes(value)
     ? (value as AccessMode)

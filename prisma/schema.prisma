@@ -56,20 +56,21 @@ model Tenant {
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 
-  memberships      Membership[]
-  departments      Department[]
-  widgetConfig     WidgetConfig?
-  contacts         Contact[]
-  conversations    Conversation[]
-  routingRules     RoutingRule[]
-  subscriptions    Subscription[]
-  invoices         Invoice[]
-  faqPairs         FaqPair[]
-  products         Product[]
-  aiConfig         AiConfig?
-  connectorConfigs ConnectorConfig[]
-  widgetDomains    WidgetDomain[]
-  invitations      Invitation[]
+  memberships       Membership[]
+  departments       Department[]
+  widgetConfig      WidgetConfig?
+  contacts          Contact[]
+  conversations     Conversation[]
+  routingRules      RoutingRule[]
+  subscriptions     Subscription[]
+  invoices          Invoice[]
+  faqPairs          FaqPair[]
+  products          Product[]
+  aiConfig          AiConfig?
+  connectorConfigs  ConnectorConfig[]
+  widgetDomains     WidgetDomain[]
+  invitations       Invitation[]
+  widgetOtpRequests WidgetOtpRequest[]
 }
 
 /// Global identity. A user may belong to multiple tenants via Membership.
@@ -190,7 +191,7 @@ model WidgetConfig {
   // accessMode: anonymous | verified_visitor | site_user_only
   accessMode                 String    @default("verified_visitor") // DB DEFAULT verified_visitor (frozen contract); existing rows backfilled to anonymous by migration
   policyVersion              Int       @default(1)
-  integrationSecretHash      String?
+  integrationSecretHash      String?   @unique
   integrationSecretRotatedAt DateTime?
   loginUrl                   String?
   loginButtonLabel           String?
@@ -213,15 +214,17 @@ model Contact {
   locale          String    @default("fa")
   metadata        Json
   emailVerifiedAt DateTime?
+  externalUserId  String?
   lastSeenAt      DateTime  @default(now())
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 
-  tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  conversations Conversation[]
-  otpRequests   OtpRequest[]
+  tenant            Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversations     Conversation[]
+  widgetOtpRequests WidgetOtpRequest[]
 
   @@unique([tenantId, identifier])
+  @@unique([tenantId, externalUserId])
   @@index([tenantId])
 }
 
@@ -462,16 +465,35 @@ model OtpRequest {
   verified    Boolean   @default(false)
   verifiedAt  DateTime?
   ipAddress   String?
-  contactId   String?
-  tenantId    String?
   createdAt   DateTime  @default(now())
 
-  user    User?    @relation(fields: [userId], references: [id])
-  contact Contact? @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  user User? @relation(fields: [userId], references: [id])
 
   @@index([email, purpose])
   @@index([requestId])
+}
+
+model WidgetOtpRequest {
+  id                String    @id @default(cuid())
+  tenantId          String
+  contactId         String
+  email             String
+  purpose           String    @default("widget_verify")
+  providerRequestId String    @unique
+  expiresAt         DateTime
+  attempts          Int       @default(0)
+  resendCount       Int       @default(0)
+  verified          Boolean   @default(false)
+  verifiedAt        DateTime?
+  ipAddress         String?
+  createdAt         DateTime  @default(now())
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
   @@index([contactId])
+  @@index([email])
 }
 
 model PendingSignup {
