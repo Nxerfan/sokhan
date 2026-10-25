@@ -67,21 +67,17 @@ export async function POST(
   // #1 + #2: resolve/create the Contact by (tenant, visitorId) — NO Contact
   // profile mutation. Check identifierType + externalUserId on existing.
   const contactResult = await withTenant(tenant.id, async () => {
-    let c = await db.contact.findUnique({
+    // #3: concurrency-safe Contact resolution via upsert (no P2002 on race)
+    const c = await db.contact.upsert({
       where: { tenantId_identifier: { tenantId: tenant.id, identifier: visitorId } },
+      create: {
+        tenantId: tenant.id, identifier: visitorId, identifierType: 'visitorId',
+        name: 'Visitor', email: null, locale: tenant.defaultLocale, metadata: {},
+      },
+      update: {}, // NO profile mutation at START
+      select: { id: true, identifierType: true, externalUserId: true },
     })
-    if (!c) {
-      // #1: create ONLY the minimal anonymous identity record. Email/name are
-      // NOT stored on the Contact (they're pending on WidgetOtpRequest).
-      c = await db.contact.create({
-        data: {
-          tenantId: tenant.id, identifier: visitorId, identifierType: 'visitorId',
-          name: 'Visitor', email: null, locale: tenant.defaultLocale, metadata: {},
-        },
-      })
-      return { ok: true as const, contactId: c.id }
-    }
-    // #2: enforce the anonymous identity class.
+    // #2: enforce the anonymous identity class
     if (c.identifierType !== 'visitorId' || c.externalUserId !== null) {
       return { ok: false as const, reason: 'identity_conflict' }
     }
@@ -102,7 +98,7 @@ export async function POST(
       await db.$transaction(async (tx) => {
         // Expire old unverified active requests for this Contact.
         await tx.widgetOtpRequest.updateMany({
-          where: { contactId, verified: false, expiresAt: { gt: new Date() } },
+          where: { contactId, status: 'active' },
           data: { status: 'superseded', expiresAt: new Date() },
         })
         // Create the new authoritative request.

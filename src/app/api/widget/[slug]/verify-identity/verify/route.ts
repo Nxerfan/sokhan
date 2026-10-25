@@ -70,7 +70,7 @@ export async function POST(
   // === Step 1: tenant-scoped lookup of the WidgetOtpRequest ===
   const lookup = await withTenant(tenant.id, async () => {
     const otpReq = await db.widgetOtpRequest.findFirst({
-      where: { providerRequestId: requestId, email, purpose: 'widget_verify', status: 'active' },
+      where: { providerRequestId: requestId, email, purpose: 'widget_verify' },
     })
     if (!otpReq) return { kind: 'not_found' as const }
     if (otpReq.status === 'superseded') return { kind: 'request_superseded' as const }
@@ -99,10 +99,11 @@ export async function POST(
   if (reservation === 0) {
     // The slot was NOT acquired — resolve the safe reason by re-reading state.
     const state = await withTenant(tenant.id, async () => {
-      return db.widgetOtpRequest.findUnique({ where: { id: otpReq.id }, select: { verified: true, expiresAt: true, attempts: true } })
+      return db.widgetOtpRequest.findUnique({ where: { id: otpReq.id }, select: { status: true, verified: true, expiresAt: true, attempts: true } })
     })
     if (!state) return widgetHeaders(NextResponse.json({ error: 'request_not_found' }, { status: 404 }))
-    if (state.verified) return widgetHeaders(NextResponse.json({ error: 'already_used' }, { status: 400 }))
+    if (state.status === 'superseded') return widgetHeaders(NextResponse.json({ error: 'request_superseded' }, { status: 400 }))
+    if (state.verified || state.status === 'verified') return widgetHeaders(NextResponse.json({ error: 'already_used' }, { status: 400 }))
     if (state.expiresAt < now) return widgetHeaders(NextResponse.json({ error: 'expired' }, { status: 400 }))
     if (state.attempts >= MAX_VERIFY_ATTEMPTS) return widgetHeaders(NextResponse.json({ error: 'attempt_limit_reached' }, { status: 429 }))
     return widgetHeaders(NextResponse.json({ error: 'request_not_found' }, { status: 404 }))
@@ -163,13 +164,20 @@ export async function POST(
 
       await tx.contact.update({
         where: { id: contact.id },
-        data: { emailVerifiedAt: new Date(), email, ...(otpReq.pendingName ? { name: otpReq.pendingName } : {}) },
+        data: { emailVerifiedAt: new Date(), email: otpReq.email, ...(otpReq.pendingName ? { name: otpReq.pendingName } : {}) },
       })
       return { lost: false as const, contactId: contact.id }
     })
   })
 
   if (!finalization || ('lost' in finalization && finalization.lost)) {
+    // #7: re-read the row to distinguish supersession from already_used
+    const lostState = await withTenant(tenant.id, async () => {
+      return db.widgetOtpRequest.findUnique({ where: { id: otpReq.id }, select: { status: true, verified: true, expiresAt: true } })
+    })
+    if (lostState?.status === 'superseded') return widgetHeaders(NextResponse.json({ error: 'request_superseded' }, { status: 400 }))
+    if (lostState?.status === 'verified' || lostState?.verified) return widgetHeaders(NextResponse.json({ error: 'already_used' }, { status: 400 }))
+    if (lostState && lostState.expiresAt < new Date()) return widgetHeaders(NextResponse.json({ error: 'expired' }, { status: 400 }))
     return widgetHeaders(NextResponse.json({ error: 'already_used' }, { status: 400 }))
   }
 
