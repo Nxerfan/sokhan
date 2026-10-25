@@ -284,22 +284,28 @@ Contacts read paths hardened in this PR: `contacts-panel.tsx` `load()` + `loadCo
 
 ## Statement of completion
 
+No known blockers remain in the audited current-product capability matrix.
+
 The four capability-completion blockers (workspace switcher UI, business-hours
 routing execution, password-reset CI journey, contacts UI identity journey)
 were implemented + behaviorally green on `545c998` (CI run 40134735057) — ACCEPTED.
 
-A second round of THREE deterministic-stability blockers is implemented in this
-round (on top of `59987da`):
-  1. E8 reissue race contract → deterministic 409 `already_reissued` (both timing paths converge).
-  2. Workspace switcher → single user selection, NO retry (removed `e.preventDefault()` + the retry helper).
-  3. Business Hours → v1 same-day non-empty intervals only (`start < end` required).
+A second round of THREE deterministic-stability blockers was implemented on top
+of `59987da` and is behaviorally green on the final SHA `83997a3`
+(CI run `40202739156` — all 4 jobs SUCCESS in BOTH Full and Lite):
+  1. E8 reissue race contract → deterministic 409 `already_reissued` (both
+     timing paths converge). E8 10-round concurrent reissue: PASSED Full + Lite.
+  2. Workspace switcher → single user selection, NO retry (removed
+     `e.preventDefault()` + the retry helper; the revoked-workspace recovery
+     test uses ONE open + ONE click + `noWaitAfter`). Single-click switches
+     (B→A, A→B, B→A, revoked recovery): PASSED Full + Lite.
+  3. Business Hours → v1 same-day non-empty intervals only (`start < end`
+     required). Route-level rejection (POST /api/routing-rules 22→6, 5→5,
+     17→9 → 400 invalid_business_hours; none persisted; 9→17 control creates
+     one rule): PASSED Full + Lite.
 
-The final "No known blockers remain in the audited current-product capability
-matrix" affirmation is pending the green CI run (lint/typecheck/unit/Prisma
-validate/widget-package-qualification/Full+Lite DB-boundary/Full+Lite
-browser/self-host) on this round's final SHA. Per the stabilization contract,
-the affirmation is only made once all three are behaviorally green in BOTH
-Full and Lite.
+The stabilization contract's affirmation is now made: all three are
+behaviorally green in BOTH Full and Lite on `83997a3`.
 
 This document does not claim zero bugs. The deferred items below remain
 recorded, each with the reason it was not silently invented or hot-fixed
@@ -368,9 +374,19 @@ inside `handleSwitch`). A real user clicks ONCE. The 3-attempt retry helper
 was REMOVED from `tests/workspace-switcher.spec.ts`; every switch assertion
 performs exactly ONE user selection (open dropdown → click workspace once →
 wait for session `workspaceId` → assert new workspace). If the single
-interaction fails, the test fails — no masking. Proven in BOTH Full and Lite:
-B→A single click, A→B single click, B→A again single click, stale Inbox
-state clears, revoked-current-workspace recovery.
+interaction fails, the test fails — no masking.
+
+The revoked-current-workspace recovery test additionally uses
+`click({ noWaitAfter: true })` (so the click does NOT auto-wait for the
+post-click reload navigation — Playwright's default click auto-wait raced the
+reload in this degraded timing) and ONE open + ONE click (no Escape + re-open:
+the double-open confused Radix's menu state in the degraded
+revoked-current-workspace state, continuously detaching the menuitem). The
+session transition is verified independently by `waitForWorkspaceSwitch`.
+
+Proven in BOTH Full and Lite on `83997a3`: B→A single click, A→B single click,
+B→A again single click, stale Inbox state clears, revoked-current-workspace
+recovery (ONE open + ONE click → session becomes B → B data shows).
 
 ### Business Hours — v1 same-day non-empty intervals only
 
@@ -389,19 +405,22 @@ Overnight routing is NOT implemented in v1 — it is a future product enhancemen
 tests cover the accept/reject matrix; the valid-rule execution + send_message +
 tenant isolation behaviors remain green.
 
-## Verification summary at the final SHA (this round's final SHA — finalised after the green CI run)
+## Verification summary at the final SHA (`83997a3`, CI run `40202739156`)
 
-All 4 CI jobs SUCCESS — `ci`, `widget-package-qualification`, `self-host-qualification`, `docker-regression`.
+All 4 CI jobs SUCCESS — `ci`, `widget-package-qualification`, `self-host-qualification`, `docker-regression` (Full + Lite).
 
-- **lint**: clean (0 errors; 1 pre-existing baseline warning unchanged) · **typecheck**: clean
-- **unit**: 532 pass / 0 fail (520 baseline + 12 new `routing-hours` pure-helper boundaries) — `ci` job
+- **lint**: clean (0 errors; 1 pre-existing baseline warning unchanged) · **typecheck**: clean — `ci` job
+- **unit**: **537 pass / 0 fail** (520 baseline + 12 `routing-hours` + 5 `routing-rules` start<end matrix) — `ci` job
 - **Prisma validate**: schema unchanged in this PR (validate passes in CI where DIRECT_URL is set) — `ci` job
-- **widget-package-qualification**: all 14 steps pass (unchanged)
-- **Full DB-boundary**: 57 pass / 0 fail (44 baseline + 13 new `business-hours-routing`) — `docker-regression` job
-- **Lite DB-boundary**: 57 pass / 0 fail (44 baseline + 13 new `business-hours-routing`) — `docker-regression` job
-- **Full browser regression**: 115 pass / 0 fail (87 baseline + 5 widget-customization/domains/analytics-csat from PR #13 + 3 new workspace-switcher/password-reset/contacts-identity) — `docker-regression` job
-- **Lite browser regression**: 115 pass / 0 fail (same composition) — `docker-regression` job
-- **self-host-qualification**: SUCCESS (clean-install Full+Lite + backup-restore Full+Lite — the backup-restore heading assertion `getByRole('heading', { name: workspace })` passes with the `<h2>` switcher trigger)
-- **New behavioral specs added in this PR** (run in BOTH Full and Lite docker-regression CI — added to both lists): `tests/workspace-switcher.spec.ts`, `tests/password-reset.spec.ts`, `tests/contacts-identity.spec.ts`, `tests/db-boundary/business-hours-routing.test.ts`, `tests/unit/routing-hours.test.ts`
+- **widget-package-qualification**: SUCCESS (all 14 steps) — own job
+- **Full DB-boundary**: **58 pass / 0 fail** (44 baseline + 13 `business-hours-routing` + 1 start<end rejection matrix) — `docker-regression` job
+- **Lite DB-boundary**: **58 pass / 0 fail** (same composition) — `docker-regression` job
+- **Full browser regression**: **116 pass / 0 fail** (87 baseline + 5 widget-customization/domains/analytics-csat + 3 workspace-switcher/password-reset/contacts-identity + 1 module2 route-level business-hours rejection) — `docker-regression` job
+- **Lite browser regression**: **116 pass / 0 fail** (same composition) — `docker-regression` job
+- **E8 10-round concurrent reissue**: PASSED Full + Lite (every round `statuses == [200, 409]` + exactly one pending) — `docker-regression` job
+- **Single-click workspace switching** (B→A, A→B, B→A, stale Inbox clear, revoked-current-workspace recovery via ONE open + ONE click + `noWaitAfter`): PASSED Full + Lite — `docker-regression` job
+- **Route-level Business Hours rejection** (POST /api/routing-rules 22→6, 5→5, 17→9 → 400 invalid_business_hours; none persisted; 9→17 control creates one rule): PASSED Full + Lite — `docker-regression` job
+- **self-host-qualification**: SUCCESS (clean-install Full+Lite + backup-restore Full+Lite — the backup-restore heading assertion `getByRole('heading', { name: workspace })` passes with the `<h2>` switcher trigger) — own job
+- **New behavioral specs added across this PR** (run in BOTH Full and Lite docker-regression CI — added to both lists): `tests/workspace-switcher.spec.ts`, `tests/password-reset.spec.ts`, `tests/contacts-identity.spec.ts`, `tests/db-boundary/business-hours-routing.test.ts`, `tests/unit/routing-hours.test.ts`; plus the E8 10-round strengthening in `tests/invite-workspace-switching.spec.ts` and the route-level business-hours rejection in `tests/module2.spec.ts`
 - **Existing regressions untouched**: all previously-green specs still in the CI lists; no test was weakened or removed
-- **Vercel**: known external account-level block only — NON-BLOCKING
+- **Vercel**: failure `Account is blocked.` — the exact known external account-level block → NON-BLOCKING
