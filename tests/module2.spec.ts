@@ -383,3 +383,69 @@ test.describe('Module 2 — Realtime messaging', () => {
     expect(violations).toEqual([])
   })
 })
+
+// ----------------------------------------------------------------------------
+// Business Hours — route-level invalid-window rejection (POST /api/routing-rules)
+// PR #13 stability: prove the server-side validator rejects overnight /
+// zero-width / inverted businessHours windows at the REAL HTTP route, and that
+// no rejected rule row is persisted. Runs in BOTH Full and Lite (module2 is in
+// both edition regression lists). The valid control (9→17) creates exactly one
+// rule. This exercises the actual HTTP route — it does NOT call
+// validateRuleTrigger directly (the unit + db-boundary suites cover that).
+// ----------------------------------------------------------------------------
+test.describe('Business Hours — route-level invalid-window rejection', () => {
+  test('overnight/zero-width/inverted → 400 invalid_business_hours; none persisted; valid 9→17 creates one rule', async ({ browser }) => {
+    const ctx = await browser.newContext()
+    const page = await ctx.newPage()
+    try {
+      const suffix = `${Date.now()}-${process.pid}`
+      const email = `bh-route-${suffix}@iws.test`
+      await signupAndGetSlug(page, email, `BH Route ${suffix}`)
+      const H = { 'Content-Type': 'application/json' }
+
+      const invalidWindows = [
+        { label: 'overnight-22-6', start: 22, end: 6 },
+        { label: 'zero-width-5-5', start: 5, end: 5 },
+        { label: 'inverted-17-9', start: 17, end: 9 },
+      ]
+      for (const w of invalidWindows) {
+        const res = await page.request.post(`${BASE}/api/routing-rules`, {
+          data: {
+            name: `bh-bad-${w.label}-${suffix}`,
+            trigger: { event: 'conversation_created', conditions: { businessHours: { start: w.start, end: w.end } } },
+            action: { type: 'add_tag', tag: 'bh-bad' },
+          },
+          headers: H,
+        })
+        expect(res.status(), `${w.label}: must be 400`).toBe(400)
+        expect((await res.json()).error, `${w.label}: must be invalid_business_hours`).toBe('invalid_business_hours')
+      }
+
+      // Valid control: 9→17 (same-day non-empty) succeeds + creates exactly one rule.
+      const validRes = await page.request.post(`${BASE}/api/routing-rules`, {
+        data: {
+          name: `bh-valid-9-17-${suffix}`,
+          trigger: { event: 'conversation_created', conditions: { businessHours: { start: 9, end: 17 } } },
+          action: { type: 'add_tag', tag: 'bh-valid' },
+        },
+        headers: H,
+      })
+      expect(validRes.status(), 'valid 9->17 must succeed').toBe(200)
+      const validBody = (await validRes.json()) as { rule?: { id: string; name: string } }
+      expect(validBody.rule, 'valid control must return the created rule').toBeTruthy()
+      expect(validBody.rule!.name).toBe(`bh-valid-9-17-${suffix}`)
+
+      // GET /api/routing-rules — prove NONE of the rejected rules persisted.
+      const listRes = await page.request.get(`${BASE}/api/routing-rules`)
+      expect(listRes.status()).toBe(200)
+      const listBody = (await listRes.json()) as { rules?: Array<{ name: string }> }
+      const names = (listBody.rules ?? []).map((r) => r.name)
+      expect(names, 'valid control must be persisted').toContain(`bh-valid-9-17-${suffix}`)
+      for (const w of invalidWindows) {
+        expect(names, `${w.label}: rejected rule must NOT be persisted`).not.toContain(`bh-bad-${w.label}-${suffix}`)
+      }
+    } finally {
+      await ctx.close().catch(() => {})
+    }
+  })
+})

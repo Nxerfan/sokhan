@@ -1141,7 +1141,7 @@ test.describe('E. Legacy reissue lifecycle (BLOCKER 4 — fixed lifecycle)', () 
     return setupTenant(browser, `ta-${tag}-${uniqueSuffix()}@iws.test`, `TA ${tag}`)
   }
 
-  test('E1-E4. reissue produces ONE fresh link; old token dead; superseded not reissuable', async () => {
+  test('E1-E4. reissue produces ONE fresh link; old token dead; superseded returns 409 already_reissued', async () => {
     const a = await freshTenant('e1')
     try {
       // Create + revoke an invitation (simulates a legacy/unusable invitation).
@@ -1169,10 +1169,12 @@ test.describe('E. Legacy reissue lifecycle (BLOCKER 4 — fixed lifecycle)', () 
       const look0b = await lookupInvitation(inv.workspace, inv.token)
       expect(look0b.status, 'old token must remain 404 after reissue').toBe(404)
 
-      // #4 fix: the superseded original row CANNOT be reissued again.
+      // #4 fix + PR #13 deterministic contract: the superseded original row
+      // CANNOT be reissued — returns 409 already_reissued (the SAME result
+      // as a concurrent-race loser, so the contract is timing-independent).
       const r2 = await reissueInvitation(a.page, row!.id)
-      expect(r2.status, 'second reissue of superseded must be 400').toBe(400)
-      expect(r2.body.error, 'superseded_not_reissuable').toBe('superseded_not_reissuable')
+      expect(r2.status, 'second reissue of superseded must be 409 already_reissued').toBe(409)
+      expect(r2.body.error, 'already_reissued').toBe('already_reissued')
     } finally { await a.page.context().close().catch(() => {}) }
   })
 
@@ -1221,48 +1223,60 @@ test.describe('E. Legacy reissue lifecycle (BLOCKER 4 — fixed lifecycle)', () 
     } finally { await a.page.context().close().catch(() => {}) }
   })
 
-  test('E8. concurrent reissue of SAME revoked invitation — single winner (BLOCKER 1)', async () => {
-    // Fire TWO reissue requests concurrently against the SAME revoked
-    // invitation id. Exactly one wins (count=1 → creates new pending);
-    // the loser gets count=0 → deterministic 'already_reissued' (409).
-    // Only ONE pending invitation exists after; only ONE token is valid.
+  test('E8. concurrent reissue of SAME revoked invitation — single winner (10 rounds, BLOCKER 1)', async () => {
+    // DETERMINISTIC CONTRACT (PR #13): the reissue route's pre-transaction
+    // `superseded` classification AND the conditional-claim loser BOTH
+    // return 409 already_reissued, so the concurrent-reissue result is
+    // timing-independent. Prove it across 10 rounds with FRESH invitation
+    // rows (a single successful Promise.all is insufficient evidence for a
+    // timing-sensitive bug). Each round proves: statuses == [200, 409],
+    // exactly one pending, winner token valid, old token dead, loser no
+    // token. No retry that reinterprets 400 as success.
     const a = await freshTenant('e8')
     try {
-      const target = `e8-${uniqueSuffix()}@iws.test`
-      const inv = await createInvitation(a.page, target, 'agent')
-      const listRes = await a.page.request.get(`${BASE}/api/invitations`)
-      const listBody = (await listRes.json()) as { invitations?: Array<{ id: string; email: string }> }
-      const row = listBody.invitations?.find((i) => i.email === target)
-      expect(row, 'pending invitation in list').toBeTruthy()
-      await revokeInvitation(a.page, row!.id)
+      for (let round = 0; round < 10; round++) {
+        const target = `e8-r${round}-${uniqueSuffix()}@iws.test`
+        const inv = await createInvitation(a.page, target, 'agent')
+        const listRes = await a.page.request.get(`${BASE}/api/invitations`)
+        const listBody = (await listRes.json()) as { invitations?: Array<{ id: string; email: string }> }
+        const row = listBody.invitations?.find((i) => i.email === target)
+        expect(row, `round ${round}: pending invitation in list`).toBeTruthy()
+        await revokeInvitation(a.page, row!.id)
 
-      // Fire TWO concurrent reissues of the SAME revoked row.
-      const [r1, r2] = await Promise.all([
-        reissueInvitation(a.page, row!.id),
-        reissueInvitation(a.page, row!.id),
-      ])
-      const statuses = [r1.status, r2.status].sort()
-      // Exactly one 200 (winner); the other 409 (already_reissued loser).
-      expect(statuses, `concurrent reissue: one 200 + one 409, got ${statuses.join(',')}`).toEqual([200, 409])
+        // Fire TWO concurrent reissues of the SAME revoked row.
+        const [r1, r2] = await Promise.all([
+          reissueInvitation(a.page, row!.id),
+          reissueInvitation(a.page, row!.id),
+        ])
+        const statuses = [r1.status, r2.status].sort()
+        expect(statuses, `round ${round}: concurrent reissue must be [200,409], got ${statuses.join(',')}`).toEqual([200, 409])
 
-      // Identify winner + loser.
-      const winner = r1.status === 200 ? r1 : r2
-      const loser = r1.status === 200 ? r2 : r1
-      expect(loser.body.error, 'loser error must be already_reissued').toBe('already_reissued')
+        const winner = r1.status === 200 ? r1 : r2
+        const loser = r1.status === 200 ? r2 : r1
+        expect(loser.body.error, `round ${round}: loser error must be already_reissued`).toBe('already_reissued')
 
-      // Only ONE pending invitation exists for this email.
-      const list2Res = await a.page.request.get(`${BASE}/api/invitations`)
-      const list2Body = (await list2Res.json()) as { invitations?: Array<{ email: string; status: string }> }
-      const pending = list2Body.invitations?.filter((i) => i.email === target && i.status === 'pending') ?? []
-      expect(pending.length, 'exactly ONE pending invitation after concurrent reissue').toBe(1)
+        // Exactly ONE pending invitation exists for this email.
+        const list2Res = await a.page.request.get(`${BASE}/api/invitations`)
+        const list2Body = (await list2Res.json()) as { invitations?: Array<{ email: string; status: string }> }
+        const pending = list2Body.invitations?.filter((i) => i.email === target && i.status === 'pending') ?? []
+        expect(pending.length, `round ${round}: exactly ONE pending invitation after concurrent reissue`).toBe(1)
 
-      // The winner's token is publicly valid; the old token is invalid.
-      expect((await lookupInvitation(winner.workspace!, winner.token!)).status, 'winner token valid').toBe(200)
-      expect((await lookupInvitation(inv.workspace, inv.token)).status, 'old token invalid').toBe(404)
+        // Winner token valid; old (superseded) token dead.
+        expect((await lookupInvitation(winner.workspace!, winner.token!)).status, `round ${round}: winner token valid`).toBe(200)
+        expect((await lookupInvitation(inv.workspace, inv.token)).status, `round ${round}: old token invalid`).toBe(404)
 
-      // The loser did NOT create a token (no inviteUrl in the 409 body).
-      expect(loser.inviteUrl, 'loser must not have an inviteUrl').toBeUndefined()
-      expect(loser.token, 'loser must not have a token').toBeUndefined()
+        // Loser did NOT create a token.
+        expect(loser.inviteUrl, `round ${round}: loser must not have an inviteUrl`).toBeUndefined()
+        expect(loser.token, `round ${round}: loser must not have a token`).toBeUndefined()
+
+        // CLEANUP: revoke the winner's pending invitation to free the seat
+        // for the next round (Free cap = 2 agents; owner=1 + ≤1 pending).
+        const list3Res = await a.page.request.get(`${BASE}/api/invitations`)
+        const list3Body = (await list3Res.json()) as { invitations?: Array<{ id: string; email: string; status: string }> }
+        const winnerRow = list3Body.invitations?.find((i) => i.email === target && i.status === 'pending')
+        expect(winnerRow, `round ${round}: winner pending row for cleanup`).toBeTruthy()
+        await revokeInvitation(a.page, winnerRow!.id)
+      }
     } finally { await a.page.context().close().catch(() => {}) }
   })
 })

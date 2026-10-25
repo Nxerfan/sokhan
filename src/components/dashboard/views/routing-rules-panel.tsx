@@ -70,7 +70,7 @@ export function RoutingRulesPanel({ departments }: { departments: { id: string; 
         priority: rules.length,
       }),
     })
-    if (!res.ok) { toast.error('Failed'); return }
+    if (!res.ok) { toast.error(locale === 'fa' ? 'ناموفق بود' : 'Failed'); return }
     toast.success(t('saved'))
     setName(''); setKeyword(''); setActionText('')
     setShowForm(false)
@@ -78,17 +78,26 @@ export function RoutingRulesPanel({ departments }: { departments: { id: string; 
   }
 
   async function toggleRule(id: string, enabled: boolean) {
-    await fetch('/api/routing-rules', {
+    const res = await fetch('/api/routing-rules', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id, enabled }),
     })
+    if (!res.ok) {
+      toast.error(locale === 'fa' ? 'تغییر وضعیت ناموفق بود' : 'Failed to update rule')
+    }
+    // Reload either way so the switch reflects the server state —
+    // a failed toggle reverts instead of silently flipping.
     load()
   }
 
   async function deleteRule(id: string) {
-    await fetch(`/api/routing-rules?id=${id}`, { method: 'DELETE' })
-    toast.success(t('saved'))
+    const res = await fetch(`/api/routing-rules?id=${id}`, { method: 'DELETE' })
+    if (!res.ok) {
+      toast.error(locale === 'fa' ? 'حذف ناموفق بود' : 'Failed to delete')
+      return
+    }
+    toast.success(locale === 'fa' ? 'حذف شد' : 'Deleted')
     load()
   }
 

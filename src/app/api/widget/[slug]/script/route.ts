@@ -442,6 +442,20 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
     });
     panel.style[side] = '0';
 
+    // Safe image URL check (CUST-B): only absolute http(s) URLs are ever
+    // assigned to img.src. The backend validates these too — this is
+    // defense-in-depth at the runtime boundary.
+    function safeImg(u){
+      // NOTE: this code is served inside a template literal — no regex
+      // escapes and no backticks allowed here. Scheme check is done with
+      // plain string comparisons so the served script is byte-identical
+      // to this source.
+      if (typeof u !== 'string' || u.length > 500) return null;
+      var low = u.slice(0, 8).toLowerCase();
+      if (low !== 'https://' && low.slice(0, 7) !== 'http://') return null;
+      try { new URL(u); return u; } catch (e) { return null; }
+    }
+
     // Header
     var header = el('div', 'sk-header');
     css(header, { display:'flex', alignItems:'center', gap:'10px', padding:'12px 16px', color:'#fff', background:accent, flexShrink:'0' });
@@ -456,6 +470,30 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
     css(closeBtn, { background:'none', border:'none', color:'#fff', fontSize:'20px', cursor:'pointer', padding:'0', lineHeight:'1' });
     closeBtn.onclick = toggle;
     header.appendChild(logo); header.appendChild(titleText); header.appendChild(closeBtn);
+    // CUST-B: render the configured logo/avatar when they are SAFE image
+    // URLs. DOM APIs only (createElement + .src property) — never
+    // innerHTML with tenant-controlled content. The default SVG logo
+    // stays until a custom logo actually loads; a broken avatar image
+    // is removed on error.
+    var logoImgSrc = safeImg(config.logoUrl);
+    if (logoImgSrc) {
+      var limg = document.createElement('img');
+      limg.alt = ''; limg.referrerPolicy = 'no-referrer';
+      css(limg, { width: '100%', height: '100%', objectFit: 'cover', borderRadius: '50%', display: 'none' });
+      limg.onload = function(){ logo.innerHTML = ''; limg.style.display = 'block'; logo.appendChild(limg); };
+      limg.src = logoImgSrc;
+    }
+    var avatarSrc = safeImg(config.avatarUrl);
+    if (avatarSrc) {
+      var av = document.createElement('img');
+      av.alt = state.locale === 'fa' ? 'کارشناس' : 'Agent';
+      av.referrerPolicy = 'no-referrer';
+      css(av, { width: '28px', height: '28px', borderRadius: '50%', objectFit: 'cover', flexShrink: '0' });
+      av.onerror = function(){ if (av.parentNode) av.parentNode.removeChild(av); };
+      av.src = avatarSrc;
+      header.insertBefore(av, titleText);
+    }
+
 
     // Messages area
     bodyEl = el('div', 'sk-body');
@@ -500,7 +538,21 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
     };
     inputBar.appendChild(inputEl); inputBar.appendChild(sendBtn);
 
-    panel.appendChild(header); panel.appendChild(bodyEl); panel.appendChild(inputBar);
+    panel.appendChild(header); panel.appendChild(bodyEl);
+    // Free-plan contract (CUST-F): render the "Powered by Sukhan" badge
+    // only when the backend's effective config sets poweredBy:true
+    // (locked/free plans). Paid plans never see it. SECURITY: fixed brand
+    // strings only — never tenant-controlled content.
+    if (config.poweredBy) {
+      var badge = el('a', 'sk-powered');
+      badge.href = 'https://sukhan.chat';
+      badge.target = '_blank';
+      badge.rel = 'noopener noreferrer';
+      css(badge, { display:'block', padding:'4px 12px 6px', background:'#fff', borderTop:'1px solid #f0eee9', fontSize:'10px', color:'#999', textAlign:'center', textDecoration:'none', flexShrink:'0' });
+      badge.textContent = state.locale === 'fa' ? 'نیرو گرفته از سُخن' : 'Powered by Sukhan';
+      panel.appendChild(badge);
+    }
+    panel.appendChild(inputBar);
     root.appendChild(panel); root.appendChild(launcher);
     document.body.appendChild(root);
 

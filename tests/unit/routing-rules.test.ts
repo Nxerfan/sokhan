@@ -371,6 +371,25 @@ describe('validateRuleTrigger — conditions.businessHours', () => {
       }),
     )
   })
+
+  // Business Hours v1 supports SAME-DAY NON-EMPTY intervals only (start < end).
+  // The engine contract is hour >= start && hour < end, so start >= end
+  // matches NOTHING — persisting it would be a no-op (stabilization violation).
+  test('businessHours.start = 0, end = 1 (valid same-day) → ok', () => {
+    assertOk(validateRuleTrigger({ event: 'conversation_created', conditions: { businessHours: { start: 0, end: 1 } } }))
+  })
+  test('businessHours.start = 22, end = 23 (valid same-day) → ok', () => {
+    assertOk(validateRuleTrigger({ event: 'conversation_created', conditions: { businessHours: { start: 22, end: 23 } } }))
+  })
+  test('businessHours.start = 22, end = 6 (overnight) → invalid_business_hours', () => {
+    assertErr(validateRuleTrigger({ event: 'conversation_created', conditions: { businessHours: { start: 22, end: 6 } } }), 'invalid_business_hours')
+  })
+  test('businessHours.start = 5, end = 5 (zero-width) → invalid_business_hours', () => {
+    assertErr(validateRuleTrigger({ event: 'conversation_created', conditions: { businessHours: { start: 5, end: 5 } } }), 'invalid_business_hours')
+  })
+  test('businessHours.start = 17, end = 9 (inverted) → invalid_business_hours', () => {
+    assertErr(validateRuleTrigger({ event: 'conversation_created', conditions: { businessHours: { start: 17, end: 9 } } }), 'invalid_business_hours')
+  })
 })
 
 describe('validateRuleTrigger — route integration (POST + PATCH paths)', () => {

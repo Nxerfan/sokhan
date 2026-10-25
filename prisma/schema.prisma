@@ -181,7 +181,7 @@ model WidgetConfig {
   tenantId        String   @unique
   accentColor     String   @default("#E09A2B")
   launcherShape   String   @default("tab")
-  position        String   @default("bottom-start")
+  position        String   @default("bottom-end")
   avatarUrl       String?
   logoUrl         String?
   greetingTexts   Json

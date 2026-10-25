@@ -39,23 +39,30 @@ export function FaqPanel() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ question, answer, enabled: true }),
     })
-    if (!res.ok) { toast.error('Failed'); return }
+    if (!res.ok) { toast.error(locale === 'fa' ? 'ناموفق بود' : 'Failed'); return }
     toast.success(locale === 'fa' ? 'ذخیره شد' : 'Saved')
     setQuestion(''); setAnswer(''); setShowForm(false)
     load()
   }
 
   async function toggleFaq(id: string, enabled: boolean) {
-    await fetch('/api/faqs', {
+    const res = await fetch('/api/faqs', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id, enabled }),
     })
+    if (!res.ok) {
+      toast.error(locale === 'fa' ? 'تغییر وضعیت ناموفق بود' : 'Failed to update')
+    }
     load()
   }
 
   async function deleteFaq(id: string) {
-    await fetch(`/api/faqs?id=${id}`, { method: 'DELETE' })
+    const res = await fetch(`/api/faqs?id=${id}`, { method: 'DELETE' })
+    if (!res.ok) {
+      toast.error(locale === 'fa' ? 'حذف ناموفق بود' : 'Failed to delete')
+      return
+    }
     toast.success(locale === 'fa' ? 'حذف شد' : 'Deleted')
     load()
   }

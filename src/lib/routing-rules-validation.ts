@@ -112,6 +112,19 @@ export function validateRuleTrigger(trigger: any): ValidationResult {
       if (bh.start < 0 || bh.start > 23 || bh.end < 0 || bh.end > 23) {
         return { ok: false, error: 'invalid_business_hours' }
       }
+      // Business Hours v1 supports SAME-DAY NON-EMPTY intervals only
+      // (start < end). The engine contract is `hour >= start && hour < end`
+      // (half-open [start, end)), so:
+      //   - overnight (start > end, e.g. 22->6) matches NOTHING
+      //   - zero-width (start === end, e.g. 5->5) matches NOTHING
+      //   - inverted (e.g. 17->9) matches NOTHING
+      // All three are persisted no-ops if accepted — a stabilization
+      // violation. Reject them with invalid_business_hours. Overnight
+      // routing is NOT implemented in v1; it is a future product
+      // enhancement (do NOT add timezone/wrap-around support here).
+      if (bh.start >= bh.end) {
+        return { ok: false, error: 'invalid_business_hours' }
+      }
     }
   }
 
