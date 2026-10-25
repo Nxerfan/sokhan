@@ -478,6 +478,7 @@ model WidgetOtpRequest {
   tenantId          String
   contactId         String
   email             String
+  pendingName       String?
   purpose           String    @default("widget_verify")
   providerRequestId String    @unique
   expiresAt         DateTime
@@ -507,4 +508,6 @@ model PendingSignup {
   expiresAt       DateTime
 
   @@index([email])
+  @@index([tenantId, contactId])
+  @@index([tenantId, purpose, email])
 }
