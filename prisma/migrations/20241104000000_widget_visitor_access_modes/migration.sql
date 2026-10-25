@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS "WidgetOtpRequest" (
     "expiresAt" TIMESTAMP(3) NOT NULL,
     "attempts" INTEGER NOT NULL DEFAULT 0,
     "resendCount" INTEGER NOT NULL DEFAULT 0,
+    "status" TEXT NOT NULL DEFAULT 'active',
     "verified" BOOLEAN NOT NULL DEFAULT false,
     "verifiedAt" TIMESTAMP(3),
     "ipAddress" TEXT,
@@ -65,3 +66,7 @@ CREATE INDEX IF NOT EXISTS "WidgetOtpRequest_tenantId_purpose_email_idx" ON "Wid
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='WidgetOtpRequest_purpose_check') THEN ALTER TABLE "WidgetOtpRequest" ADD CONSTRAINT "WidgetOtpRequest_purpose_check" CHECK ("purpose" = 'widget_verify'); END IF; END $$;
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='WidgetOtpRequest_tenantId_fkey') THEN ALTER TABLE "WidgetOtpRequest" ADD CONSTRAINT "WidgetOtpRequest_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant"("id") ON DELETE CASCADE; END IF; END $$;
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='WidgetOtpRequest_contactId_fkey') THEN ALTER TABLE "WidgetOtpRequest" ADD CONSTRAINT "WidgetOtpRequest_contactId_fkey" FOREIGN KEY ("contactId") REFERENCES "Contact"("id") ON DELETE CASCADE; END IF; END $$;
+
+-- BLOCKER 2+3: status column CHECK + one-active-flow partial unique index
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='WidgetOtpRequest_status_check') THEN ALTER TABLE "WidgetOtpRequest" ADD CONSTRAINT "WidgetOtpRequest_status_check" CHECK ("status" IN ('active','superseded','verified')); END IF; END $$;
+CREATE UNIQUE INDEX IF NOT EXISTS "WidgetOtpRequest_active_unique" ON "WidgetOtpRequest" ("tenantId","contactId") WHERE "status" = 'active';

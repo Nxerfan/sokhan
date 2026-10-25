@@ -496,6 +496,8 @@ model WidgetOtpRequest {
   @@index([tenantId])
   @@index([contactId])
   @@index([email])
+  @@index([tenantId, contactId])
+  @@index([tenantId, purpose, email])
 }
 
 model PendingSignup {
@@ -507,6 +509,4 @@ model PendingSignup {
   expiresAt       DateTime
 
   @@index([email])
-  @@index([tenantId, contactId])
-  @@index([tenantId, purpose, email])
 }
