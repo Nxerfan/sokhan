@@ -105,9 +105,9 @@ interface SignedEnvelope {
   [key: string]: unknown
 }
 
-function signEnvelope(payload: Omit<SignedEnvelope, 'iat' | 'exp'>, ttlSeconds: number): string {
+function signEnvelope(payload: { type: string; aud: string } & Record<string, unknown>, ttlSeconds: number): string {
   const now = Math.floor(Date.now() / 1000)
-  const full: SignedEnvelope = { ...payload, iat: now, exp: now + ttlSeconds }
+  const full = { ...payload, iat: now, exp: now + ttlSeconds } as SignedEnvelope
   const encoded = b64url(JSON.stringify(full))
   const sig = hmacSign(NEXTAUTH_SECRET, encoded)
   return `${encoded}.${sig}`
