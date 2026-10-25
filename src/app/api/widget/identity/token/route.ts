@@ -72,11 +72,17 @@ export async function POST(req: NextRequest) {
 
   // #1: concurrency-safe upsert on (tenantId, externalUserId).
   const { contactId } = await withTenant(tenant.tenantId, async () => {
-    const profileData = {
+    // CRITICAL 6: CREATE uses display fallback; UPDATE only mutates supplied fields.
+    // Omission preserves existing values (does NOT erase name/email/avatar).
+    const createProfile = {
       name: name || username || email || 'Authenticated user',
       email: email ?? null,
       avatarUrl: avatarUrl ?? null,
     }
+    const updateProfile: Record<string, string | null> = {}
+    if (name) updateProfile.name = name
+    if (email) updateProfile.email = email
+    if (avatarUrl) updateProfile.avatarUrl = avatarUrl
     const result = await db.contact.upsert({
       where: { tenantId_externalUserId: { tenantId: tenant.tenantId, externalUserId } },
       create: {
@@ -84,11 +90,11 @@ export async function POST(req: NextRequest) {
         identifier: 'ext_' + crypto.randomUUID(),
         identifierType: 'externalUser',
         externalUserId,
-        ...profileData,
+        ...createProfile,
         locale: 'fa',
         metadata: {},
       },
-      update: profileData,
+      update: updateProfile,
       select: { id: true },
     })
     return { contactId: result.id }

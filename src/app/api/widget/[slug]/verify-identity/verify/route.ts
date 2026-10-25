@@ -116,7 +116,6 @@ export async function POST(
     if (contact.identifierType !== 'visitorId') return { ok: false as const, reason: 'identity_conflict' }
     if (contact.identifier !== visitorId) return { ok: false as const, reason: 'identity_mismatch' }
     if (contact.externalUserId !== null) return { ok: false as const, reason: 'identity_conflict' }
-    if ((contact.email ?? '') !== email) return { ok: false as const, reason: 'identity_mismatch' }
     return { ok: true as const, contact }
   })
   if (!contactCheck.ok) {
@@ -163,7 +162,7 @@ export async function POST(
 
       await tx.contact.update({
         where: { id: contact.id },
-        data: { emailVerifiedAt: new Date(), email },
+        data: { emailVerifiedAt: new Date(), email, ...(otpReq.pendingName ? { name: otpReq.pendingName } : {}) },
       })
       return { lost: false as const, contactId: contact.id }
     })
