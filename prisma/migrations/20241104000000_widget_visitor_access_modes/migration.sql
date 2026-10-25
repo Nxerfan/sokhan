@@ -67,6 +67,13 @@ DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='WidgetOtpR
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='WidgetOtpRequest_tenantId_fkey') THEN ALTER TABLE "WidgetOtpRequest" ADD CONSTRAINT "WidgetOtpRequest_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant"("id") ON DELETE CASCADE; END IF; END $$;
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='WidgetOtpRequest_contactId_fkey') THEN ALTER TABLE "WidgetOtpRequest" ADD CONSTRAINT "WidgetOtpRequest_contactId_fkey" FOREIGN KEY ("contactId") REFERENCES "Contact"("id") ON DELETE CASCADE; END IF; END $$;
 
+
+-- #1: branch-development robustness
+ALTER TABLE "WidgetOtpRequest" ADD COLUMN IF NOT EXISTS "pendingName" TEXT;
+ALTER TABLE "WidgetOtpRequest" ADD COLUMN IF NOT EXISTS "status" TEXT NOT NULL DEFAULT 'active';
 -- BLOCKER 2+3: status column CHECK + one-active-flow partial unique index
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='WidgetOtpRequest_status_check') THEN ALTER TABLE "WidgetOtpRequest" ADD CONSTRAINT "WidgetOtpRequest_status_check" CHECK ("status" IN ('active','superseded','verified')); END IF; END $$;
+
+-- #2: status/verified consistency CHECK
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='WidgetOtpRequest_status_verified_check') THEN ALTER TABLE "WidgetOtpRequest" ADD CONSTRAINT "WidgetOtpRequest_status_verified_check" CHECK (("status" = 'verified' AND "verified" = true) OR ("status" IN ('active','superseded') AND "verified" = false)); END IF; END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS "WidgetOtpRequest_active_unique" ON "WidgetOtpRequest" ("tenantId","contactId") WHERE "status" = 'active';

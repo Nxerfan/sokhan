@@ -70,9 +70,10 @@ export async function POST(
   // === Step 1: tenant-scoped lookup of the WidgetOtpRequest ===
   const lookup = await withTenant(tenant.id, async () => {
     const otpReq = await db.widgetOtpRequest.findFirst({
-      where: { providerRequestId: requestId, email, purpose: 'widget_verify' },
+      where: { providerRequestId: requestId, email, purpose: 'widget_verify', status: 'active' },
     })
     if (!otpReq) return { kind: 'not_found' as const }
+    if (otpReq.status === 'superseded') return { kind: 'request_superseded' as const }
     if (otpReq.verified) return { kind: 'already_used' as const }
     if (otpReq.expiresAt < new Date()) return { kind: 'expired' as const }
     if (otpReq.resendCount > MAX_RESENDS) return { kind: 'resend_limit' as const }
@@ -90,7 +91,7 @@ export async function POST(
   const now = new Date()
   const reservation = await withTenant(tenant.id, async () => {
     const r = await db.widgetOtpRequest.updateMany({
-      where: { id: otpReq.id, verified: false, expiresAt: { gt: now }, attempts: { lt: MAX_VERIFY_ATTEMPTS } },
+      where: { id: otpReq.id, status: 'active', verified: false, expiresAt: { gt: now }, attempts: { lt: MAX_VERIFY_ATTEMPTS } },
       data: { attempts: { increment: 1 } },
     })
     return r.count
@@ -149,8 +150,8 @@ export async function POST(
   const finalization = await withTenant(tenant.id, async () => {
     return db.$transaction(async (tx) => {
       const claimed = await tx.widgetOtpRequest.updateMany({
-        where: { id: otpReq.id, verified: false, expiresAt: { gt: new Date() } },
-        data: { verified: true, verifiedAt: new Date() },
+        where: { id: otpReq.id, status: 'active', verified: false, expiresAt: { gt: new Date() } },
+        data: { status: 'verified', verified: true, verifiedAt: new Date() },
       })
       if (claimed.count === 0) return { lost: true as const }
 

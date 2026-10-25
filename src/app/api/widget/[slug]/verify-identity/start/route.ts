@@ -103,7 +103,7 @@ export async function POST(
         // Expire old unverified active requests for this Contact.
         await tx.widgetOtpRequest.updateMany({
           where: { contactId, verified: false, expiresAt: { gt: new Date() } },
-          data: { expiresAt: new Date() }, // immediately expire
+          data: { status: 'superseded', expiresAt: new Date() },
         })
         // Create the new authoritative request.
         await tx.widgetOtpRequest.create({
