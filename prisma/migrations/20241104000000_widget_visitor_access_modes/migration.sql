@@ -70,7 +70,22 @@ DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='WidgetOtpR
 
 -- #1: branch-development robustness
 ALTER TABLE "WidgetOtpRequest" ADD COLUMN IF NOT EXISTS "pendingName" TEXT;
-ALTER TABLE "WidgetOtpRequest" ADD COLUMN IF NOT EXISTS "status" TEXT NOT NULL DEFAULT 'active';
+-- #1: deterministic upgrade for earlier-branch DBs
+ALTER TABLE "WidgetOtpRequest" ADD COLUMN IF NOT EXISTS "status" TEXT;
+UPDATE "WidgetOtpRequest" SET "status" = 'verified' WHERE "status" IS NULL AND "verified" = true;
+UPDATE "WidgetOtpRequest" wo SET "status" = 'superseded', "verified" = false, "verifiedAt" = NULL, "expiresAt" = now()
+WHERE "status" IS NULL AND "verified" = false
+  AND wo.id NOT IN (
+    SELECT DISTINCT wi.id FROM "WidgetOtpRequest" wi
+    WHERE wi."status" IS NULL AND wi."verified" = false
+    AND wi.id = (SELECT wj.id FROM "WidgetOtpRequest" wj
+      WHERE wj."tenantId" = wi."tenantId" AND wj."contactId" = wi."contactId"
+        AND wj."status" IS NULL AND wj."verified" = false
+      ORDER BY wj."createdAt" DESC, wj."id" DESC LIMIT 1)
+  );
+UPDATE "WidgetOtpRequest" SET "status" = 'active' WHERE "status" IS NULL;
+ALTER TABLE "WidgetOtpRequest" ALTER COLUMN "status" SET DEFAULT 'active';
+ALTER TABLE "WidgetOtpRequest" ALTER COLUMN "status" SET NOT NULL;
 -- BLOCKER 2+3: status column CHECK + one-active-flow partial unique index
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='WidgetOtpRequest_status_check') THEN ALTER TABLE "WidgetOtpRequest" ADD CONSTRAINT "WidgetOtpRequest_status_check" CHECK ("status" IN ('active','superseded','verified')); END IF; END $$;
 
