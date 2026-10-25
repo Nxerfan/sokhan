@@ -494,6 +494,8 @@ model WidgetOtpRequest {
   @@index([tenantId])
   @@index([contactId])
   @@index([email])
+  @@index([tenantId, contactId])
+  @@index([tenantId, purpose, email])
 }
 
 model PendingSignup {

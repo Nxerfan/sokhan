@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS "WidgetOtpRequest" (
     "tenantId" TEXT NOT NULL,
     "contactId" TEXT NOT NULL,
     "email" TEXT NOT NULL,
+    "pendingName" TEXT,
     "purpose" TEXT NOT NULL DEFAULT 'widget_verify',
     "providerRequestId" TEXT NOT NULL,
     "expiresAt" TIMESTAMP(3) NOT NULL,
@@ -59,5 +60,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS "WidgetOtpRequest_providerRequestId_key" ON "W
 CREATE INDEX IF NOT EXISTS "WidgetOtpRequest_tenantId_idx" ON "WidgetOtpRequest"("tenantId");
 CREATE INDEX IF NOT EXISTS "WidgetOtpRequest_contactId_idx" ON "WidgetOtpRequest"("contactId");
 CREATE INDEX IF NOT EXISTS "WidgetOtpRequest_email_idx" ON "WidgetOtpRequest"("email");
+CREATE INDEX IF NOT EXISTS "WidgetOtpRequest_tenantId_contactId_idx" ON "WidgetOtpRequest"("tenantId","contactId");
+CREATE INDEX IF NOT EXISTS "WidgetOtpRequest_tenantId_purpose_email_idx" ON "WidgetOtpRequest"("tenantId","purpose","email");
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='WidgetOtpRequest_purpose_check') THEN ALTER TABLE "WidgetOtpRequest" ADD CONSTRAINT "WidgetOtpRequest_purpose_check" CHECK ("purpose" = 'widget_verify'); END IF; END $$;
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='WidgetOtpRequest_tenantId_fkey') THEN ALTER TABLE "WidgetOtpRequest" ADD CONSTRAINT "WidgetOtpRequest_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant"("id") ON DELETE CASCADE; END IF; END $$;
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='WidgetOtpRequest_contactId_fkey') THEN ALTER TABLE "WidgetOtpRequest" ADD CONSTRAINT "WidgetOtpRequest_contactId_fkey" FOREIGN KEY ("contactId") REFERENCES "Contact"("id") ON DELETE CASCADE; END IF; END $$;

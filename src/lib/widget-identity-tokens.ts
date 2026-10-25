@@ -9,6 +9,10 @@ const RESUME_AUDIENCE = 'sukhan-resume'
 const EXTERNAL_AUDIENCE = 'sukhan-external'
 const CLOCK_SKEW_SECONDS = 5
 
+function assertValidPolicyVersion(pv: number): void {
+  if (typeof pv !== 'number' || !Number.isFinite(pv) || !Number.isInteger(pv) || pv <= 0) throw new Error('invalid_policy_version')
+}
+
 function b64url(input: string | Buffer): string { return (typeof input === 'string' ? Buffer.from(input) : input).toString('base64url') }
 function hmacSign(secret: string, data: string): string { return crypto.createHmac('sha256', secret).update(data).digest('base64url') }
 function timingSafeEqualStr(a: string, b: string): boolean { const A = Buffer.from(a), B = Buffer.from(b); return A.length === B.length && crypto.timingSafeEqual(A, B) }
@@ -40,6 +44,7 @@ function verifyEnvelope(token: string, expectedType: string, expectedAud: string
 }
 
 export function signResumeCredential(args: { contactId: string; tenantId: string; policyVersion: number }): string {
+  assertValidPolicyVersion(args.policyVersion)
   return signEnvelope({ type: 'resume', aud: RESUME_AUDIENCE, contactId: args.contactId, tenantId: args.tenantId, identityLevel: 'verified_contact', policyVersion: args.policyVersion }, RESUME_CREDENTIAL_TTL_SECONDS)
 }
 
@@ -54,6 +59,7 @@ export function verifyResumeCredential(token: string, expectedTenantId: string, 
 }
 
 export function signExternalIdentityToken(args: { tenantId: string; externalUserId: string; contactId?: string | null; policyVersion: number }): string {
+  assertValidPolicyVersion(args.policyVersion)
   return signEnvelope({ type: 'external_identity', aud: EXTERNAL_AUDIENCE, externalUserId: args.externalUserId, contactId: args.contactId ?? null, tenantId: args.tenantId, identityLevel: 'external_user', policyVersion: args.policyVersion }, EXTERNAL_IDENTITY_TOKEN_TTL_SECONDS)
 }
 
