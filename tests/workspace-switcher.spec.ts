@@ -171,9 +171,25 @@ async function openSwitcher(page: Page) {
   await expect(page.locator('[role="menu"]')).toBeVisible()
 }
 
-/** Click a workspace menu item by name. */
+/** Click a workspace menu item by name — ONE click, no retry.
+ *
+ * `noWaitAfter: true` is the deterministic fix for the revoked-workspace
+ * recovery timing: handleSwitch calls `window.location.reload()` AFTER the
+ * async validate → useSession().update → verify flow. Playwright's default
+ * `click()` auto-waits for navigation triggered by the click; in the recovery
+ * timing the reload can begin BEFORE the click promise settles, leaving the
+ * click action attached to the old (navigating) document until the test
+ * timeout closes the context ("Target page, context or browser has been
+ * closed"). `noWaitAfter: true` returns immediately after the click; the
+ * session transition is then verified independently by `waitForWorkspaceSwitch`
+ * (which polls /api/auth/session). This is still exactly ONE user selection —
+ * no retry, no second click, no weakening of the session assertion. */
 async function clickWorkspaceItem(page: Page, name: string) {
-  await page.locator('[role="menu"]').locator('[role="menuitem"]').filter({ hasText: name }).click()
+  await page
+    .locator('[role="menu"]')
+    .locator('[role="menuitem"]')
+    .filter({ hasText: name })
+    .click({ noWaitAfter: true })
 }
 
 test.describe('Workspace switcher UI (PR #13 BLOCKER #1)', () => {
