@@ -484,6 +484,7 @@ model WidgetOtpRequest {
   expiresAt         DateTime
   attempts          Int       @default(0)
   resendCount       Int       @default(0)
+  status            String    @default("active")
   verified          Boolean   @default(false)
   verifiedAt        DateTime?
   ipAddress         String?
@@ -495,8 +496,6 @@ model WidgetOtpRequest {
   @@index([tenantId])
   @@index([contactId])
   @@index([email])
-  @@index([tenantId, contactId])
-  @@index([tenantId, purpose, email])
 }
 
 model PendingSignup {
