@@ -177,45 +177,45 @@ model DepartmentMember {
 }
 
 model WidgetConfig {
-  id            String   @id @default(cuid())
-  tenantId      String   @unique
-  accentColor   String   @default("#E09A2B")
-  launcherShape String   @default("tab")
-  position      String   @default("bottom-end")
-  avatarUrl     String?
-  logoUrl       String?
-  greetingTexts Json
-  defaultLocale String   @default("fa")
+  id                         String    @id @default(cuid())
+  tenantId                   String    @unique
+  accentColor                String    @default("#E09A2B")
+  launcherShape              String    @default("tab")
+  position                   String    @default("bottom-end")
+  avatarUrl                  String?
+  logoUrl                    String?
+  greetingTexts              Json
+  defaultLocale              String    @default("fa")
   // --- Widget Visitor Access Modes / Identity ---
   // accessMode: anonymous | verified_visitor | site_user_only
-  accessMode              String   @default("anonymous")
-  policyVersion           Int      @default(1)
-  integrationSecretHash        String?
-  integrationSecretRotatedAt  DateTime?
-  loginUrl                String?
-  loginButtonLabel        String?
-  loginReturnUrlParam     String?
-  identityEndpointPath    String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  accessMode                 String    @default("verified_visitor") // DB DEFAULT verified_visitor (frozen contract); existing rows backfilled to anonymous by migration
+  policyVersion              Int       @default(1)
+  integrationSecretHash      String?
+  integrationSecretRotatedAt DateTime?
+  loginUrl                   String?
+  loginButtonLabel           String?
+  loginReturnUrlParam        String?
+  identityEndpointPath       String?
+  createdAt                  DateTime  @default(now())
+  updatedAt                  DateTime  @updatedAt
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 }
 
 model Contact {
-  id             String   @id @default(cuid())
-  tenantId       String
-  identifier     String
-  identifierType String   @default("visitorId")
-  name           String?
-  email          String?
-  avatarUrl      String?
-  locale         String   @default("fa")
-  metadata       Json
+  id              String    @id @default(cuid())
+  tenantId        String
+  identifier      String
+  identifierType  String    @default("visitorId")
+  name            String?
+  email           String?
+  avatarUrl       String?
+  locale          String    @default("fa")
+  metadata        Json
   emailVerifiedAt DateTime?
-  lastSeenAt     DateTime @default(now())
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  lastSeenAt      DateTime  @default(now())
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
   tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   conversations Conversation[]
