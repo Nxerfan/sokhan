@@ -193,10 +193,17 @@ export function TopBar({ workspaceName }: { workspaceName: string }) {
               workspaces.map((ws) => (
                 <DropdownMenuItem
                   key={ws.id}
-                  onSelect={(e) => {
-                    // Prevent the menu from closing before the async switch
-                    // resolves — we control closing via the reload.
-                    e.preventDefault()
+                  onSelect={() => {
+                    // Let the menu close normally (Radix default). handleSwitch
+                    // runs exactly once — the async closure persists after the
+                    // menu unmounts; the `switching` guard + `disabled={switching}`
+                    // prevent a duplicate selection; the reload fires only after
+                    // the returned session contains the requested workspaceId
+                    // (verified inside handleSwitch). Keeping the menu open via
+                    // preventDefault during the async validate+update+reload was
+                    // the root cause of the intermittent single-click non-switch
+                    // (the menu-stays-open state raced with the useSession
+                    // re-render triggered by update()). A real user clicks once.
                     void handleSwitch(ws)
                   }}
                   className="flex items-center gap-2"

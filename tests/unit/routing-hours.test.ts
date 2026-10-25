@@ -68,17 +68,21 @@ describe('isWithinBusinessHours — half-open interval [start, end)', () => {
       expect(isWithinBusinessHours({ start: 0, end: 24 }, 0)).toBe(true)
     })
 
-    test('zero-width window (start === end) matches NOTHING', () => {
-      // Documented behavior: start === end ⇒ no hour can satisfy start <= h < end.
+    test('zero-width window (start === end) matches NOTHING — hence REJECTED by validation', () => {
+      // The helper math: start === end ⇒ no hour can satisfy start <= h < end.
+      // Therefore validateRuleTrigger REJECTS start >= end (a persisted no-op
+      // would violate the stabilization rule). Business Hours v1 supports
+      // same-day non-empty intervals only.
       for (let h = 0; h <= 23; h++) {
         expect(isWithinBusinessHours({ start: 5, end: 5 }, h)).toBe(false)
       }
     })
 
-    test('overnight-style window is NOT specially handled (documented limitation)', () => {
-      // The engine reasons in a single 0..23 day. A window like 22–6 is
-      // treated literally as [22, 6) which matches NOTHING (start > end).
-      // This is a known, documented limitation — not a wrap-around.
+    test('overnight-style window (start > end) matches NOTHING — hence REJECTED by validation', () => {
+      // The helper math: [22, 6) matches NOTHING (start > end). Therefore
+      // validateRuleTrigger REJECTS start >= end. Overnight routing is NOT
+      // implemented in v1 (a future product enhancement — do NOT add
+      // wrap-around/timezone support here).
       expect(isWithinBusinessHours({ start: 22, end: 6 }, 23)).toBe(false)
       expect(isWithinBusinessHours({ start: 22, end: 6 }, 2)).toBe(false)
     })

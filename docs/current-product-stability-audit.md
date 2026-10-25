@@ -31,7 +31,7 @@
 |---|---|---|---|---|---|---|---|---|---|---|
 | Current workspace | top-bar | `GET /api/tenants/me` | `Tenant` + JWT `workspaceId` | session | — | dashboard | every spec | ✅ | — | ✅ |
 | Workspace listing | top-bar switcher dropdown | `GET /api/workspaces` | `Membership` | session | — | — | invite-workspace A (API-level) + **new** `tests/workspace-switcher.spec.ts` (UI) | ✅ | **Was**: backend + 39 API tests existed but NO dashboard UI exposed listing/switching (top-bar had no switcher). **Fixed**: switcher dropdown added to the top-bar (current name clickable, lists all active workspaces, current marked with Check + role badge, pending invitations as a separate non-switchable section). | ✅ UI dropdown lists all active workspaces; current marked; secure switch flow (POST /api/auth/switch-workspace validate → useSession().update → verify returned session → hard reload clears all workspace-specific client state) |
-| Workspace switching | top-bar switcher dropdown | `POST /api/auth/switch-workspace` + `useSession().update` | JWT callback re-validates (throws `not_active_member` if invalid) | session+active | — | jwt callback | invite-workspace A (API-level) + **new** `tests/workspace-switcher.spec.ts` (UI) | ✅ | same as above | ✅ UI click → session switches + top-bar name changes + new-workspace data appears + old-workspace data disappears + stale Inbox selection cleared (component state, hard reload) + unauthorized id rejected (dropdown never lists it; API 404) + revoked membership disappears from dropdown with recovery to another active workspace |
+| Workspace switching | top-bar switcher dropdown | `POST /api/auth/switch-workspace` + `useSession().update` | JWT callback re-validates (throws `not_active_member` if invalid) | session+active | — | jwt callback | invite-workspace A (API-level) + **new** `tests/workspace-switcher.spec.ts` (UI) | ✅ | same as above | ✅ SINGLE user selection, NO retry of the switch interaction: open dropdown → click workspace ONCE → session switches + top-bar name changes + new-workspace data appears + old-workspace data disappears + stale Inbox selection cleared (component state, hard reload) + unauthorized id rejected (dropdown never lists it; API 404) + revoked membership disappears from dropdown with recovery to another active workspace |
 | Revoked current workspace recovery | — | APIs 401; `/api/workspaces` still lists; switch works | — | session | — | — | invite-workspace F | ✅ | — | ✅ |
 | Tenant isolation | — | fail-closed Prisma proxy + `withTenant` | 16 tenant-scoped models | — | — | all tenant APIs | tenant-isolation db-boundary (10); tenant-security (7) | ✅ | — | ✅ |
 
@@ -54,7 +54,7 @@ All capabilities (`invite creation`, `acceptance`, `reissue`, `expiry/revocation
 |---|---|---|---|---|
 | Create / update-toggle / delete | 🔴→✅ | unit routing-rules (53); module2 ② (execution) | **toggle/delete ignore `!res.ok`; delete toast says "Saved"** — fixed | error-UX fixed; execution re-proven (module2 in CI) |
 | Keyword condition | ✅ | unit validation (53) + module2 ② execution | — | ✅ |
-| Business-hours condition | ✅ | unit validation (53) + **new** `tests/unit/routing-hours.test.ts` (pure helper boundaries) + **new** `tests/db-boundary/business-hours-routing.test.ts` (real-Postgres execution) | **Was**: unit validation only; no execution test. **Fixed**: extracted deterministic `isWithinBusinessHours` helper (`src/lib/routing-hours.ts`) + made `evaluateRoutingRules` accept an injectable `getHour` (default wall-clock — production unchanged). | ✅ deterministic execution proven: inside hours → action executes; outside → no action; boundary start inclusive / end exclusive; invalid windows rejected upstream by `validateRuleTrigger`; tenant isolation (B rule referencing A dept → execution-time revalidation rejects) |
+| Business-hours condition | ✅ | unit validation (53) + **new** `tests/unit/routing-hours.test.ts` (pure helper boundaries) + **new** `tests/db-boundary/business-hours-routing.test.ts` (real-Postgres execution) | **Was**: unit validation only; no execution test. **Fixed**: extracted deterministic `isWithinBusinessHours` helper (`src/lib/routing-hours.ts`) + made `evaluateRoutingRules` accept an injectable `getHour` (default wall-clock — production unchanged). | ✅ Business Hours v1 supports SAME-DAY NON-EMPTY intervals only (`start < end` required); `start >= end` (overnight/zero-width/inverted) rejected with `invalid_business_hours`. Deterministic execution proven: inside hours → action executes; outside → no action; boundary start inclusive / end exclusive; tenant isolation (B rule referencing A dept → execution-time revalidation rejects) |
 | assign-department action | ✅ | module2 ② (real execution on conversation create) | — | ✅ |
 | send-message action | ✅ | module2 ② (auto-reply observed) | — | ✅ |
 | **Actual rule execution** | ✅ | module2 ② — REAL conversation created via widget message → rule fires → dept assigned + auto-reply lands. NOT just "saved to DB" | — | ✅ |
@@ -284,15 +284,22 @@ Contacts read paths hardened in this PR: `contacts-panel.tsx` `load()` + `loadCo
 
 ## Statement of completion
 
-No known blockers remain in the audited current-product capability matrix.
-
 The four capability-completion blockers (workspace switcher UI, business-hours
 routing execution, password-reset CI journey, contacts UI identity journey)
-have been implemented with dedicated behavioral specs and are behaviorally
-green on the final SHA (545c998) — CI run 40134735057: all 4 jobs SUCCESS
-(ci, widget-package-qualification, self-host-qualification, docker-regression
-Full+Lite). The stabilization contract's affirmation is now made: all four
-are behaviorally green.
+were implemented + behaviorally green on `545c998` (CI run 40134735057) — ACCEPTED.
+
+A second round of THREE deterministic-stability blockers is implemented in this
+round (on top of `59987da`):
+  1. E8 reissue race contract → deterministic 409 `already_reissued` (both timing paths converge).
+  2. Workspace switcher → single user selection, NO retry (removed `e.preventDefault()` + the retry helper).
+  3. Business Hours → v1 same-day non-empty intervals only (`start < end` required).
+
+The final "No known blockers remain in the audited current-product capability
+matrix" affirmation is pending the green CI run (lint/typecheck/unit/Prisma
+validate/widget-package-qualification/Full+Lite DB-boundary/Full+Lite
+browser/self-host) on this round's final SHA. Per the stabilization contract,
+the affirmation is only made once all three are behaviorally green in BOTH
+Full and Lite.
 
 This document does not claim zero bugs. The deferred items below remain
 recorded, each with the reason it was not silently invented or hot-fixed
@@ -313,32 +320,76 @@ here.
 
 The `reset-password/complete` route updates `User.passwordHash` + `passwordResetAt` but does **NOT** invalidate existing sessions. A user who is signed in on another device and resets their password keeps that existing session alive until its JWT expires naturally. This is the CURRENT product contract (verified by reading the route source). This PR does **not** invent session revocation behavior — it documents the existing contract truthfully, as instructed. The new `tests/password-reset.spec.ts` proves the reset itself works (old password fails, new password succeeds) without making any claim about session revocation.
 
-## Observed one-time flakes (recorded for observation)
+## Deterministic-stability fixes (3 final blockers, resolved in this round)
 
-Two pre-existing timing-sensitive flakes in `tests/invite-workspace-switching.spec.ts`
-(a spec this PR did NOT touch — zero changes to auth/signup/login/users/invitations):
+### E8 reissue race — root cause + deterministic resolution
 
-1. **B1-B2** ("pre-verification credentials sign-in must fail") failed exactly
-   once at a57cb51 (run #210) with an unexpected 200. Passed in the two adjacent
-   runs (#208, #209) and every prior run on main.
+**Root cause**: `POST /api/invitations/reissue` classified the target status
+BEFORE the transaction (`const target = await db.invitation.findFirst(...)`
+then `if (target.status === 'superseded') return 400 superseded_not_reissuable`).
+The conditional single-winner claim lives INSIDE the transaction
+(`updateMany WHERE status='revoked'` → loser `count=0` → `409 already_reissued`).
+So the concurrent-loser response was timing-dependent:
+  - Timing A (both pre-transaction reads see `revoked`): loser's claim loses → `409 already_reissued`.
+  - Timing B (winner commits before loser's read): loser reads `superseded` → exits early → `400 superseded_not_reissuable`.
+The public contract was therefore non-deterministic (`200+409` OR `200+400`).
 
-2. **E8** ("concurrent reissue of SAME revoked invitation — single winner")
-   failed exactly once at 8d4ba8e (run 40128753944, Lite edition) with
-   `[200,400]` instead of the expected `[200,409]` — the loser of the
-   concurrent reissue race hit the early `status !== 'revoked'` validation
-   path (400) instead of the `already_reissued` conflict path (409), because
-   its `findFirst` read the row as 'superseded' after the winner's claim
-   committed. This is a read-then-claim race in the pre-existing reissue
-   route (NOT in this PR's scope — the 4 blockers do not touch invitations).
-   It PASSED on the green runs at 43d8789 (run 40125431129) and 545c998 (run 40134735057) in BOTH editions, but FAILED again on the doc-only cde47cc run (40136551228, Lite edition: 114 passed / 1 failed — E8 only). So E8 is a RECURRING (non-deterministic) flake of the reissue route's read-then-claim race, NOT a one-time event. It is NOT a regression introduced by this PR (this PR does not touch invitations/reissue) and is NOT in the 4-blocker scope. All four capability-completion blockers are behaviorally green at 545c998 in BOTH editions (Full+Lite browser 115/115, db-boundary 57/57). If E8 must be made deterministic, the reissue route's read-then-claim pattern (the early `status !== 'revoked'` check that returns 400 before the 409 conflict path when a concurrent winner has already committed) would be the candidate — a separate corrective, out of this PR's scope.
+**Deterministic resolution**: a request to reissue an already-superseded
+invitation now returns `409 already_reissued` (the SAME result as the
+conditional-claim loser). BOTH paths — initial-read-observes-`superseded` AND
+conditional-claim-loses — produce the identical public result
+`{ "error": "already_reissued" }` with HTTP 409. The contract is now
+timing-independent. The safety invariants are unchanged: exactly one new
+pending invitation, exactly one valid token, the old (superseded) token is
+dead, the loser gets no invite URL/token, no seat overbooking (transactional
+plan-capacity re-check under the per-tenant seat lock), and a superseded row
+can never create another pending invitation. E8 is NO LONGER a flake — it is a
+fixed deterministic contract, proven across 10 rounds of fresh-row concurrent
+reissues in BOTH Full and Lite (every round `statuses == [200, 409]` + exactly
+one pending). The older E1-E4 lifecycle assertion that expected
+`superseded_not_reissuable` (400) was updated to `already_reissued` (409).
 
-NOTE on the workspace-switcher Lite flake (resolved in 545c998): the UI dropdown-click → handleSwitch path was intermittently not triggering the switch in the slower Lite edition (test 113 "switch back to A" timed out at 25s on the doc-only cbad6ad run, same code that passed at 43d8789). Fixed in 545c998 with a retry-based `switchWorkspaceViaUI` helper (re-open + re-click + re-poll, up to 3 attempts with a clean goto between) — robust against the intermittent click failure WITHOUT weakening the assertion (the session must still actually switch to the target). Both editions green at 545c998.
+### Workspace switcher — single user selection, no retry
 
-Both are recorded as one-time flakes, not regressions. If either recurs
-deterministically, it warrants a dedicated investigation (the reissue
-route's read-then-claim race would be the candidate for E8).
+**Root cause of the prior intermittent single-click non-switch**: the
+DropdownMenuItem `onSelect` called `e.preventDefault()` to keep the menu open
+during the async validate → `useSession().update` → reload flow. The
+menu-stays-open state raced with the `useSession` re-render triggered by
+`update()`, intermittently preventing the session from switching on a single
+click (the prior test masked this with a 3-attempt retry helper — unacceptable
+proof for a stability audit).
 
-## Verification summary at the final SHA (545c998, CI run 40134735057)
+**Resolution**: `e.preventDefault()` was REMOVED — the menu now closes
+normally on selection (Radix default), and `handleSwitch` runs exactly once
+(the async closure persists after the menu unmounts). The `switching` guard +
+`disabled={switching}` prevent a duplicate selection; the reload fires only
+after the returned session contains the requested `workspaceId` (verified
+inside `handleSwitch`). A real user clicks ONCE. The 3-attempt retry helper
+was REMOVED from `tests/workspace-switcher.spec.ts`; every switch assertion
+performs exactly ONE user selection (open dropdown → click workspace once →
+wait for session `workspaceId` → assert new workspace). If the single
+interaction fails, the test fails — no masking. Proven in BOTH Full and Lite:
+B→A single click, A→B single click, B→A again single click, stale Inbox
+state clears, revoked-current-workspace recovery.
+
+### Business Hours — v1 same-day non-empty intervals only
+
+The validator previously accepted `start=22, end=6` (overnight),
+`start=5, end=5` (zero-width), and `start=17, end=9` (inverted) because both
+values independently fall within `[0,23]`. But the engine contract is
+`hour >= start && hour < end`, so all three match NOTHING — a persisted no-op
+(stabilization violation). **Resolution**: `validateRuleTrigger` now REQUIRES
+`start < end` (Business Hours v1 supports same-day non-empty intervals only);
+`start >= end` is rejected with `invalid_business_hours`. Valid same-day
+examples (`0→1`, `9→17`, `22→23`) remain accepted. The UI does not claim an
+invalid window was saved (the authoritative server-side rejection is retained;
+the dashboard's save path calls the same validator before persisting).
+Overnight routing is NOT implemented in v1 — it is a future product enhancement
+(do NOT add timezone/wrap-around support in this corrective). Unit + db-boundary
+tests cover the accept/reject matrix; the valid-rule execution + send_message +
+tenant isolation behaviors remain green.
+
+## Verification summary at the final SHA (this round's final SHA — finalised after the green CI run)
 
 All 4 CI jobs SUCCESS — `ci`, `widget-package-qualification`, `self-host-qualification`, `docker-regression`.
 

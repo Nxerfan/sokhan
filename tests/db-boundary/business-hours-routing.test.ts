@@ -356,9 +356,36 @@ describe('business-hours routing — invalid windows rejected upstream', () => {
     ).toBe(false)
   })
 
-  test('valid businessHours window accepted', () => {
+  test('valid same-day businessHours windows accepted', () => {
     expect(
       validateRuleTrigger({ event: 'conversation_created', conditions: { businessHours: { start: 9, end: 17 } } }).ok,
     ).toBe(true)
+    expect(
+      validateRuleTrigger({ event: 'conversation_created', conditions: { businessHours: { start: 0, end: 1 } } }).ok,
+    ).toBe(true)
+    expect(
+      validateRuleTrigger({ event: 'conversation_created', conditions: { businessHours: { start: 22, end: 23 } } }).ok,
+    ).toBe(true)
+  })
+
+  test('overnight/zero-width/inverted windows rejected (start must be < end)', () => {
+    // Business Hours v1 supports same-day non-empty intervals only.
+    // The engine contract is hour >= start && hour < end, so these match
+    // NOTHING → persisting them would be a no-op (stabilization violation).
+    expect(
+      validateRuleTrigger({ event: 'conversation_created', conditions: { businessHours: { start: 22, end: 6 } } }).ok,
+      'overnight 22->6 rejected',
+    ).toBe(false)
+    expect(
+      validateRuleTrigger({ event: 'conversation_created', conditions: { businessHours: { start: 5, end: 5 } } }).ok,
+      'zero-width 5->5 rejected',
+    ).toBe(false)
+    expect(
+      validateRuleTrigger({ event: 'conversation_created', conditions: { businessHours: { start: 17, end: 9 } } }).ok,
+      'inverted 17->9 rejected',
+    ).toBe(false)
+    // The error code must be invalid_business_hours (not a different error).
+    const r = validateRuleTrigger({ event: 'conversation_created', conditions: { businessHours: { start: 22, end: 6 } } })
+    if (r.ok === false) expect(r.error).toBe('invalid_business_hours')
   })
 })

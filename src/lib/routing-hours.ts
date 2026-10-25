@@ -13,8 +13,13 @@
  *   - `start` is INCLUSIVE, `end` is EXCLUSIVE (half-open interval [start, end))
  *   - hours are 24h integers in [0, 23] (enforced upstream by
  *     `validateRuleTrigger` in `src/lib/routing-rules-validation.ts`)
- *   - `start === end` therefore matches NOTHING (zero-width window) — this
- *     is intentional and documented, not a bug.
+ *   - `start === end` would match NOTHING (zero-width window) — but this is
+ *     now REJECTED upstream by `validateRuleTrigger` (Business Hours v1
+ *     supports same-day non-empty intervals only; `start < end` required).
+ *   - Overnight windows (`start > end`, e.g. 22->6) are ALSO rejected by
+ *     `validateRuleTrigger` — they would match NOTHING under the half-open
+ *     interval, so persisting them would be a no-op (a stabilization
+ *     violation). Overnight routing is a future product enhancement.
  *   - `tz` is accepted for forward-compatibility but NOT honoured by the
  *     current engine (the engine reasons in the server's local hour). This
  *     is a known limitation, truthfully documented in the audit.

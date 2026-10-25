@@ -21,8 +21,9 @@ import { getPlan } from '@/lib/payments/plans'
  *
  * LIFECYCLE INVARIANT — exactly one valid link per reissue chain (#4)
  *   - ONLY `revoked` invitations may be reissued.
- *   - `superseded` rows CANNOT be reissued (rejected with
- *     `superseded_not_reissuable`).
+ *   - `superseded` rows CANNOT be reissued (rejected with 409
+ *     `already_reissued` — the SAME deterministic result as a concurrent
+ *     reissue race loser, so the public contract is timing-independent).
  *   - To reissue a CURRENTLY-PENDING invitation: revoke it first, then
  *     reissue the revoked row.
  *
@@ -32,9 +33,12 @@ import { getPlan } from '@/lib/payments/plans'
  *   `updateMany WHERE status='revoked'`; the winner gets `count=1` and
  *   proceeds to create the new pending invitation. A concurrent reissue
  *   of the SAME row gets `count=0` (the row is already `superseded`) →
- *   returns a deterministic `already_reissued` response WITHOUT creating
- *   anything. This guarantees exactly one new pending link per reissue
- *   chain, even under concurrency.
+ *   returns a deterministic `already_reissued` (409) response WITHOUT
+ *   creating anything. The pre-transaction `superseded` classification
+ *   ALSO returns `already_reissued` (409), so BOTH timing paths (initial
+ *   read observes superseded; conditional claim loses) produce the SAME
+ *   public result — the contract is timing-independent. This guarantees
+ *   exactly one new pending link per reissue chain, even under concurrency.
  *
  *   The plan-capacity check is ALSO inside the transaction (transactional),
  *   so two concurrent reissues for DIFFERENT revoked invitations cannot
@@ -69,7 +73,14 @@ export async function POST(req: NextRequest) {
       return { error: 'already_accepted' as const }
     }
     if (target.status === 'superseded') {
-      return { error: 'superseded_not_reissuable' as const }
+      // DETERMINISTIC CONTRACT (PR #13 stability): a request to reissue an
+      // already-superseded invitation returns 409 `already_reissued` — the
+      // SAME result as the concurrent-race loser path below (conditional
+      // claim count=0). This eliminates the pre-transaction-read timing
+      // dependence: whether the loser's initial read observes `superseded`
+      // (this branch) OR the loser's conditional claim loses inside the
+      // transaction (the `raced` branch), the public result is identical.
+      return { error: 'already_reissued' as const }
     }
     if (target.status !== 'revoked') {
       return { error: 'not_reissuable' as const }
@@ -244,8 +255,8 @@ export async function POST(req: NextRequest) {
     const status =
       err === 'not_found'
         ? 404
-        : err === 'missing_id' || err === 'already_pending' || err === 'already_accepted' || err === 'not_reissuable' || err === 'superseded_not_reissuable'
-          ? 400
+        : err === 'already_reissued'
+          ? 409
           : 400
     return NextResponse.json({ error: err }, { status })
   }

@@ -176,42 +176,7 @@ async function clickWorkspaceItem(page: Page, name: string) {
   await page.locator('[role="menu"]').locator('[role="menuitem"]').filter({ hasText: name }).click()
 }
 
-/**
- * Switch workspace via the UI dropdown with RETRY. The dropdown click →
- * handleSwitch (validate → useSession().update → reload) path is occasionally
- * racy in the slower Lite edition (the menuitem onSelect sometimes does not
- * trigger handleSwitch within the poll window). This helper retries the whole
- * open+click+poll sequence up to 3 times with a clean goto between attempts,
- * making the switch robust against that intermittent click failure.
- */
-async function switchWorkspaceViaUI(page: Page, name: string, expectedId: string) {
-  let last: string | null = null
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      await page.locator(SWITCHER_TRIGGER).click({ timeout: 5000 })
-      const menu = page.locator('[role="menu"]')
-      await expect(menu).toBeVisible({ timeout: 5000 })
-      await menu.locator('[role="menuitem"]').filter({ hasText: name }).click({ timeout: 5000 })
-    } catch {
-      // Click failed — reset to a clean page state and retry.
-      await page.goto(BASE, { waitUntil: 'domcontentloaded' }).catch(() => {})
-      continue
-    }
-    // Poll for the session to reflect the target workspace.
-    const deadline = Date.now() + 12000
-    while (Date.now() < deadline) {
-      last = await getSessionWorkspaceId(page)
-      if (last === expectedId) return
-      await page.waitForTimeout(250)
-    }
-    // Not switched this attempt — reset to a clean page state and retry.
-    await page.goto(BASE, { waitUntil: 'domcontentloaded' }).catch(() => {})
-  }
-  throw new Error(`workspace did not switch to ${name} (${expectedId}) after 3 attempts (last=${last})`)
-}
-
 test.describe('Workspace switcher UI (PR #13 BLOCKER #1)', () => {
-  test.describe.configure({ timeout: 150000 }) // switch tests retry — needs room
   let tenantA: TenantCtx
   let tenantB: TenantCtx
   let aConv: { conversationId: string }
@@ -261,7 +226,9 @@ test.describe('Workspace switcher UI (PR #13 BLOCKER #1)', () => {
 
   test('click workspace A → session switches to A; top-bar shows A', async () => {
     await tenantB.page.goto(BASE, { waitUntil: 'domcontentloaded' })
-    await switchWorkspaceViaUI(tenantB.page, 'WS A', tenantA.tenantId)
+    await openSwitcher(tenantB.page)
+    await clickWorkspaceItem(tenantB.page, 'WS A')
+    await waitForWorkspaceSwitch(tenantB.page, tenantA.tenantId)
     // After reload, the shell re-fetches /api/tenants/me for A. The trigger h2
     // now shows A's name.
     await tenantB.page.goto(BASE, { waitUntil: 'domcontentloaded' })
@@ -290,7 +257,9 @@ test.describe('Workspace switcher UI (PR #13 BLOCKER #1)', () => {
     // Switch to B via the UI. The reload from handleSwitch tears down ALL
     // workspace-specific client state — including the Inbox selectedId (which
     // lives in component state, NOT the URL), so it is cleared by the remount.
-    await switchWorkspaceViaUI(tenantB.page, 'WS B', tenantB.tenantId)
+    await openSwitcher(tenantB.page)
+    await clickWorkspaceItem(tenantB.page, 'WS B')
+    await waitForWorkspaceSwitch(tenantB.page, tenantB.tenantId)
     await tenantB.page.goto(BASE, { waitUntil: 'domcontentloaded' })
     // B's inbox shows B's conversation, NOT A's. The stale A selection cannot
     // remain (selectedId was cleared by the remount + A's conversationId does
@@ -301,7 +270,9 @@ test.describe('Workspace switcher UI (PR #13 BLOCKER #1)', () => {
 
   test('switch back to A → A data returns; B data disappears', async () => {
     await tenantB.page.goto(BASE, { waitUntil: 'domcontentloaded' })
-    await switchWorkspaceViaUI(tenantB.page, 'WS A', tenantA.tenantId)
+    await openSwitcher(tenantB.page)
+    await clickWorkspaceItem(tenantB.page, 'WS A')
+    await waitForWorkspaceSwitch(tenantB.page, tenantA.tenantId)
     await tenantB.page.goto(BASE, { waitUntil: 'domcontentloaded' })
     await expect(tenantB.page.locator('main')).toContainText('hello from A visitor', { timeout: 15000 })
     await expect(tenantB.page.locator('main')).not.toContainText('hello from B visitor')
@@ -367,7 +338,9 @@ test.describe('Workspace switcher UI (PR #13 BLOCKER #1)', () => {
     await tenantB.page.keyboard.press('Escape')
 
     // B recovers by switching to B (B's membership in B is still active).
-    await switchWorkspaceViaUI(tenantB.page, 'WS B', tenantB.tenantId)
+    await openSwitcher(tenantB.page)
+    await clickWorkspaceItem(tenantB.page, 'WS B')
+    await waitForWorkspaceSwitch(tenantB.page, tenantB.tenantId)
     await tenantB.page.goto(BASE, { waitUntil: 'domcontentloaded' })
     // The dashboard is functional again — B's data shows.
     await expect(tenantB.page.locator('main')).toContainText('hello from B visitor', { timeout: 10000 })
