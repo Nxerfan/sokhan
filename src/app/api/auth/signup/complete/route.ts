@@ -64,6 +64,13 @@ export async function POST(req: NextRequest) {
           tenantId: tenant.id, accentColor: '#E09A2B', launcherShape: 'tab', position: 'bottom-end',
           greetingTexts: { fa: 'سلام! چطور می‌تونم کمکتون کنم؟', en: 'Hi there! How can I help?' },
           defaultLocale: 'fa',
+          // Widget Visitor Access Modes (feat/widget-visitor-access-modes):
+          // NEW workspaces default to 'verified_visitor'. The column DEFAULT
+          // 'anonymous' is the safe fallback for EXISTING rows (migration
+          // backfill) + any non-signup creation path — so this explicit value
+          // is required here to set the new-workspace default.
+          accessMode: 'verified_visitor',
+          policyVersion: 1,
         },
       })
     })
