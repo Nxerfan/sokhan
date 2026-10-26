@@ -1834,3 +1834,41 @@ Stage Summary:
 - OTP routes: the START route's Contact resolution + dedup were the minimal permitted fixes; the VERIFY route is NOT altered. The OTP state-machine (WidgetOtpRequest bounded retry, attempt reservation, transactional finalization) is untouched.
 - PR #14 remains DRAFT (draft=True), NOT MERGED (merged=False), NO AUTO-MERGE (autoMergeRequest=None). Head = 423c8dc (42 commits ahead of main).
 - #11 (optional historical-dev normalization raw-SQL test) is NOT done — it is secondary/optional per the user's instructions. #12 (resend route + access-config/public-config/three-mode/message-send/realtime/NPM/script/dashboard/docs/qualification) is the next phase — the migration CI gate is now GREEN, so #12 may proceed.
+
+---
+Task ID: RESEND-1
+Agent: Z.ai Code (resend route + behavioral tests)
+Task: Implement POST /api/widget/[slug]/verify-identity/resend on feat/widget-visitor-access-modes with the full contract (verified_visitor only, strict policyVersion, bound to persisted pending email, rotate providerRequestId, bounded resend count, concurrent-safe, fail-closed, Contact unmutated) + real PostgreSQL behavioral tests. The OTP foundation is COMPLETE + green; do NOT reopen it.
+
+Work Log:
+- Implemented the resend route (src/app/api/widget/[slug]/verify-identity/resend/route.ts, commit 42ba868):
+  * only verified_visitor mode + strict current policyVersion (parsePolicyVersion -> policy_unavailable on null).
+  * tenant/domain/rate-limit rules preserved (same getClientIP + checkRateLimit as START; localhost bypass in the non-production/no-REDIS test runner — rate limiting NOT globally weakened).
+  * resolve the Contact by (tenant, visitorId) via findUnique (NO create — a resend implies an existing flow; missing Contact -> request_not_found). Enforce identity class (identifierType=visitorId, externalUserId=null) -> identity_conflict otherwise.
+  * find the latest WidgetOtpRequest for the contact (purpose=widget_verify, ORDER BY createdAt DESC) + classify: active / superseded / verified / not_found.
+  * fail closed for: expired (expiresAt<now -> expired), resend limit (resendCount>=MAX -> resend_limit), wrong correlation (frontend email or requestId mismatch -> wrong_correlation), identity conflict, stale policy, wrong tenant.
+  * bind resend to the PERSISTED pending email (otpReq.email) — a frontend email is NEVER trusted to change identity; if provided, it must match (else wrong_correlation).
+  * call Nixify resendOtp with the persisted pending email; a provider failure returns provider_error with NO local state corruption (Nixify runs BEFORE the DB UPDATE).
+  * transactional conditional rotation: rotate providerRequestId (old immediately unusable locally), update expiresAt, increment resendCount, reset attempts=0, remain status=active + verified=false. ATOMIC resendCount<MAX bound in the WHERE clause so concurrent resends are bounded (the first MAX succeed, the rest get count=0 -> re-read -> resend_limit). Concurrent resends leave exactly one authoritative providerRequestId.
+  * Contact profile MUST NOT be mutated (the UPDATE only touches WidgetOtpRequest; pendingName + email preserved).
+  * no raw Prisma/Nixify/internal errors leak to the client.
+- Added the simulateResend helper (faithful replica of the route) + 10 behavioral tests (appended to tests/db-boundary/widget-otp-concurrency.test.ts):
+  1. happy resend: providerRequestId rotates, old unusable (request_not_found on verify), new verifies, pendingName/email preserved, attempts reset to 0, resendCount increments to 1, Contact unchanged before final verify.
+  2. resend limit: 3 resends OK, 4th -> resend_limit (state unchanged by the rejected resend).
+  3. superseded -> request_superseded.
+  4. verified -> already_used.
+  5. wrong visitorId -> request_not_found (original request unchanged).
+  6. wrong correlation (wrong email) -> wrong_correlation (no rotation).
+  7. wrong correlation (stale requestId) -> wrong_correlation.
+  8. identity conflict (external-user Contact) -> identity_conflict (OTP untouched).
+  9. expired -> expired.
+  10. provider failure (injected throwing resendOtpFn) -> provider_error, OTP state UNCHANGED (providerRequestId NOT rotated, resendCount NOT incremented, attempts/expiresAt/status/verified/email/pendingName all unchanged), Contact unchanged.
+  11. concurrent resends (10-way): exactly one active row, resendCount bounded by MAX_RESENDS, old providerRequestId gone, new verifies.
+- Local gate PASS: prisma validate (valid), typecheck clean, lint 0 errors, unit 605 pass/0.
+- One branch-management fix: the resend route (untracked) blocked `git checkout feat/widget-visitor-access-modes` (Aborting), so the initial commit landed on `main`; moved the feature branch ref to the commit (42ba868), switched, pushed, + reset main back to origin/main (cosmetic — main is not pushed).
+- CI run 40382848716 (42ba868): ALL 4 JOBS GREEN — ci (605 unit), widget-package-qualification, self-host-qualification, docker-regression (Full DB-boundary PASS incl. all 10 resend tests + Full browser regression PASS + Lite DB-boundary PASS incl. all 10 resend tests + Lite browser regression PASS).
+
+Stage Summary:
+- The resend route is implemented + CI-verified GREEN in both Full and Lite docker-regression. All 10 behavioral tests pass against real PostgreSQL. The OTP foundation was NOT reopened; the VERIFY route was NOT altered. The resend reuses the START/VERIFY conventions (fail-closed tenant proxy, identity-class enforcement, transactional conditional claim, Nixify before DB mutation).
+- PR #14 remains DRAFT (draft=True), NOT MERGED (merged=False), NO AUTO-MERGE (autoMergeRequest=None). Head = 42ba868 (44 commits ahead of main).
+- OTP work is now STOPPED (per the user's instructions). The next phase is the post-resend list: (1) strict access-config GET/PATCH, (2) public widget access config, (3) three-mode bootstrap, (4) REST send authorization, (5) realtime authorization, (6) NPM widget identity integration, (7) script widget parity, (8) login-required event/callback, (9) dashboard Access & Identity UI, (10) docs, then final Full/Lite qualification.
