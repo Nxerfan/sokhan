@@ -181,5 +181,6 @@ test('All expected tenant-scoped models are present (snapshot of the known set)'
     'Subscription',
     'WidgetConfig',
     'WidgetDomain',
+    'WidgetOtpRequest',
   ])
 })
