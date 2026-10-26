@@ -209,7 +209,7 @@ describe('External identity — Contact namespace isolation', () => {
       return db.contact.create({ data: { tenantId: tenantA.id, identifier: 'ext_' + crypto.randomUUID(), identifierType: 'externalUser', externalUserId: `e1-${RUN_ID}`, email, name: 'E1', metadata: {} } })
     })
     const c2 = await withTenant(tenantA.id, async () => {
-      return db.contact.create({ data: { tenantId: tenantA.id, identifier: 'ext_' + crypto.randomUUID(), identifierType: 'externalUser', externalUserId: `e2-${RUN_ID}`, email, name: 'E2', metadata: {} })
+      return db.contact.create({ data: { tenantId: tenantA.id, identifier: 'ext_' + crypto.randomUUID(), identifierType: 'externalUser', externalUserId: `e2-${RUN_ID}`, email, name: 'E2', metadata: {} } })
     })
     expect(c1.id).not.toBe(c2.id)
     expect(c1.email).toBe(email)
