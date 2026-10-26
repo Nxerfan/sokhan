@@ -24,7 +24,7 @@
 
 import { test, expect, describe, beforeAll, afterAll } from 'bun:test'
 import { db, globalDb, withTenant } from '@/lib/db'
-import { sendOtp, verifyOtp } from '@/lib/nixify/client'
+import { sendOtp, verifyOtp, resendOtp } from '@/lib/nixify/client'
 import type { OtpPurpose, SendOtpResult, VerifyOtpResult } from '@/lib/nixify/client'
 import { signResumeCredential, verifyResumeCredential } from '@/lib/widget-identity-tokens'
 import { signToken, verifyToken } from '@/lib/realtime-token'
@@ -1017,5 +1017,353 @@ describe('ProviderRequestId adversarial binding', () => {
     }))
     expect(c2!.email).toBeNull()
     expect(c2!.emailVerifiedAt).toBeNull()
+  })
+})
+
+// === RESEND (faithful replica of the resend route) ===
+
+type ResendOtpFn = (email: string, purpose: OtpPurpose) => Promise<SendOtpResult>
+
+interface ResendResult {
+  result:
+    | 'resent'
+    | 'request_not_found'
+    | 'request_superseded'
+    | 'already_used'
+    | 'expired'
+    | 'resend_limit'
+    | 'wrong_correlation'
+    | 'identity_conflict'
+    | 'provider_error'
+  newProviderRequestId?: string
+  expiresAt?: string
+}
+
+/**
+ * Faithful replica of the RESEND route's state machine. Mirrors the production
+ * resend route (src/app/api/widget/[slug]/verify-identity/resend/route.ts):
+ *   findUnique Contact (NO create) + identity-class check
+ *   find latest active OTP for the contact + classify (active/superseded/verified)
+ *   fail closed for expired / resend limit / wrong correlation
+ *   call resendOtp with the PERSISTED pending email (injectable for failure tests)
+ *   transactional conditional rotation (providerRequestId, expiresAt,
+ *     resendCount++, attempts=0, status=active, verified=false) with an ATOMIC
+ *     resendCount<MAX bound; claim-lost -> re-read + classify
+ *   Contact profile is NOT mutated
+ */
+async function simulateResend(opts: {
+  visitorId: string
+  email?: string
+  requestId?: string
+  resendOtpFn?: ResendOtpFn
+}): Promise<ResendResult> {
+  const resend: ResendOtpFn = opts.resendOtpFn ?? resendOtp
+
+  // Resolve Contact by (tenant, visitorId) — findUnique, NO create.
+  const contactResult = await withTenant(tenant.id, async () => {
+    const c = await db.contact.findUnique({
+      where: { tenantId_identifier: { tenantId: tenant.id, identifier: opts.visitorId } },
+      select: { id: true, identifierType: true, externalUserId: true },
+    })
+    if (!c) return { ok: false as const, reason: 'request_not_found' as const }
+    if (c.identifierType !== 'visitorId' || c.externalUserId !== null) return { ok: false as const, reason: 'identity_conflict' as const }
+    return { ok: true as const, contactId: c.id }
+  })
+  if (!contactResult.ok) return { result: contactResult.reason }
+  const contactId = contactResult.contactId
+
+  // Find the latest WidgetOtpRequest for this contact + classify.
+  const otpReq = await withTenant(tenant.id, async () => {
+    return db.widgetOtpRequest.findFirst({
+      where: { contactId, purpose: 'widget_verify' },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, providerRequestId: true, email: true, pendingName: true, resendCount: true, expiresAt: true, status: true, verified: true },
+    })
+  })
+  if (!otpReq) return { result: 'request_not_found' }
+  if (otpReq.status === 'superseded') return { result: 'request_superseded' }
+  if (otpReq.verified || otpReq.status === 'verified') return { result: 'already_used' }
+  if (otpReq.status !== 'active') return { result: 'request_not_found' }
+  if (otpReq.expiresAt < new Date()) return { result: 'expired' }
+  if (otpReq.resendCount >= MAX_RESENDS) return { result: 'resend_limit' }
+  // Correlation: frontend email + requestId must match the persisted values.
+  if (opts.email && opts.email !== otpReq.email) return { result: 'wrong_correlation' }
+  if (opts.requestId && opts.requestId !== otpReq.providerRequestId) return { result: 'wrong_correlation' }
+
+  // Call Nixify resendOtp with the PERSISTED pending email. A provider failure
+  // returns 'provider_error' with NO local state corruption (the DB UPDATE
+  // below never runs).
+  let nixifyResult
+  try {
+    nixifyResult = await resend(otpReq.email, 'widget_verify')
+  } catch {
+    return { result: 'provider_error' }
+  }
+
+  // Transactional conditional rotation with an ATOMIC resendCount<MAX bound.
+  // Concurrent resends serialize on the row lock; the first MAX succeed (each
+  // rotating the providerRequestId), the rest get count=0 -> re-read -> resend_limit.
+  const rotated = await withTenant(tenant.id, async () => {
+    const r = await db.widgetOtpRequest.updateMany({
+      where: { id: otpReq.id, status: 'active', verified: false, purpose: 'widget_verify', resendCount: { lt: MAX_RESENDS } },
+      data: {
+        providerRequestId: nixifyResult.otpRequestId, // rotate — old immediately unusable locally
+        expiresAt: new Date(nixifyResult.expiresAt),
+        resendCount: { increment: 1 },
+        attempts: 0, // reset
+        status: 'active', // remain
+        verified: false, // remain
+        verifiedAt: null,
+      },
+    })
+    return r.count
+  })
+
+  if (rotated === 0) {
+    // The conditional claim lost — re-read + classify (no raw error leak).
+    const state = await withTenant(tenant.id, async () => {
+      return db.widgetOtpRequest.findUnique({ where: { id: otpReq.id }, select: { status: true, verified: true, providerRequestId: true, expiresAt: true, resendCount: true } })
+    })
+    if (!state) return { result: 'request_not_found' }
+    if (state.status === 'superseded') return { result: 'request_superseded' }
+    if (state.verified || state.status === 'verified') return { result: 'already_used' }
+    if (state.expiresAt < new Date()) return { result: 'expired' }
+    if (state.resendCount >= MAX_RESENDS) return { result: 'resend_limit' }
+    // Still active but the claim lost — a concurrent resend rotated the
+    // providerRequestId. Return the CURRENT authoritative one.
+    return { result: 'resent', newProviderRequestId: state.providerRequestId, expiresAt: state.expiresAt.toISOString() }
+  }
+
+  return { result: 'resent', newProviderRequestId: nixifyResult.otpRequestId, expiresAt: nixifyResult.expiresAt }
+}
+
+// === RESEND BEHAVIORAL TESTS ===
+
+describe('OTP resend', () => {
+  test('happy resend: providerRequestId rotates, old unusable, new verifies, pendingName/email preserved, attempts reset, resendCount increments, Contact unchanged before verify', async () => {
+    const vid = uniq('rs-happy'), em = `${uniq('rs-happy')}@x.test`
+    const start = await simulateStart({ visitorId: vid, email: em, name: 'Pending Name' })
+    if (!start.ok) throw new Error('START failed')
+    const oldPr = start.req.providerRequestId
+    const contactId = start.contactId
+
+    // Burn an attempt (wrong code) to prove attempts resets on resend.
+    await simulateVerify({ requestId: oldPr, email: em, visitorId: vid, code: '000000' })
+    const beforeResend = await withTenant(tenant.id, async () => db.widgetOtpRequest.findUnique({ where: { id: start.req.id }, select: { attempts: true, resendCount: true } }))
+    expect(beforeResend!.attempts).toBe(1)
+    expect(beforeResend!.resendCount).toBe(0)
+
+    // Contact unchanged after START (before resend).
+    const contactBeforeResend = await withTenant(tenant.id, async () => db.contact.findUnique({ where: { id: contactId }, select: { email: true, emailVerifiedAt: true, name: true } }))
+    expect(contactBeforeResend!.email).toBeNull()
+    expect(contactBeforeResend!.emailVerifiedAt).toBeNull()
+
+    // Resend.
+    const r = await simulateResend({ visitorId: vid })
+    expect(r.result).toBe('resent')
+    expect(r.newProviderRequestId!).not.toBe(oldPr)
+
+    // State after resend.
+    const after = await withTenant(tenant.id, async () => db.widgetOtpRequest.findUnique({
+      where: { id: start.req.id },
+      select: { providerRequestId: true, resendCount: true, attempts: true, status: true, verified: true, email: true, pendingName: true, expiresAt: true },
+    }))
+    expect(after!.providerRequestId).toBe(r.newProviderRequestId!)
+    expect(after!.resendCount).toBe(1)
+    expect(after!.attempts).toBe(0) // reset
+    expect(after!.status).toBe('active') // remain
+    expect(after!.verified).toBe(false) // remain
+    expect(after!.email).toBe(em) // preserved (resend does NOT trust a new frontend email)
+    expect(after!.pendingName).toBe('Pending Name') // preserved
+    expect(after!.expiresAt.getTime()).toBeGreaterThan(Date.now()) // updated (not expired)
+
+    // Contact unchanged after resend (before final verification).
+    const contactAfterResend = await withTenant(tenant.id, async () => db.contact.findUnique({ where: { id: contactId }, select: { email: true, emailVerifiedAt: true, name: true } }))
+    expect(contactAfterResend!.email).toBeNull()
+    expect(contactAfterResend!.emailVerifiedAt).toBeNull()
+    expect(contactAfterResend!.name).toBe('Visitor')
+
+    // Old providerRequestId cannot verify (rotated away -> request_not_found).
+    const vOld = await simulateVerify({ requestId: oldPr, email: em, visitorId: vid, code: MOCK_CODE })
+    expect(vOld.result).toBe('request_not_found')
+
+    // New providerRequestId can verify.
+    const vNew = await simulateVerify({ requestId: r.newProviderRequestId!, email: em, visitorId: vid, code: MOCK_CODE })
+    expect(vNew.result).toBe('verified')
+  })
+
+  test('resend limit: 3 resends OK, 4th -> resend_limit', async () => {
+    const vid = uniq('rs-lim'), em = `${uniq('rs-lim')}@x.test`
+    const start = await simulateStart({ visitorId: vid, email: em, name: 'L' })
+    if (!start.ok) throw new Error('START failed')
+
+    for (let i = 0; i < MAX_RESENDS; i++) {
+      const r = await simulateResend({ visitorId: vid })
+      expect(r.result).toBe('resent')
+    }
+    const after = await withTenant(tenant.id, async () => db.widgetOtpRequest.findUnique({ where: { id: start.req.id }, select: { resendCount: true, status: true, verified: true } }))
+    expect(after!.resendCount).toBe(MAX_RESENDS)
+    expect(after!.status).toBe('active')
+    expect(after!.verified).toBe(false)
+
+    // 4th resend -> resend_limit.
+    const r4 = await simulateResend({ visitorId: vid })
+    expect(r4.result).toBe('resend_limit')
+    // State unchanged by the rejected resend.
+    const after4 = await withTenant(tenant.id, async () => db.widgetOtpRequest.findUnique({ where: { id: start.req.id }, select: { resendCount: true } }))
+    expect(after4!.resendCount).toBe(MAX_RESENDS)
+  })
+
+  test('superseded request rejected -> request_superseded', async () => {
+    const vid = uniq('rs-sup'), em = `${uniq('rs-sup')}@x.test`
+    const start = await simulateStart({ visitorId: vid, email: em, name: 'S' })
+    if (!start.ok) throw new Error('START failed')
+    // Start a new flow -> supersedes the first.
+    const start2 = await simulateStart({ visitorId: vid, email: em, name: 'S2' })
+    if (!start2.ok) throw new Error('START2 failed')
+    // Resend for the same visitor -> the latest is active (start2), not superseded.
+    // To test the superseded path, manually supersede start2's request.
+    await withTenant(tenant.id, async () => {
+      await db.widgetOtpRequest.update({ where: { id: start2.req.id }, data: { status: 'superseded', verified: false, verifiedAt: null, expiresAt: new Date() } })
+    })
+    const r = await simulateResend({ visitorId: vid })
+    expect(r.result).toBe('request_superseded')
+  })
+
+  test('verified request rejected -> already_used', async () => {
+    const vid = uniq('rs-vrf'), em = `${uniq('rs-vrf')}@x.test`
+    const start = await simulateStart({ visitorId: vid, email: em, name: 'V' })
+    if (!start.ok) throw new Error('START failed')
+    const v = await simulateVerify({ requestId: start.req.providerRequestId, email: em, visitorId: vid, code: MOCK_CODE })
+    expect(v.result).toBe('verified')
+    const r = await simulateResend({ visitorId: vid })
+    expect(r.result).toBe('already_used')
+  })
+
+  test('wrong visitorId rejected -> request_not_found', async () => {
+    const vid = uniq('rs-wv'), em = `${uniq('rs-wv')}@x.test`
+    const start = await simulateStart({ visitorId: vid, email: em, name: 'W' })
+    if (!start.ok) throw new Error('START failed')
+    // Resend with a DIFFERENT visitorId that has no active OTP.
+    const r = await simulateResend({ visitorId: 'wrong-visitor-id' })
+    expect(r.result).toBe('request_not_found')
+    // Original request unchanged.
+    const after = await withTenant(tenant.id, async () => db.widgetOtpRequest.findUnique({ where: { id: start.req.id }, select: { providerRequestId: true, resendCount: true, status: true } }))
+    expect(after!.providerRequestId).toBe(start.req.providerRequestId)
+    expect(after!.resendCount).toBe(0)
+    expect(after!.status).toBe('active')
+  })
+
+  test('wrong correlation (wrong email) rejected -> wrong_correlation', async () => {
+    const vid = uniq('rs-wc'), em = `${uniq('rs-wc')}@x.test`
+    const start = await simulateStart({ visitorId: vid, email: em, name: 'C' })
+    if (!start.ok) throw new Error('START failed')
+    const r = await simulateResend({ visitorId: vid, email: 'wrong@x.test' })
+    expect(r.result).toBe('wrong_correlation')
+    // No rotation occurred.
+    const after = await withTenant(tenant.id, async () => db.widgetOtpRequest.findUnique({ where: { id: start.req.id }, select: { providerRequestId: true, resendCount: true } }))
+    expect(after!.providerRequestId).toBe(start.req.providerRequestId)
+    expect(after!.resendCount).toBe(0)
+  })
+
+  test('wrong correlation (stale requestId) rejected -> wrong_correlation', async () => {
+    const vid = uniq('rs-wr'), em = `${uniq('rs-wr')}@x.test`
+    const start = await simulateStart({ visitorId: vid, email: em, name: 'R' })
+    if (!start.ok) throw new Error('START failed')
+    // Do one resend to rotate the providerRequestId.
+    const r1 = await simulateResend({ visitorId: vid })
+    expect(r1.result).toBe('resent')
+    // Now resend with the OLD (stale) requestId -> wrong_correlation.
+    const r2 = await simulateResend({ visitorId: vid, requestId: start.req.providerRequestId })
+    expect(r2.result).toBe('wrong_correlation')
+  })
+
+  test('identity conflict rejected -> identity_conflict', async () => {
+    // Create a Contact with identifierType='external_user' (wrong identity class)
+    // whose identifier collides with the resend visitorId.
+    const vid = uniq('rs-ic')
+    const contact = await createContactWithIdentityClass(vid, 'external_user', `ext_${uniq('rs-ic')}`, 'External')
+    const otp = await createActiveOtp(contact.id, `${uniq('rs-ic')}@x.test`, 'IC')
+    // Resend with visitorId == the external-user contact's identifier -> identity_conflict.
+    const r = await simulateResend({ visitorId: vid })
+    expect(r.result).toBe('identity_conflict')
+    // The OTP request is untouched.
+    const after = await withTenant(tenant.id, async () => db.widgetOtpRequest.findUnique({ where: { id: otp.id }, select: { providerRequestId: true, resendCount: true, status: true } }))
+    expect(after!.providerRequestId).toBe(otp.providerRequestId)
+    expect(after!.resendCount).toBe(0)
+    expect(after!.status).toBe('active')
+  })
+
+  test('expired request rejected -> expired', async () => {
+    const vid = uniq('rs-exp'), em = `${uniq('rs-exp')}@x.test`
+    const start = await simulateStart({ visitorId: vid, email: em, name: 'E' })
+    if (!start.ok) throw new Error('START failed')
+    // Expire the request.
+    await withTenant(tenant.id, async () => {
+      await db.widgetOtpRequest.update({ where: { id: start.req.id }, data: { expiresAt: new Date(Date.now() - 1000) } })
+    })
+    const r = await simulateResend({ visitorId: vid })
+    expect(r.result).toBe('expired')
+  })
+
+  test('provider failure does not corrupt local state -> provider_error, OTP unchanged', async () => {
+    const vid = uniq('rs-pf'), em = `${uniq('rs-pf')}@x.test`
+    const start = await simulateStart({ visitorId: vid, email: em, name: 'P' })
+    if (!start.ok) throw new Error('START failed')
+    const before = await withTenant(tenant.id, async () => db.widgetOtpRequest.findUnique({ where: { id: start.req.id }, select: { providerRequestId: true, resendCount: true, attempts: true, expiresAt: true, status: true, verified: true, email: true, pendingName: true } }))
+
+    // Inject a throwing resendOtp.
+    const throwingResend: ResendOtpFn = async () => { throw new Error('provider failure') }
+    const r = await simulateResend({ visitorId: vid, resendOtpFn: throwingResend })
+    expect(r.result).toBe('provider_error')
+
+    // Local state UNCHANGED (Nixify was called BEFORE the DB UPDATE; the throw
+    // prevented the UPDATE from running).
+    const after = await withTenant(tenant.id, async () => db.widgetOtpRequest.findUnique({ where: { id: start.req.id }, select: { providerRequestId: true, resendCount: true, attempts: true, expiresAt: true, status: true, verified: true, email: true, pendingName: true } }))
+    expect(after!.providerRequestId).toBe(before!.providerRequestId) // NOT rotated
+    expect(after!.resendCount).toBe(before!.resendCount) // NOT incremented
+    expect(after!.attempts).toBe(before!.attempts)
+    expect(after!.expiresAt.getTime()).toBe(before!.expiresAt.getTime())
+    expect(after!.status).toBe(before!.status)
+    expect(after!.verified).toBe(before!.verified)
+    expect(after!.email).toBe(before!.email)
+    expect(after!.pendingName).toBe(before!.pendingName)
+
+    // Contact unchanged.
+    const contactAfter = await withTenant(tenant.id, async () => db.contact.findUnique({ where: { id: start.contactId }, select: { email: true, emailVerifiedAt: true, name: true } }))
+    expect(contactAfter!.email).toBeNull()
+    expect(contactAfter!.emailVerifiedAt).toBeNull()
+  })
+
+  test('concurrent resends leave exactly one authoritative providerRequestId (bounded)', async () => {
+    const vid = uniq('rs-conc'), em = `${uniq('rs-conc')}@x.test`
+    const start = await simulateStart({ visitorId: vid, email: em, name: 'C' })
+    if (!start.ok) throw new Error('START failed')
+
+    // Fire 10 concurrent resends.
+    const results = await Promise.all(Array.from({ length: 10 }, () => simulateResend({ visitorId: vid })))
+    const resent = results.filter((r) => r.result === 'resent')
+    const limited = results.filter((r) => r.result === 'resend_limit')
+    // At most MAX_RESENDS succeed; the rest are bounded out.
+    expect(resent.length).toBeLessThanOrEqual(MAX_RESENDS)
+    expect(resent.length + limited.length).toBe(10)
+
+    // Exactly ONE active row (the partial unique index guarantees this).
+    const active = await withTenant(tenant.id, async () => db.widgetOtpRequest.findMany({ where: { contactId: start.contactId, status: 'active' } }))
+    expect(active).toHaveLength(1)
+
+    // resendCount is bounded by MAX_RESENDS (the atomic bound).
+    const row = await withTenant(tenant.id, async () => db.widgetOtpRequest.findUnique({ where: { id: start.req.id }, select: { resendCount: true, status: true, verified: true, attempts: true, providerRequestId: true } }))
+    expect(row!.resendCount).toBeLessThanOrEqual(MAX_RESENDS)
+    expect(row!.status).toBe('active')
+    expect(row!.verified).toBe(false)
+    expect(row!.attempts).toBe(0) // reset by the last winning resend
+
+    // The old (pre-resend) providerRequestId is gone (unusable).
+    expect(row!.providerRequestId).not.toBe(start.req.providerRequestId)
+
+    // The authoritative providerRequestId can verify.
+    const vNew = await simulateVerify({ requestId: row!.providerRequestId, email: em, visitorId: vid, code: MOCK_CODE })
+    expect(vNew.result).toBe('verified')
   })
 })
