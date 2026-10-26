@@ -2,7 +2,7 @@ import { NextResponse, NextRequest } from 'next/server'
 import { withSessionTenant, hasRole } from '@/lib/auth'
 import { db, getCurrentTenantId } from '@/lib/db'
 import { getIntegrationSecretStatus } from '@/lib/widget-integration-credential'
-import { ACCESS_MODES, coerceAccessMode, type AccessMode } from '@/lib/widget-access-policy'
+import { parseAccessMode, parsePolicyVersion } from '@/lib/widget-access-policy'
 
 /**
  * Dashboard Access & Identity configuration (feat/widget-visitor-access-modes).
@@ -10,22 +10,44 @@ import { ACCESS_MODES, coerceAccessMode, type AccessMode } from '@/lib/widget-ac
  *   GET   /api/widget-config/access
  *   PATCH /api/widget-config/access
  *
- * GET returns the current access policy + integration-secret STATUS (never the
- * raw secret) + login config. PATCH (admin-only) updates the access mode +
- * login config; an accessMode CHANGE increments policyVersion atomically so
- * stricter policy transitions invalidate older weaker credentials IMMEDIATELY.
+ * STRICT contract (no coercion):
+ *   - GET uses parseAccessMode + parsePolicyVersion; a corrupt DB value NEVER
+ *     silently becomes 'anonymous' -> 503 policy_unavailable. No fabricated
+ *     fallback policy.
+ *   - PATCH strictly validates JSON types (no String()/slice() coercion). A
+ *     wrong type is rejected. Unknown fields are rejected (no silent ignore of
+ *     typos). An array as the top-level body is rejected. Client input can
+ *     NEVER set policyVersion / integrationSecretHash / etc.
+ *   - PATCH fail-closes on a corrupt CURRENT policy (parseAccessMode +
+ *     parsePolicyVersion of the existing row) -> 503 policy_unavailable. PATCH
+ *     is NOT an accidental repair path for corrupt policy state.
+ *   - policyVersion transition: an accessMode CHANGE increments policyVersion
+ *     exactly once (atomic). Same-mode + non-mode PATCH do NOT increment.
+ *   - GET NEVER returns the raw integration secret or the hash (only hasSecret
+ *     + rotatedAt).
  *
- * The integration secret itself is managed via the dedicated
- * /api/widget-config/integration-secret route (POST generate/rotate, DELETE
- * revoke) — the raw secret is returned EXACTLY ONCE there, never here.
+ * PATCH remains admin-only. The integration secret itself is managed via the
+ * dedicated /api/widget-config/integration-secret route.
  */
 
-/** Validate a login URL — http(s) or relative only (open-redirect prevention). */
-function isValidLoginUrl(url: string | null | undefined): boolean {
-  if (!url) return true // nullable
-  if (url.length > 500) return false
-  // Relative path (starts with / but not //), OR an absolute http(s) URL.
-  if (/^\/[^/]/.test(url) || url === '/') return true
+const ALLOWED_PATCH_KEYS = ['accessMode', 'loginUrl', 'loginButtonLabel', 'loginReturnUrlParam', 'identityEndpointPath'] as const
+const LOGIN_URL_MAX = 500
+const LOGIN_BUTTON_LABEL_MAX = 200
+const LOGIN_RETURN_URL_PARAM_MAX = 100
+const IDENTITY_ENDPOINT_PATH_MAX = 500
+// ASCII control chars (0x00-0x1f + 0x7f) — covers tab/newline/etc. (Avoids the
+// ES2018 \p{Cc} requirement at the ES2017 tsconfig target.)
+const CONTROL_CHAR_RE = /[\x00-\x1f\x7f]/
+
+/** Validate a login URL — http(s) absolute OR same-origin relative; reject
+ *  protocol-relative //, javascript:, data:, backslash confusion, control
+ *  chars, oversized. null is handled by the caller. */
+function isValidLoginUrl(url: string): boolean {
+  if (url.length > LOGIN_URL_MAX) return false
+  if (CONTROL_CHAR_RE.test(url)) return false
+  if (url.includes('\\')) return false // backslash confusion (browser may normalize to //)
+  if (url === '/') return true
+  if (/^\/[^/]/.test(url)) return true // same-origin relative (not //)
   if (/^https?:\/\//i.test(url)) {
     try {
       const u = new URL(url)
@@ -34,7 +56,28 @@ function isValidLoginUrl(url: string | null | undefined): boolean {
       return false
     }
   }
-  return false // reject protocol-relative //, javascript:, data:, etc.
+  return false // reject //, javascript:, data:, malformed, etc.
+}
+
+/** Validate a login return-URL parameter NAME (not a URL). Conservative
+ *  URL-query-key charset; reject URL-structure chars (& = ? #), whitespace,
+ *  control chars, oversized. */
+function isValidReturnUrlParam(p: string): boolean {
+  if (p.length > LOGIN_RETURN_URL_PARAM_MAX) return false
+  if (CONTROL_CHAR_RE.test(p)) return false
+  return /^[a-zA-Z0-9_.-]+$/.test(p) // letters, digits, _, -, .
+}
+
+/** Validate the identity endpoint path — same-origin relative path only; reject
+ *  absolute URLs, protocol-relative //, backslash confusion, query/hash, control
+ *  chars, oversized. null is handled by the caller. */
+function isValidIdentityEndpointPath(path: string): boolean {
+  if (path.length > IDENTITY_ENDPOINT_PATH_MAX) return false
+  if (CONTROL_CHAR_RE.test(path)) return false
+  if (path.includes('\\')) return false
+  if (path.includes('?') || path.includes('#')) return false // no query/hash
+  if (path === '/') return true
+  return /^\/[^/]/.test(path) // same-origin relative (not //)
 }
 
 export async function GET() {
@@ -52,10 +95,15 @@ export async function GET() {
       },
     })
     if (!config) return { notFound: true as const }
+    // STRICT parse — a corrupt DB value NEVER silently becomes 'anonymous'.
+    const accessMode = parseAccessMode(config.accessMode)
+    if (accessMode === null) return { policyUnavailable: true as const }
+    const policyVersion = parsePolicyVersion(config.policyVersion)
+    if (policyVersion === null) return { policyUnavailable: true as const }
     const secretStatus = await getIntegrationSecretStatus()
     return {
-      accessMode: coerceAccessMode(config.accessMode),
-      policyVersion: config.policyVersion,
+      accessMode,
+      policyVersion,
       integrationSecret: { hasSecret: secretStatus.hasSecret, rotatedAt: secretStatus.rotatedAt },
       loginUrl: config.loginUrl,
       loginButtonLabel: config.loginButtonLabel,
@@ -65,6 +113,7 @@ export async function GET() {
   })
   if (!result) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
   if ('notFound' in result.result) return NextResponse.json({ error: 'not_found' }, { status: 404 })
+  if ('policyUnavailable' in result.result) return NextResponse.json({ error: 'policy_unavailable' }, { status: 503 })
   return NextResponse.json(result.result)
 }
 
@@ -74,16 +123,27 @@ export async function PATCH(req: NextRequest) {
       return { forbidden: true as const }
     }
     const body = await req.json().catch(() => null)
-    if (!body || typeof body !== 'object') return { error: 'invalid_body' as const }
+    // Reject non-object OR array top-level body.
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return { error: 'invalid_body' as const }
 
     const tid = getCurrentTenantId()!
     const existing = await db.widgetConfig.findUnique({
       where: { tenantId: tid },
-      select: { accessMode: true, policyVersion: true },
+      select: { accessMode: true, policyVersion: true, loginUrl: true, loginButtonLabel: true, loginReturnUrlParam: true, identityEndpointPath: true },
     })
     if (!existing) return { notFound: true as const }
 
-    // Build the update data — only accepted fields, strictly validated.
+    // Reject unknown fields (no silent ignore of typos). This also blocks any
+    // client attempt to set policyVersion / integrationSecretHash / etc.
+    for (const k of Object.keys(body)) {
+      if (!(ALLOWED_PATCH_KEYS as readonly string[]).includes(k)) return { error: 'unknown_field' as const }
+    }
+
+    // Fail closed on a corrupt CURRENT policy — PATCH is NOT a repair path.
+    if (parseAccessMode(existing.accessMode) === null || parsePolicyVersion(existing.policyVersion) === null) {
+      return { policyUnavailable: true as const }
+    }
+
     const data: {
       accessMode?: string
       loginUrl?: string | null
@@ -92,52 +152,78 @@ export async function PATCH(req: NextRequest) {
       identityEndpointPath?: string | null
       policyVersion?: { increment: number }
     } = {}
-
     let accessModeChanged = false
 
+    // Strict accessMode — string + parseAccessMode (no String() coercion, no
+    // trim). Rejects " anonymous ", numbers, booleans, objects, arrays.
     if (body.accessMode !== undefined) {
-      const mode = String(body.accessMode)
-      if (!(ACCESS_MODES as readonly string[]).includes(mode)) {
-        return { error: 'invalid_access_mode' as const }
-      }
+      if (typeof body.accessMode !== 'string') return { error: 'invalid_access_mode' as const }
+      const mode = parseAccessMode(body.accessMode)
+      if (mode === null) return { error: 'invalid_access_mode' as const }
       if (mode !== existing.accessMode) {
         data.accessMode = mode
         accessModeChanged = true
       }
     }
 
+    // Strict loginUrl — null OR valid string. No String() coercion.
     if (body.loginUrl !== undefined) {
-      const url = body.loginUrl === null ? null : String(body.loginUrl)
-      if (!isValidLoginUrl(url)) return { error: 'invalid_login_url' as const }
-      data.loginUrl = url
+      if (body.loginUrl === null) {
+        data.loginUrl = null
+      } else if (typeof body.loginUrl === 'string') {
+        if (!isValidLoginUrl(body.loginUrl)) return { error: 'invalid_login_url' as const }
+        data.loginUrl = body.loginUrl
+      } else {
+        return { error: 'invalid_login_url' as const }
+      }
     }
+
+    // Strict loginButtonLabel — null OR non-empty string <= 200. No slice.
     if (body.loginButtonLabel !== undefined) {
-      const label = body.loginButtonLabel === null ? null : String(body.loginButtonLabel).slice(0, 200)
-      data.loginButtonLabel = label
+      if (body.loginButtonLabel === null) {
+        data.loginButtonLabel = null
+      } else if (typeof body.loginButtonLabel === 'string') {
+        const label = body.loginButtonLabel
+        if (label.length > LOGIN_BUTTON_LABEL_MAX) return { error: 'invalid_login_button_label' as const }
+        if (label.trim().length === 0) return { error: 'invalid_login_button_label' as const } // no empty/whitespace-only
+        data.loginButtonLabel = label
+      } else {
+        return { error: 'invalid_login_button_label' as const }
+      }
     }
+
+    // Strict loginReturnUrlParam — null OR safe parameter name <= 100. No slice.
     if (body.loginReturnUrlParam !== undefined) {
-      const p = body.loginReturnUrlParam === null ? null : String(body.loginReturnUrlParam).slice(0, 100)
-      data.loginReturnUrlParam = p
+      if (body.loginReturnUrlParam === null) {
+        data.loginReturnUrlParam = null
+      } else if (typeof body.loginReturnUrlParam === 'string') {
+        if (!isValidReturnUrlParam(body.loginReturnUrlParam)) return { error: 'invalid_login_return_url_param' as const }
+        data.loginReturnUrlParam = body.loginReturnUrlParam
+      } else {
+        return { error: 'invalid_login_return_url_param' as const }
+      }
     }
+
+    // Strict identityEndpointPath — null OR same-origin relative path <= 500. No slice.
     if (body.identityEndpointPath !== undefined) {
-      const path = body.identityEndpointPath === null ? null : String(body.identityEndpointPath).slice(0, 500)
-      // Must be a relative path (same-origin customer endpoint) if provided.
-      if (path !== null && !/^\/[^/]/.test(path) && path !== '/') {
+      if (body.identityEndpointPath === null) {
+        data.identityEndpointPath = null
+      } else if (typeof body.identityEndpointPath === 'string') {
+        if (!isValidIdentityEndpointPath(body.identityEndpointPath)) return { error: 'invalid_identity_endpoint_path' as const }
+        data.identityEndpointPath = body.identityEndpointPath
+      } else {
         return { error: 'invalid_identity_endpoint_path' as const }
       }
-      data.identityEndpointPath = path
     }
 
-    // site_user_only requires an integration secret + identity endpoint to be
-    // useful — but we do NOT hard-block saving (the admin may configure the
-    // secret/endpoint after switching). The server enforcement will reject
-    // sends until the secret/endpoint are configured. (Truthful UX, not a
-    // silent failure.)
+    // site_user_only may be saved BEFORE the integration secret / identity
+    // endpoint are configured (the admin configures these in separate steps).
+    // Runtime enforcement (fail-closed when integration is incomplete) is a
+    // later phase — NOT implemented here.
 
+    // policyVersion transition: an accessMode CHANGE increments exactly once
+    // (atomic). Same-mode + non-mode PATCH do NOT increment.
     if (accessModeChanged) {
-      // Atomic: change accessMode + increment policyVersion in ONE update so
-      // stricter policy transitions invalidate older weaker credentials
-      // IMMEDIATELY (not just on token expiry).
       data.policyVersion = { increment: 1 }
     }
 
@@ -146,15 +232,22 @@ export async function PATCH(req: NextRequest) {
       data,
       select: { accessMode: true, policyVersion: true },
     })
+    // Strict parse the updated (should be valid; be strict anyway).
+    const updatedAccessMode = parseAccessMode(updated.accessMode)
+    const updatedPolicyVersion = parsePolicyVersion(updated.policyVersion)
+    if (updatedAccessMode === null || updatedPolicyVersion === null) {
+      return { policyUnavailable: true as const }
+    }
     return {
-      accessMode: coerceAccessMode(updated.accessMode),
-      policyVersion: updated.policyVersion,
+      accessMode: updatedAccessMode,
+      policyVersion: updatedPolicyVersion,
       accessModeChanged,
     }
   })
   if (!result) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
   if ('forbidden' in result.result) return NextResponse.json({ error: 'forbidden' }, { status: 403 })
   if ('notFound' in result.result) return NextResponse.json({ error: 'not_found' }, { status: 404 })
+  if ('policyUnavailable' in result.result) return NextResponse.json({ error: 'policy_unavailable' }, { status: 503 })
   if ('error' in result.result) return NextResponse.json({ error: result.result.error }, { status: 400 })
   return NextResponse.json(result.result)
 }
