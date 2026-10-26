@@ -1039,6 +1039,14 @@ interface ResendResult {
   expiresAt?: string
 }
 
+/** Internal sentinel for the serialized resend transaction (mirrors the
+ *  production route's ResendError). Carries a stable reason so the transaction
+ *  can throw + the outer catch can map to a ResendResult. */
+class ResendErr extends Error {
+  reason: ResendResult['result']
+  constructor(reason: ResendResult['result']) { super(reason); this.name = 'ResendErr'; this.reason = reason }
+}
+
 /**
  * Faithful replica of the RESEND route's state machine. Mirrors the production
  * resend route (src/app/api/widget/[slug]/verify-identity/resend/route.ts):
@@ -1090,51 +1098,54 @@ async function simulateResend(opts: {
   if (opts.email && opts.email !== otpReq.email) return { result: 'wrong_correlation' }
   if (opts.requestId && opts.requestId !== otpReq.providerRequestId) return { result: 'wrong_correlation' }
 
-  // Call Nixify resendOtp with the PERSISTED pending email. A provider failure
-  // returns 'provider_error' with NO local state corruption (the DB UPDATE
-  // below never runs).
-  let nixifyResult
+  // Serialized resend: row-lock the authoritative active OTP row, re-validate,
+  // THEN call the provider, rotate+increment, commit. Mirrors the production
+  // route's row-lock transaction. The provider call is INSIDE the locked
+  // transaction so provider calls are bounded to MAX_RESENDS across concurrent
+  // contenders (a contender that finds resendCount >= MAX under the lock
+  // throws resend_limit WITHOUT calling the provider). A provider failure rolls
+  // the transaction back (resendCount NOT consumed, providerRequestId NOT
+  // changed, attempts NOT reset). Only this WidgetOtpRequest row is locked.
   try {
-    nixifyResult = await resend(otpReq.email, 'widget_verify')
-  } catch {
-    return { result: 'provider_error' }
-  }
-
-  // Transactional conditional rotation with an ATOMIC resendCount<MAX bound.
-  // Concurrent resends serialize on the row lock; the first MAX succeed (each
-  // rotating the providerRequestId), the rest get count=0 -> re-read -> resend_limit.
-  const rotated = await withTenant(tenant.id, async () => {
-    const r = await db.widgetOtpRequest.updateMany({
-      where: { id: otpReq.id, status: 'active', verified: false, purpose: 'widget_verify', resendCount: { lt: MAX_RESENDS } },
-      data: {
-        providerRequestId: nixifyResult.otpRequestId, // rotate — old immediately unusable locally
-        expiresAt: new Date(nixifyResult.expiresAt),
-        resendCount: { increment: 1 },
-        attempts: 0, // reset
-        status: 'active', // remain
-        verified: false, // remain
-        verifiedAt: null,
-      },
+    const out = await withTenant(tenant.id, async () => {
+      return db.$transaction(async (tx) => {
+        const rows = await tx.$queryRaw`SELECT "id", "status", "verified", "email", "pendingName", "resendCount", "expiresAt", "providerRequestId" FROM "WidgetOtpRequest" WHERE "id" = ${otpReq.id} FOR UPDATE`
+        const row = (rows as Array<{ id: string; status: string; verified: boolean; email: string; pendingName: string | null; resendCount: number; expiresAt: Date; providerRequestId: string }>)[0]
+        if (!row) throw new ResendErr('request_not_found')
+        if (row.status === 'superseded') throw new ResendErr('request_superseded')
+        if (row.verified || row.status === 'verified') throw new ResendErr('already_used')
+        if (row.status !== 'active') throw new ResendErr('request_not_found')
+        if (row.expiresAt < new Date()) throw new ResendErr('expired')
+        if (row.resendCount >= MAX_RESENDS) throw new ResendErr('resend_limit')
+        if (opts.email && opts.email !== row.email) throw new ResendErr('wrong_correlation')
+        if (opts.requestId && opts.requestId !== row.providerRequestId) throw new ResendErr('wrong_correlation')
+        // Only now call the provider (inside the locked region).
+        let nixifyResult
+        try {
+          nixifyResult = await resend(row.email, 'widget_verify')
+        } catch {
+          throw new ResendErr('provider_error')
+        }
+        await tx.widgetOtpRequest.update({
+          where: { id: otpReq.id },
+          data: {
+            providerRequestId: nixifyResult.otpRequestId,
+            expiresAt: new Date(nixifyResult.expiresAt),
+            resendCount: { increment: 1 },
+            attempts: 0,
+            status: 'active',
+            verified: false,
+            verifiedAt: null,
+          },
+        })
+        return { requestId: nixifyResult.otpRequestId, expiresAt: nixifyResult.expiresAt }
+      }, { timeout: 20000, maxWait: 10000 })
     })
-    return r.count
-  })
-
-  if (rotated === 0) {
-    // The conditional claim lost — re-read + classify (no raw error leak).
-    const state = await withTenant(tenant.id, async () => {
-      return db.widgetOtpRequest.findUnique({ where: { id: otpReq.id }, select: { status: true, verified: true, providerRequestId: true, expiresAt: true, resendCount: true } })
-    })
-    if (!state) return { result: 'request_not_found' }
-    if (state.status === 'superseded') return { result: 'request_superseded' }
-    if (state.verified || state.status === 'verified') return { result: 'already_used' }
-    if (state.expiresAt < new Date()) return { result: 'expired' }
-    if (state.resendCount >= MAX_RESENDS) return { result: 'resend_limit' }
-    // Still active but the claim lost — a concurrent resend rotated the
-    // providerRequestId. Return the CURRENT authoritative one.
-    return { result: 'resent', newProviderRequestId: state.providerRequestId, expiresAt: state.expiresAt.toISOString() }
+    return { result: 'resent' as const, newProviderRequestId: out.requestId, expiresAt: out.expiresAt }
+  } catch (e: any) {
+    if (e instanceof ResendErr) return { result: e.reason }
+    throw e
   }
-
-  return { result: 'resent', newProviderRequestId: nixifyResult.otpRequestId, expiresAt: nixifyResult.expiresAt }
 }
 
 // === RESEND BEHAVIORAL TESTS ===

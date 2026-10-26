@@ -155,10 +155,11 @@ describe('Actual resend route — happy path', () => {
     expect(contact!.emailVerifiedAt).toBeNull()
     expect(contact!.name).toBe('Visitor')
 
-    // Old providerRequestId cannot verify (rotated away -> request_not_found).
+    // Old providerRequestId cannot verify (rotated away -> the VERIFY route's
+    // lookup.kind='not_found' -> 404 'not_found').
     const vOld = await verify({ visitorId: vid, email: em, code: MOCK_CODE, requestId: oldPr })
     expect(vOld.status).toBe(404)
-    expect(vOld.data.error).toBe('request_not_found')
+    expect(vOld.data.error).toBe('not_found')
 
     // New providerRequestId can verify.
     const vNew = await verify({ visitorId: vid, email: em, code: MOCK_CODE, requestId: newPr })
