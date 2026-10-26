@@ -1367,3 +1367,70 @@ describe('OTP resend', () => {
     expect(vNew.result).toBe('verified')
   })
 })
+
+// === BLOCKER 1: provider-call bounding under concurrency ===
+// The pre-fix simulateResend calls resendOtp BEFORE the conditional UPDATE.
+// With 10 concurrent resends + resendCount=0, ALL 10 pass the non-atomic
+// pre-check + call the provider, but only MAX_RESENDS UPDATEs succeed. The
+// provider sends more OTPs than the configured resend limit. This test asserts
+// the CORRECT contract (provider calls <= MAX_RESENDS) — it FAILS on the
+// pre-fix code (providerCallCount === 10) and PASSES once the row-lock
+// serialization fix is applied to the helper. The test expectation is NOT
+// weakened to accommodate the pre-fix implementation.
+
+describe('OTP resend — provider-call bounding under concurrency (BLOCKER 1)', () => {
+  test('10 concurrent resends: provider resendOtp calls bounded to MAX_RESENDS (exactly 3), not 10', async () => {
+    const vid = uniq('rs-b1'), em = `${uniq('rs-b1')}@x.test`
+    const start = await simulateStart({ visitorId: vid, email: em, name: 'B1' })
+    if (!start.ok) throw new Error('START failed')
+
+    let providerCallCount = 0
+    const countingResend: ResendOtpFn = async (...a) => {
+      providerCallCount++
+      return resendOtp(...a)
+    }
+
+    const results = await Promise.all(
+      Array.from({ length: 10 }, () => simulateResend({ visitorId: vid, resendOtpFn: countingResend })),
+    )
+
+    // Provider resendOtp calls MUST be bounded to MAX_RESENDS. The row-lock
+    // reservation ensures only contenders that win a resend slot call the
+    // provider. (Pre-fix code: providerCallCount === 10 — FAILS here.)
+    expect(providerCallCount).toBeLessThanOrEqual(MAX_RESENDS)
+    expect(providerCallCount).toBe(MAX_RESENDS) // exactly 3 when all provider calls succeed
+
+    // Final resendCount = MAX_RESENDS (the bounded resends all succeeded locally).
+    const row = await withTenant(tenant.id, async () =>
+      db.widgetOtpRequest.findUnique({ where: { id: start.req.id }, select: { resendCount: true, status: true, verified: true, providerRequestId: true, attempts: true } }),
+    )
+    expect(row!.resendCount).toBe(MAX_RESENDS)
+    expect(row!.status).toBe('active')
+    expect(row!.verified).toBe(false)
+    expect(row!.attempts).toBe(0) // reset by the winning resends
+
+    // Exactly one authoritative providerRequestId (partial unique guarantees one active).
+    const active = await withTenant(tenant.id, async () =>
+      db.widgetOtpRequest.findMany({ where: { contactId: start.contactId, status: 'active' } }),
+    )
+    expect(active).toHaveLength(1)
+    expect(row!.providerRequestId).not.toBe(start.req.providerRequestId) // rotated
+
+    // Remaining calls returned resend_limit (a stable safe result — no raw errors).
+    const resent = results.filter((r) => r.result === 'resent')
+    const limited = results.filter((r) => r.result === 'resend_limit')
+    expect(resent.length).toBe(MAX_RESENDS)
+    expect(limited.length).toBe(10 - MAX_RESENDS)
+    // No raw Prisma errors — every result is a safe application result.
+    for (const r of results) {
+      expect(['resent', 'resend_limit', 'request_superseded', 'already_used', 'expired', 'request_not_found', 'wrong_correlation', 'identity_conflict', 'provider_error']).toContain(r.result)
+    }
+
+    // Contact unchanged.
+    const contact = await withTenant(tenant.id, async () =>
+      db.contact.findUnique({ where: { id: start.contactId }, select: { email: true, emailVerifiedAt: true, name: true } }),
+    )
+    expect(contact!.email).toBeNull()
+    expect(contact!.emailVerifiedAt).toBeNull()
+  })
+})
