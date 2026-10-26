@@ -94,26 +94,48 @@ export async function POST(
     // #1: store pending email + pendingName on WidgetOtpRequest (NOT on Contact).
     // #8: supersede previous unverified active requests for this Contact in the
     // same transaction that creates the new request (one active flow per Contact).
-    await withTenant(tenant.id, async () => {
-      await db.$transaction(async (tx) => {
-        // Expire old unverified active requests for this Contact.
-        await tx.widgetOtpRequest.updateMany({
-          where: { contactId, status: 'active' },
-          data: { status: 'superseded', verified: false, verifiedAt: null, expiresAt: new Date() },
+    // #3: bounded P2002 retry on the partial unique index (concurrent START contention).
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        // #4: re-check if this providerRequestId already exists (dedup)
+        const existing = await withTenant(tenant.id, async () => {
+          return db.widgetOtpRequest.findUnique({
+            where: { providerRequestId: result.otpRequestId },
+            select: { id: true, status: true },
+          })
         })
-        // Create the new authoritative request.
-        await tx.widgetOtpRequest.create({
-          data: {
-            tenantId: tenant.id, contactId, email,
-            pendingName: name ?? null,
-            purpose: 'widget_verify',
-            providerRequestId: result.otpRequestId,
-            expiresAt: new Date(result.expiresAt),
-            ipAddress: ip,
-          },
+        if (existing) {
+          if (existing.status === 'active') break
+          return widgetHeaders(NextResponse.json({ error: 'verification_conflict' }, { status: 409 }))
+        }
+        await withTenant(tenant.id, async () => {
+          await db.$transaction(async (tx) => {
+            await tx.widgetOtpRequest.updateMany({
+              where: { contactId, status: 'active' },
+              data: { status: 'superseded', verified: false, verifiedAt: null, expiresAt: new Date() },
+            })
+            await tx.widgetOtpRequest.create({
+              data: {
+                tenantId: tenant.id, contactId, email,
+                pendingName: name ?? null,
+                purpose: 'widget_verify',
+                providerRequestId: result.otpRequestId,
+                expiresAt: new Date(result.expiresAt),
+                status: 'active', verified: false, verifiedAt: null,
+                ipAddress: ip,
+              },
+            })
+          })
         })
-      })
-    })
+        break
+      } catch (e: any) {
+        if (e?.code === 'P2002' && attempt < 2) continue
+        if (e?.code === 'P2002') {
+          return widgetHeaders(NextResponse.json({ error: 'verification_conflict' }, { status: 409 }))
+        }
+        throw e
+      }
+    }
     return widgetHeaders(NextResponse.json({ requestId: result.otpRequestId, expiresAt: result.expiresAt }))
   } catch (e) {
     if (e instanceof NixifyError) return widgetHeaders(NextResponse.json({ error: e.code }, { status: e.statusCode }))
