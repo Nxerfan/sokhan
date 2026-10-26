@@ -124,22 +124,47 @@ async function simulateStart(opts: {
 
   // Contact resolution by (tenant, visitorId) — NO profile mutation (update:{}).
   // + identity-class check (identifierType='visitorId', externalUserId=null).
+  // Concurrency-safe: Prisma upsert on the COMPOUND unique (tenantId,
+  // identifier) does NOT emit INSERT ... ON CONFLICT, so 10 concurrent STARTs
+  // for the SAME visitorId race on the create branch -> P2002. Bounded retry:
+  // on P2002, another concurrent START won the create -- re-read the contact
+  // + re-check the identity class. Never leak raw P2002 (would surface as an
+  // expected-contention 500, violating the START contract). NOTE: the
+  // production START route has the SAME Contact-upsert race as a LATENT
+  // defect (OTP routes are FROZEN); this helper implements the required
+  // contract. When OTP is unfrozen, the route should adopt this retry.
   const contactResult = await withTenant(tenant.id, async () => {
-    const c = await db.contact.upsert({
-      where: { tenantId_identifier: { tenantId: tenant.id, identifier: opts.visitorId } },
-      create: {
-        tenantId: tenant.id,
-        identifier: opts.visitorId,
-        identifierType: 'visitorId',
-        name: 'Visitor',
-        email: null,
-        locale: tenant.defaultLocale,
-        metadata: {},
-      },
-      update: {}, // NO Contact profile mutation at START
-      select: { id: true, identifierType: true, externalUserId: true },
-    })
-    if (c.identifierType !== 'visitorId' || c.externalUserId !== null) {
+    let c: { id: string; identifierType: string; externalUserId: string | null } | undefined
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        c = await db.contact.upsert({
+          where: { tenantId_identifier: { tenantId: tenant.id, identifier: opts.visitorId } },
+          create: {
+            tenantId: tenant.id,
+            identifier: opts.visitorId,
+            identifierType: 'visitorId',
+            name: 'Visitor',
+            email: null,
+            locale: tenant.defaultLocale,
+            metadata: {},
+          },
+          update: {}, // NO Contact profile mutation at START
+          select: { id: true, identifierType: true, externalUserId: true },
+        })
+        break
+      } catch (e: any) {
+        if (e?.code === 'P2002' && attempt < 2) {
+          const existing = await db.contact.findUnique({
+            where: { tenantId_identifier: { tenantId: tenant.id, identifier: opts.visitorId } },
+            select: { id: true, identifierType: true, externalUserId: true },
+          })
+          if (existing) { c = existing; break }
+          continue // row vanished between the P2002 and the re-read -- retry
+        }
+        throw e
+      }
+    }
+    if (!c || c.identifierType !== 'visitorId' || c.externalUserId !== null) {
       return { ok: false as const, reason: 'identity_conflict' as const }
     }
     return { ok: true as const, contactId: c.id }
