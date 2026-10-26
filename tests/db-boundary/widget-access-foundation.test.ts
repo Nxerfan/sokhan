@@ -36,10 +36,10 @@ beforeAll(async () => {
   })
   // Create WidgetConfig rows for both tenants (simulating post-migration state)
   await globalDb.widgetConfig.create({
-    data: { tenantId: tenantA.id, accessMode: 'verified_visitor', policyVersion: 1 },
+    data: { tenantId: tenantA.id, accessMode: 'verified_visitor', policyVersion: 1, greetingTexts: { fa: '', en: '' } },
   })
   await globalDb.widgetConfig.create({
-    data: { tenantId: tenantB.id, accessMode: 'anonymous', policyVersion: 1 },
+    data: { tenantId: tenantB.id, accessMode: 'anonymous', policyVersion: 1, greetingTexts: { fa: '', en: '' } },
   })
 })
 
