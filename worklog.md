@@ -1900,3 +1900,42 @@ Stage Summary — VERIFIED GREEN:
 - OTP work is now PERMANENTLY COMPLETE. START/VERIFY/RESEND are NOT to be touched absent a regression. The OTP foundation was NOT reopened.
 - PR #14 remains DRAFT (draft=True), NOT MERGED (merged=False), NO AUTO-MERGE (autoMergeRequest=None). Head = f67e6d8 (46 commits ahead of main).
 - Next phase (per the user's instructions): (1) strict access-config GET/PATCH, (2) public widget access config, (3) three-mode bootstrap, (4) REST send authorization, (5) realtime authorization, (6) NPM widget identity integration, (7) script widget parity, (8) dashboard Access & Identity UI, (9) docs, (10) final Full/Lite qualification.
+
+---
+Task ID: ACCESS-CONFIG-1
+Agent: Z.ai Code (strict access-config GET/PATCH)
+Task: Implement the STRICT access-config route (src/app/api/widget-config/access/route.ts) — remove coerceAccessMode, remove String()/slice() coercion, strict JSON-type validation, reject unknown fields + array top-level, fail-closed on corrupt current policy, strict loginUrl/loginButtonLabel/loginReturnUrlParam/identityEndpointPath validation, policyVersion transition contract, safe GET response. Add focused behavioral route tests. OTP foundation CLOSED (not reopened).
+
+Work Log:
+- Production fix (src/app/api/widget-config/access/route.ts, commit 71b98d4):
+  * GET: replaced coerceAccessMode with parseAccessMode + parsePolicyVersion. A corrupt DB accessMode or policyVersion NEVER silently becomes 'anonymous' -> 503 policy_unavailable. No fabricated fallback policy.
+  * PATCH: removed ALL String()/slice() coercion. Strict JSON type validation: a wrong type (number/boolean/object/array) for any field rejects with invalid_<field>. Reject an array as the top-level body (invalid_body). Reject unknown fields (unknown_field) — no silent ignore of typos; this also blocks any client attempt to set policyVersion / integrationSecretHash / integrationSecretRotatedAt / etc. (only accessMode, loginUrl, loginButtonLabel, loginReturnUrlParam, identityEndpointPath are accepted).
+  * PATCH fail-closes on a corrupt CURRENT policy (parseAccessMode + parsePolicyVersion of the existing row) -> 503 policy_unavailable. PATCH is NOT an accidental repair path for corrupt policy state.
+  * Strict accessMode: typeof string + parseAccessMode (no trim). Rejects ' anonymous ', numbers, booleans, objects, arrays (invalid_access_mode).
+  * Strict loginUrl: null OR string; isValidLoginUrl rejects //, javascript:, data:, malformed, backslash confusion (browser-normalizable to //), ASCII control chars, oversized (>500). No truncation.
+  * Strict loginButtonLabel: null OR non-empty string <=200; rejects empty/whitespace-only non-null (invalid_login_button_label). Unicode allowed. No slice.
+  * Strict loginReturnUrlParam: null OR conservative URL-query-key charset ([a-zA-Z0-9_.-]) <=100; rejects & = ? # whitespace/control (invalid_login_return_url_param). This is a parameter NAME, not a return URL. No slice.
+  * Strict identityEndpointPath: null OR same-origin relative path <=500; rejects absolute URLs, //, backslash, query/hash, control chars, oversized (invalid_identity_endpoint_path). Customer-site same-origin only. No slice.
+  * policyVersion transition: an accessMode CHANGE increments policyVersion exactly once (atomic, in the same update). Same-mode + non-mode PATCH do NOT increment. No client-supplied policyVersion.
+  * site_user_only may be saved BEFORE the integration secret / identity endpoint are configured (runtime enforcement is a later phase — NOT implemented here).
+  * GET NEVER returns the raw integration secret or the hash (only hasSecret + rotatedAt). PATCH remains admin-only (hasRole admin).
+- Behavioral route tests (NEW tests/db-boundary/widget-access-config.test.ts, commit 71b98d4): mock.module replaces @/lib.auth (a withSessionTenant stub mirroring the production Membership role-refresh + withTenant). Exercises the REAL GET/PATCH route handler against real PostgreSQL. 35 tests covering: GET valid/corrupt-accessMode/invalid-policyVersion/unauthenticated; PATCH accessMode transitions (policyVersion +1 exactly once), same-mode (unchanged), non-mode (unchanged), invalid string (rejected+DB unchanged), wrong-type (rejected+DB unchanged); no coercion (each field wrong types reject, array top-level rejects, unknown field rejects, client policyVersion/integrationSecretHash reject); URL/path safety (loginUrl accept/reject, identityEndpointPath accept/reject, loginReturnUrlParam accept/reject, loginButtonLabel accept/reject); failure atomicity (invalid field leaves ALL config unchanged); tenant isolation (A does not modify B); authorization (unauth 401, viewer 403, admin succeeds); fail-closed on corrupt current policy (PATCH does NOT repair).
+- CI run 40412809536 (71b98d4) = FAILURE: 2 tests failed — the 'corrupt DB accessMode -> 503' (GET) + 'corrupt current accessMode -> 503' (PATCH). Root cause: the WidgetConfig_accessMode_check DB CHECK constraint prevents a corrupt accessMode from existing, so setConfig({accessMode:'corrupt_mode'}) threw -> the row stayed 'anonymous' -> GET returned 200 (not 503). (The corrupt-policyVersion tests passed — there's no DB CHECK on the policyVersion VALUE, only NOT NULL, so policyVersion=0/-1 setConfig succeeds + the route's parsePolicyVersion returns null -> 503.)
+- Test fix (commit 01b0fce): a withCorruptAccessMode helper that DROPS the WidgetConfig_accessMode_check (globalDb.$executeRawUnsafe ALTER TABLE DROP CONSTRAINT IF EXISTS), sets the corrupt accessMode, runs the assertions, then RESTORES the CHECK in finally (+ resetA). This proves the route's parseAccessMode fail-closes (defense-in-depth) even when the DB CHECK is absent — the GET/PATCH never silently coerce a corrupt value to 'anonymous'.
+- CI run 40414364215 (01b0fce) = ALL 4 JOBS GREEN.
+
+Stage Summary — VERIFIED GREEN:
+- exact SHA: 01b0fcecfdfd9d52009a9a6f43c6b2abbd4dc831
+- exact workflow run ID: 40414364215
+- ci: SUCCESS (605 unit pass / 0 fail / 2059 expect())
+- widget-package-qualification: SUCCESS
+- self-host-qualification: SUCCESS
+- docker-regression: SUCCESS
+  * Full DB-boundary: 174 pass / 0 fail (Ran 174 tests across 11 files) — widget-access-config.test.ts EXECUTED in Full (35 access-config tests)
+  * Lite DB-boundary: 174 pass / 0 fail (Ran 174 tests across 11 files) — widget-access-config.test.ts EXECUTED in Lite (35 access-config tests)
+  * Full browser regression: 116 passed
+  * Lite browser regression: 116 passed
+- The strict access-config route + 35 behavioral tests pass in BOTH Full and Lite against real PostgreSQL. No coercion (coerceAccessMode/String()/slice() removed). Fail-closed on corrupt policy. Unknown-field rejection. policyVersion transition atomicity (accessMode change +1, same/non-mode unchanged). URL/path safety. Failure atomicity. Tenant isolation. Authorization (admin-only PATCH). Safe GET (no raw/hash secret).
+- OTP foundation CLOSED — START/VERIFY/RESEND + OTP migration/state-machine NOT touched.
+- PR #14 remains DRAFT (draft=True), NOT MERGED (merged=False), NO AUTO-MERGE (autoMergeRequest=None). Head = 01b0fce (50 commits ahead of main).
+- Next phase (per the user's instructions): public /api/widget/[slug]/config access-policy wiring (separate commit; do NOT mix into this access-config commit).
