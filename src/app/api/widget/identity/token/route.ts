@@ -83,21 +83,45 @@ export async function POST(req: NextRequest) {
     if (name) updateProfile.name = name
     if (email) updateProfile.email = email
     if (avatarUrl) updateProfile.avatarUrl = avatarUrl
-    const result = await db.contact.upsert({
-      where: { tenantId_externalUserId: { tenantId: tenant.tenantId, externalUserId } },
-      create: {
-        tenantId: tenant.tenantId,
-        identifier: 'ext_' + crypto.randomUUID(),
-        identifierType: 'externalUser',
-        externalUserId,
-        ...createProfile,
-        locale: 'fa',
-        metadata: {},
-      },
-      update: updateProfile,
-      select: { id: true },
-    })
-    return { contactId: result.id }
+    // #1: Prisma upsert on a COMPOUND unique (tenantId, externalUserId) does
+    // NOT emit INSERT ... ON CONFLICT (only single-field uniques get the
+    // atomic path). Under concurrent creates for a NEW externalUserId, the
+    // create branch races and throws P2002. Bounded retry: on P2002, another
+    // concurrent mint won the create -- re-read the contact by (tenantId,
+    // externalUserId) and proceed. Never leak raw P2002 (would surface as 500).
+    let resolvedId: string | undefined
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const result = await db.contact.upsert({
+          where: { tenantId_externalUserId: { tenantId: tenant.tenantId, externalUserId } },
+          create: {
+            tenantId: tenant.tenantId,
+            identifier: 'ext_' + crypto.randomUUID(),
+            identifierType: 'externalUser',
+            externalUserId,
+            ...createProfile,
+            locale: 'fa',
+            metadata: {},
+          },
+          update: updateProfile,
+          select: { id: true },
+        })
+        resolvedId = result.id
+        break
+      } catch (e: any) {
+        if (e?.code === 'P2002' && attempt < 2) {
+          const existing = await db.contact.findUnique({
+            where: { tenantId_externalUserId: { tenantId: tenant.tenantId, externalUserId } },
+            select: { id: true },
+          })
+          if (existing) { resolvedId = existing.id; break }
+          continue // row vanished between the P2002 and the re-read -- retry
+        }
+        throw e
+      }
+    }
+    if (!resolvedId) throw new Error('identity resolution failed')
+    return { contactId: resolvedId }
   })
 
   const token = signExternalIdentityToken({ tenantId: tenant.tenantId, externalUserId, contactId, policyVersion })
