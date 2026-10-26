@@ -66,25 +66,57 @@ export async function POST(
 
   // #1 + #2: resolve/create the Contact by (tenant, visitorId) — NO Contact
   // profile mutation. Check identifierType + externalUserId on existing.
+  // Concurrency-safe: Prisma upsert on the COMPOUND unique (tenantId,
+  // identifier) does NOT emit INSERT ... ON CONFLICT, so concurrent first-time
+  // STARTs for the same visitorId race on the create branch -> P2002. Bounded
+  // retry: on P2002, another concurrent START won the create -- re-read the
+  // Contact by (tenantId, visitorId) + revalidate the identity class. Never
+  // leak raw P2002 to the client (would surface as an expected-contention 500).
+  // If bounded resolution genuinely cannot succeed, return a stable safe
+  // conflict (verification_conflict, 409). Nixify is NOT called until Contact
+  // resolution succeeds.
   const contactResult = await withTenant(tenant.id, async () => {
-    // #3: concurrency-safe Contact resolution via upsert (no P2002 on race)
-    const c = await db.contact.upsert({
-      where: { tenantId_identifier: { tenantId: tenant.id, identifier: visitorId } },
-      create: {
-        tenantId: tenant.id, identifier: visitorId, identifierType: 'visitorId',
-        name: 'Visitor', email: null, locale: tenant.defaultLocale, metadata: {},
-      },
-      update: {}, // NO profile mutation at START
-      select: { id: true, identifierType: true, externalUserId: true },
-    })
-    // #2: enforce the anonymous identity class
-    if (c.identifierType !== 'visitorId' || c.externalUserId !== null) {
-      return { ok: false as const, reason: 'identity_conflict' }
+    let c: { id: string; identifierType: string; externalUserId: string | null } | undefined
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        c = await db.contact.upsert({
+          where: { tenantId_identifier: { tenantId: tenant.id, identifier: visitorId } },
+          create: {
+            tenantId: tenant.id, identifier: visitorId, identifierType: 'visitorId',
+            name: 'Visitor', email: null, locale: tenant.defaultLocale, metadata: {},
+          },
+          update: {}, // NO Contact profile mutation at START
+          select: { id: true, identifierType: true, externalUserId: true },
+        })
+        break
+      } catch (e: any) {
+        if (e?.code === 'P2002' && attempt < 2) {
+          // Another concurrent first-time START won the create -- re-read.
+          const existing = await db.contact.findUnique({
+            where: { tenantId_identifier: { tenantId: tenant.id, identifier: visitorId } },
+            select: { id: true, identifierType: true, externalUserId: true },
+          })
+          if (existing) { c = existing; break }
+          continue // row vanished between the P2002 and the re-read -- retry
+        }
+        if (e?.code === 'P2002') {
+          // Exhausted bounded retries -- stable safe conflict (no raw P2002).
+          return { ok: false as const, reason: 'verification_conflict' as const }
+        }
+        throw e
+      }
+    }
+    // #2: enforce the anonymous identity class (identifierType='visitorId',
+    // externalUserId=null). A visitorId colliding with an external-user
+    // Contact's opaque identifier -> identity_conflict (403).
+    if (!c || c.identifierType !== 'visitorId' || c.externalUserId !== null) {
+      return { ok: false as const, reason: 'identity_conflict' as const }
     }
     return { ok: true as const, contactId: c.id }
   })
   if (!contactResult.ok) {
-    return widgetHeaders(NextResponse.json({ error: contactResult.reason }, { status: 403 }))
+    const status = contactResult.reason === 'verification_conflict' ? 409 : 403
+    return widgetHeaders(NextResponse.json({ error: contactResult.reason }, { status }))
   }
   const contactId = contactResult.contactId
 
@@ -97,15 +129,26 @@ export async function POST(
     // #3: bounded P2002 retry on the partial unique index (concurrent START contention).
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        // #4: re-check if this providerRequestId already exists (dedup)
+        // #4: re-check if this providerRequestId already exists (dedup).
+        // BINDING: an existing providerRequestId counts as idempotent success
+        // ONLY if it is bound to the SAME contactId + normalized email +
+        // purpose='widget_verify' AND status='active'. Any binding mismatch
+        // (different contact/email) OR a non-active status -> verification_conflict
+        // (no rebind, no new row). Prevents a replayed/captured provider response
+        // from being silently re-bound to a different Contact.
         const existing = await withTenant(tenant.id, async () => {
           return db.widgetOtpRequest.findUnique({
             where: { providerRequestId: result.otpRequestId },
-            select: { id: true, status: true },
+            select: { id: true, status: true, contactId: true, email: true, purpose: true },
           })
         })
         if (existing) {
-          if (existing.status === 'active') break
+          const bindingMatch =
+            existing.contactId === contactId &&
+            existing.email === email &&
+            existing.purpose === 'widget_verify'
+          if (bindingMatch && existing.status === 'active') break // idempotent success
+          // binding mismatch OR non-active (superseded/verified) -> conflict
           return widgetHeaders(NextResponse.json({ error: 'verification_conflict' }, { status: 409 }))
         }
         await withTenant(tenant.id, async () => {

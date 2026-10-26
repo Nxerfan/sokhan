@@ -124,15 +124,14 @@ async function simulateStart(opts: {
 
   // Contact resolution by (tenant, visitorId) — NO profile mutation (update:{}).
   // + identity-class check (identifierType='visitorId', externalUserId=null).
-  // Concurrency-safe: Prisma upsert on the COMPOUND unique (tenantId,
-  // identifier) does NOT emit INSERT ... ON CONFLICT, so 10 concurrent STARTs
-  // for the SAME visitorId race on the create branch -> P2002. Bounded retry:
-  // on P2002, another concurrent START won the create -- re-read the contact
-  // + re-check the identity class. Never leak raw P2002 (would surface as an
-  // expected-contention 500, violating the START contract). NOTE: the
-  // production START route has the SAME Contact-upsert race as a LATENT
-  // defect (OTP routes are FROZEN); this helper implements the required
-  // contract. When OTP is unfrozen, the route should adopt this retry.
+  // Mirrors the production START route: Prisma upsert on the COMPOUND unique
+  // (tenantId, identifier) does NOT emit INSERT ... ON CONFLICT, so concurrent
+  // first-time STARTs for the SAME visitorId race on the create branch -> P2002.
+  // Bounded retry: on P2002, another concurrent START won the create -- re-read
+  // the contact by (tenantId, visitorId) + re-check the identity class. Never
+  // leak raw P2002. Exhausted retries -> verification_conflict (stable safe
+  // conflict). This helper is aligned with the production route (no divergent
+  // semantics).
   const contactResult = await withTenant(tenant.id, async () => {
     let c: { id: string; identifierType: string; externalUserId: string | null } | undefined
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -179,16 +178,23 @@ async function simulateStart(opts: {
   // Bounded P2002 retry (3 attempts): dedup re-check + transactional supersede+create.
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      // Dedup: if this providerRequestId already exists, the START already
-      // happened. Idempotent if active; conflict if non-active.
+      // Dedup: if this providerRequestId already exists, verify the BINDING.
+      // Mirrors production: idempotent success ONLY if the existing row is
+      // bound to the SAME contactId + email + purpose='widget_verify' AND
+      // status='active'. Any binding mismatch (different contact/email) OR a
+      // non-active status -> verification_conflict (no rebind, no new row).
       const existing = await withTenant(tenant.id, async () => {
         return db.widgetOtpRequest.findUnique({
           where: { providerRequestId: result.otpRequestId },
-          select: { id: true, status: true },
+          select: { id: true, status: true, contactId: true, email: true, purpose: true },
         })
       })
       if (existing) {
-        if (existing.status === 'active') break // idempotent — already installed
+        const bindingMatch =
+          existing.contactId === contactId &&
+          existing.email === opts.email &&
+          existing.purpose === 'widget_verify'
+        if (bindingMatch && existing.status === 'active') break // idempotent success
         return { ok: false, error: 'verification_conflict' as const }
       }
       // One transaction: supersede prior active flows + install the new active.
@@ -859,12 +865,14 @@ describe('OTP identity-class conflict', () => {
 // === PROVIDERREQUESTID ADVERSARIAL BINDING (#1) ===
 // Prove that a providerRequestId already bound to (contactId, email, purpose)
 // CANNOT be rebound to a different contact/email by replaying it through
-// START. The @unique on providerRequestId + the START dedup re-check + the
-// VERIFY email-scoped lookup together enforce the binding. No production fix
-// is required — these tests prove the existing contract holds.
+// START. The production START dedup now verifies the FULL binding (contactId +
+// normalized email + purpose='widget_verify' + status='active') before treating
+// an existing providerRequestId as idempotent. Any binding mismatch OR a
+// non-active status -> verification_conflict (no rebind, no new row). This
+// corrects the previous (insufficient) dedup which only checked status='active'.
 
 describe('ProviderRequestId adversarial binding', () => {
-  test('active providerRequestId cannot be rebound to a different contact/email (idempotent, not rebound)', async () => {
+  test('active providerRequestId replayed for a DIFFERENT contact/email -> verification_conflict (no rebind)', async () => {
     const vid1 = uniq('adv1'), em1 = `${uniq('adv1e')}@x.test`
     const vid2 = uniq('adv2'), em2 = `${uniq('adv2e')}@x.test`
 
@@ -875,21 +883,17 @@ describe('ProviderRequestId adversarial binding', () => {
     const c1 = start1.contactId
 
     // 2. Adversary: a DIFFERENT visitor (C2, E2) calls START, but sendOtp
-    //    returns the SAME providerRequestId P (simulating a replayed/captured
-    //    provider response). The dedup re-check must find the existing row
-    //    bound to (C1, E1) and NOT create a rebound row for (C2, E2).
-    const replaySend: SendOtpFn = async () => ({
-      otpRequestId: P,
-      expiresAt: new Date(Date.now() + 600000).toISOString(),
-    })
+    //    returns the SAME providerRequestId P (replayed/captured provider
+    //    response). The dedup must find the existing row bound to (C1, E1),
+    //    detect the binding mismatch (contactId C2 != C1, email E2 != E1),
+    //    and return verification_conflict — NO rebound row, NO new row.
+    const replaySend: SendOtpFn = async () => ({ otpRequestId: P, expiresAt: new Date(Date.now() + 600000).toISOString() })
     const start2 = await simulateStart({ visitorId: vid2, email: em2, name: 'B', sendOtpFn: replaySend })
+    expect(start2.ok).toBe(false)
+    if (start2.ok) throw new Error('expected verification_conflict')
+    expect(start2.error).toBe('verification_conflict')
 
-    // The dedup re-check finds existing active P -> break (idempotent). start2
-    // returns ok, but the req is the EXISTING (C1, E1) row — NOT a new (C2, E2)
-    // row. No rebind occurred.
-    expect(start2.ok).toBe(true)
-
-    // P is still bound to exactly ONE row, and that row is bound to (C1, E1).
+    // P remains bound to exactly ONE row — the original (C1, E1), active.
     const rowsForP = await withTenant(tenant.id, async () => db.widgetOtpRequest.findMany({
       where: { providerRequestId: P },
       select: { contactId: true, email: true, status: true },
@@ -899,7 +903,8 @@ describe('ProviderRequestId adversarial binding', () => {
     expect(rowsForP[0].email).toBe(em1)
     expect(rowsForP[0].status).toBe('active')
 
-    // 3. C2 cannot verify using P (email mismatch -> request_not_found).
+    // C2 received NO usable OTP flow. C2 cannot verify using P (email mismatch
+    // -> request_not_found). C2's Contact remains unverified.
     const c2Contact = await withTenant(tenant.id, async () => db.contact.findUnique({
       where: { tenantId_identifier: { tenantId: tenant.id, identifier: vid2 } },
       select: { id: true },
@@ -907,11 +912,72 @@ describe('ProviderRequestId adversarial binding', () => {
     expect(c2Contact).not.toBeNull()
     const v = await simulateVerify({ requestId: P, email: em2, visitorId: vid2, code: MOCK_CODE })
     expect(v.result).toBe('request_not_found')
-
-    // C2's contact exists but has NO OTP and is NOT verified.
     const c2After = await withTenant(tenant.id, async () => db.contact.findUnique({ where: { id: c2Contact!.id }, select: { email: true, emailVerifiedAt: true } }))
     expect(c2After!.email).toBeNull()
     expect(c2After!.emailVerifiedAt).toBeNull()
+
+    // The original C1 flow remains unchanged (still active, bound to E1).
+    const c1Row = await withTenant(tenant.id, async () => db.widgetOtpRequest.findUnique({ where: { id: start1.req.id }, select: { status: true, email: true, contactId: true } }))
+    expect(c1Row!.status).toBe('active')
+    expect(c1Row!.email).toBe(em1)
+    expect(c1Row!.contactId).toBe(c1)
+  })
+
+  test('same providerRequestId replayed for the SAME contact but DIFFERENT email -> verification_conflict', async () => {
+    const vid = uniq('adv-se'), em1 = `${uniq('se1')}@x.test`, em2 = `${uniq('se2')}@x.test`
+
+    // Install P bound to (C, E1).
+    const start1 = await simulateStart({ visitorId: vid, email: em1, name: 'A' })
+    if (!start1.ok) throw new Error('START 1 failed')
+    const P = start1.req.providerRequestId
+    const c = start1.contactId
+
+    // Replay P for the SAME contact but a DIFFERENT email. The dedup finds P
+    // bound to (C, E1); the binding mismatches on email (E2 != E1) ->
+    // verification_conflict (no rebind, no new row).
+    const replaySend: SendOtpFn = async () => ({ otpRequestId: P, expiresAt: new Date(Date.now() + 600000).toISOString() })
+    const start2 = await simulateStart({ visitorId: vid, email: em2, name: 'B', sendOtpFn: replaySend })
+    expect(start2.ok).toBe(false)
+    if (start2.ok) throw new Error('expected verification_conflict')
+    expect(start2.error).toBe('verification_conflict')
+
+    // P still bound to exactly one row (C, E1), active — NOT rebound to E2.
+    const rowsForP = await withTenant(tenant.id, async () => db.widgetOtpRequest.findMany({
+      where: { providerRequestId: P },
+      select: { contactId: true, email: true, status: true },
+    }))
+    expect(rowsForP).toHaveLength(1)
+    expect(rowsForP[0].contactId).toBe(c)
+    expect(rowsForP[0].email).toBe(em1)
+    expect(rowsForP[0].status).toBe('active')
+  })
+
+  test('same providerRequestId + SAME contact + SAME email + active -> idempotent success (no new row)', async () => {
+    const vid = uniq('adv-id'), em = `${uniq('ide')}@x.test`
+
+    // Install P bound to (C, E) active.
+    const start1 = await simulateStart({ visitorId: vid, email: em, name: 'A' })
+    if (!start1.ok) throw new Error('START 1 failed')
+    const P = start1.req.providerRequestId
+    const c = start1.contactId
+
+    // Replay P for the SAME contact + SAME email. The dedup finds P bound to
+    // (C, E) active with a full binding match -> idempotent success (break).
+    // No new row is created; start2 returns ok with the EXISTING row.
+    const replaySend: SendOtpFn = async () => ({ otpRequestId: P, expiresAt: new Date(Date.now() + 600000).toISOString() })
+    const start2 = await simulateStart({ visitorId: vid, email: em, sendOtpFn: replaySend })
+    expect(start2.ok).toBe(true)
+    if (!start2.ok) throw new Error('expected idempotent success')
+
+    // Exactly ONE row for P (the original), still active, bound to (C, E).
+    const rowsForP = await withTenant(tenant.id, async () => db.widgetOtpRequest.findMany({
+      where: { providerRequestId: P },
+      select: { contactId: true, email: true, status: true },
+    }))
+    expect(rowsForP).toHaveLength(1)
+    expect(rowsForP[0].contactId).toBe(c)
+    expect(rowsForP[0].email).toBe(em)
+    expect(rowsForP[0].status).toBe('active')
   })
 
   test('superseded providerRequestId cannot be rebound (verification_conflict, no new row)', async () => {
@@ -926,12 +992,9 @@ describe('ProviderRequestId adversarial binding', () => {
       await db.widgetOtpRequest.update({ where: { id: start1.req.id }, data: { status: 'superseded', verified: false, verifiedAt: null, expiresAt: new Date() } })
     })
 
-    // Adversary: (C2, E2) START with the same P. The dedup re-check finds
-    // existing NON-active P -> verification_conflict (no rebind, no new row).
-    const replaySend: SendOtpFn = async () => ({
-      otpRequestId: P,
-      expiresAt: new Date(Date.now() + 600000).toISOString(),
-    })
+    // Adversary: (C2, E2) START with the same P. The dedup finds existing
+    // NON-active P -> verification_conflict (no rebind, no new row).
+    const replaySend: SendOtpFn = async () => ({ otpRequestId: P, expiresAt: new Date(Date.now() + 600000).toISOString() })
     const start2 = await simulateStart({ visitorId: vid2, email: em2, name: 'B', sendOtpFn: replaySend })
     expect(start2.ok).toBe(false)
     if (start2.ok) throw new Error('expected verification_conflict')
