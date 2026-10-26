@@ -314,3 +314,132 @@ describe('Migration proof — WidgetConfig defaults', () => {
     await globalDb.tenant.delete({ where: { id: t.id } })
   })
 })
+
+// === CONSTRAINT MATRIX COMPLETION (#2) ===
+// Explicit reject/accept for ALL status/verified combos + purpose CHECK + FK
+// enforcement + FK cascade + providerRequestId @unique + integration-secret
+// hash uniqueness/nullability. These COMPLETE the constraint matrix started
+// in the 'WidgetOtpRequest — DB state invariants' describe above (which
+// covers active+false accept, verified+true accept, active+true reject,
+// verified+false reject, partial-unique active reject, different-contacts
+// accept, supersede-frees-slot). Uses globalDb for the negative creates so
+// the fail-closed tenant proxy cannot mask a raw FK/CHECK/unique violation.
+
+describe('WidgetOtpRequest — constraint matrix completion', () => {
+  let contactId: string
+
+  beforeAll(async () => {
+    const c = await globalDb.contact.create({
+      data: { tenantId: tenantA.id, identifier: `v-matrix-${RUN_ID}`, identifierType: 'visitorId', name: 'Matrix', metadata: {} },
+    })
+    contactId = c.id
+  })
+  afterAll(async () => {
+    await globalDb.contact.deleteMany({ where: { id: contactId } })
+  })
+
+  async function expectRejected(label: string, fn: () => Promise<unknown>) {
+    try {
+      await fn()
+      throw new Error(`should have been rejected: ${label}`)
+    } catch (e: any) {
+      expect(e.message).not.toContain(`should have been rejected: ${label}`)
+    }
+  }
+
+  test('superseded + verified=false ACCEPTED', async () => {
+    const otp = await globalDb.widgetOtpRequest.create({
+      data: { tenantId: tenantA.id, contactId, email: `sup-f-${RUN_ID}@x.test`, purpose: 'widget_verify', providerRequestId: `pr-supf-${RUN_ID}-${Math.random()}`, expiresAt: new Date(Date.now() + 600000), status: 'superseded', verified: false, verifiedAt: null },
+    })
+    expect(otp.status).toBe('superseded')
+    expect(otp.verified).toBe(false)
+    await globalDb.widgetOtpRequest.delete({ where: { id: otp.id } })
+  })
+
+  test('superseded + verified=true REJECTED (status_verified CHECK)', async () => {
+    await expectRejected('superseded+true', () => globalDb.widgetOtpRequest.create({
+      data: { tenantId: tenantA.id, contactId, email: `sup-t-${RUN_ID}@x.test`, purpose: 'widget_verify', providerRequestId: `pr-supt-${RUN_ID}-${Math.random()}`, expiresAt: new Date(Date.now() + 600000), status: 'superseded', verified: true },
+    }))
+  })
+
+  test('purpose != widget_verify REJECTED (purpose CHECK)', async () => {
+    await expectRejected('purpose=login', () => globalDb.widgetOtpRequest.create({
+      data: { tenantId: tenantA.id, contactId, email: `login-${RUN_ID}@x.test`, purpose: 'login', providerRequestId: `pr-login-${RUN_ID}-${Math.random()}`, expiresAt: new Date(Date.now() + 600000), status: 'active', verified: false },
+    }))
+  })
+
+  test('non-existent tenantId REJECTED (FK)', async () => {
+    await expectRejected('bad tenantId', () => globalDb.widgetOtpRequest.create({
+      data: { tenantId: 'nonexistent-tenant-cuid-xyz', contactId, email: `fkt-${RUN_ID}@x.test`, purpose: 'widget_verify', providerRequestId: `pr-fkt-${RUN_ID}-${Math.random()}`, expiresAt: new Date(Date.now() + 600000), status: 'active', verified: false },
+    }))
+  })
+
+  test('non-existent contactId REJECTED (FK)', async () => {
+    await expectRejected('bad contactId', () => globalDb.widgetOtpRequest.create({
+      data: { tenantId: tenantA.id, contactId: 'nonexistent-contact-cuid-xyz', email: `fkc-${RUN_ID}@x.test`, purpose: 'widget_verify', providerRequestId: `pr-fkc-${RUN_ID}-${Math.random()}`, expiresAt: new Date(Date.now() + 600000), status: 'active', verified: false },
+    }))
+  })
+
+  test('duplicate providerRequestId REJECTED (@unique)', async () => {
+    const prId = `pr-duppr-${RUN_ID}-${Math.random()}`
+    // Second contact so the partial-unique on (tenant,contact) WHERE active
+    // does NOT fire — isolating the providerRequestId @unique constraint.
+    const c2 = await globalDb.contact.create({ data: { tenantId: tenantA.id, identifier: `v-matrix2-${RUN_ID}`, identifierType: 'visitorId', name: 'M2', metadata: {} } })
+    const otp1 = await globalDb.widgetOtpRequest.create({
+      data: { tenantId: tenantA.id, contactId, email: `duppr1-${RUN_ID}@x.test`, purpose: 'widget_verify', providerRequestId: prId, expiresAt: new Date(Date.now() + 600000), status: 'active', verified: false },
+    })
+    await expectRejected('dup providerRequestId', () => globalDb.widgetOtpRequest.create({
+      data: { tenantId: tenantA.id, contactId: c2.id, email: `duppr2-${RUN_ID}@x.test`, purpose: 'widget_verify', providerRequestId: prId, expiresAt: new Date(Date.now() + 600000), status: 'active', verified: false },
+    }))
+    await globalDb.widgetOtpRequest.delete({ where: { id: otp1.id } })
+    await globalDb.contact.delete({ where: { id: c2.id } })
+  })
+
+  test('FK cascade: deleting a Contact removes its WidgetOtpRequests', async () => {
+    const t = await globalDb.tenant.create({ data: { slug: `wam-casc-${RUN_ID}-${Math.random()}`, name: 'Casc', defaultLocale: 'fa', defaultDirection: 'rtl', plan: 'free' }, select: { id: true } })
+    const c = await globalDb.contact.create({ data: { tenantId: t.id, identifier: `casc-${RUN_ID}`, identifierType: 'visitorId', name: 'C', metadata: {} } })
+    const otp = await globalDb.widgetOtpRequest.create({ data: { tenantId: t.id, contactId: c.id, email: `casc-${RUN_ID}@x.test`, purpose: 'widget_verify', providerRequestId: `pr-casc-${RUN_ID}-${Math.random()}`, expiresAt: new Date(Date.now() + 600000), status: 'active', verified: false } })
+    expect(otp.id).toBeTruthy()
+    await globalDb.contact.delete({ where: { id: c.id } })
+    expect(await globalDb.widgetOtpRequest.findUnique({ where: { id: otp.id } })).toBeNull()
+    await globalDb.tenant.delete({ where: { id: t.id } })
+  })
+
+  test('FK cascade: deleting a Tenant removes Contacts + WidgetOtpRequests', async () => {
+    const t = await globalDb.tenant.create({ data: { slug: `wam-casc2-${RUN_ID}-${Math.random()}`, name: 'Casc2', defaultLocale: 'fa', defaultDirection: 'rtl', plan: 'free' }, select: { id: true } })
+    const c = await globalDb.contact.create({ data: { tenantId: t.id, identifier: `casc2-${RUN_ID}`, identifierType: 'visitorId', name: 'C2', metadata: {} }, select: { id: true } })
+    const otp = await globalDb.widgetOtpRequest.create({ data: { tenantId: t.id, contactId: c.id, email: `casc2-${RUN_ID}@x.test`, purpose: 'widget_verify', providerRequestId: `pr-casc2-${RUN_ID}-${Math.random()}`, expiresAt: new Date(Date.now() + 600000), status: 'active', verified: false }, select: { id: true } })
+    await globalDb.tenant.delete({ where: { id: t.id } })
+    expect(await globalDb.contact.findUnique({ where: { id: c.id } })).toBeNull()
+    expect(await globalDb.widgetOtpRequest.findUnique({ where: { id: otp.id } })).toBeNull()
+  })
+})
+
+// === INTEGRATION CREDENTIAL — DB UNIQUENESS + NULLABILITY (#5 partial) ===
+
+describe('Integration credential — DB uniqueness + nullability', () => {
+  test('duplicate integrationSecretHash REJECTED (WidgetConfig_integrationSecretHash_key)', async () => {
+    const t1 = await globalDb.tenant.create({ data: { slug: `wam-iu1-${RUN_ID}-${Math.random()}`, name: 'IU1', defaultLocale: 'fa', defaultDirection: 'rtl', plan: 'free' }, select: { id: true } })
+    const t2 = await globalDb.tenant.create({ data: { slug: `wam-iu2-${RUN_ID}-${Math.random()}`, name: 'IU2', defaultLocale: 'fa', defaultDirection: 'rtl', plan: 'free' }, select: { id: true } })
+    const sharedHash = `dup-hash-${RUN_ID}-${Math.random()}`
+    await globalDb.widgetConfig.create({ data: { tenantId: t1.id, accessMode: 'anonymous', policyVersion: 1, greetingTexts: { fa: '', en: '' }, integrationSecretHash: sharedHash } })
+    try {
+      await globalDb.widgetConfig.create({ data: { tenantId: t2.id, accessMode: 'anonymous', policyVersion: 1, greetingTexts: { fa: '', en: '' }, integrationSecretHash: sharedHash } })
+      throw new Error('should have been rejected by unique index')
+    } catch (e: any) {
+      expect(e.message).not.toContain('should have been rejected by unique')
+    } finally {
+      await globalDb.tenant.deleteMany({ where: { id: { in: [t1.id, t2.id] } } })
+    }
+  })
+
+  test('multiple NULL integrationSecretHash allowed (unique index — nulls distinct)', async () => {
+    const t1 = await globalDb.tenant.create({ data: { slug: `wam-nu1-${RUN_ID}-${Math.random()}`, name: 'NU1', defaultLocale: 'fa', defaultDirection: 'rtl', plan: 'free' }, select: { id: true } })
+    const t2 = await globalDb.tenant.create({ data: { slug: `wam-nu2-${RUN_ID}-${Math.random()}`, name: 'NU2', defaultLocale: 'fa', defaultDirection: 'rtl', plan: 'free' }, select: { id: true } })
+    const c1 = await globalDb.widgetConfig.create({ data: { tenantId: t1.id, accessMode: 'anonymous', policyVersion: 1, greetingTexts: { fa: '', en: '' }, integrationSecretHash: null } })
+    const c2 = await globalDb.widgetConfig.create({ data: { tenantId: t2.id, accessMode: 'anonymous', policyVersion: 1, greetingTexts: { fa: '', en: '' }, integrationSecretHash: null } })
+    expect(c1.integrationSecretHash).toBeNull()
+    expect(c2.integrationSecretHash).toBeNull()
+    await globalDb.tenant.deleteMany({ where: { id: { in: [t1.id, t2.id] } } })
+  })
+})
