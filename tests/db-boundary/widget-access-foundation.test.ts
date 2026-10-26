@@ -307,7 +307,7 @@ describe('Migration proof — WidgetConfig defaults', () => {
       select: { id: true },
     })
     const config = await globalDb.widgetConfig.create({
-      data: { tenantId: t.id }, // accessMode omitted — should default to verified_visitor
+      data: { tenantId: t.id, greetingTexts: { fa: "", en: "" } }, // accessMode omitted — should default to verified_visitor
     })
     expect(config.accessMode).toBe('verified_visitor')
     expect(config.policyVersion).toBe(1)
