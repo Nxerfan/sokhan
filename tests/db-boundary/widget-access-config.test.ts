@@ -138,6 +138,23 @@ async function resetA() {
   await setConfig(tenantA.id, { accessMode: 'anonymous', policyVersion: 4, loginUrl: null, loginButtonLabel: null, loginReturnUrlParam: null, identityEndpointPath: null })
 }
 
+/** Drop the WidgetConfig_accessMode_check to allow a corrupt accessMode for
+ *  testing the GET/PATCH fail-closed path (the CHECK normally prevents a
+ *  corrupt value at the storage level; the route's parseAccessMode is
+ *  defense-in-depth). Restored in finally. Uses globalDb (DDL is global). */
+async function withCorruptAccessMode<T>(tenantId: string, corruptMode: string, fn: () => Promise<T>): Promise<T> {
+  await globalDb.$executeRawUnsafe(`ALTER TABLE "WidgetConfig" DROP CONSTRAINT IF EXISTS "WidgetConfig_accessMode_check"`)
+  try {
+    await setConfig(tenantId, { accessMode: corruptMode })
+    return await fn()
+  } finally {
+    try {
+      await globalDb.$executeRawUnsafe(`ALTER TABLE "WidgetConfig" ADD CONSTRAINT "WidgetConfig_accessMode_check" CHECK ("accessMode" IN ('anonymous','verified_visitor','site_user_only'))`)
+    } catch { /* already exists — ignore */ }
+    await resetA()
+  }
+}
+
 // === GET ===
 
 describe('access-config GET', () => {
@@ -162,11 +179,13 @@ describe('access-config GET', () => {
 
   test('corrupt DB accessMode -> 503 policy_unavailable (never silently anonymous)', async () => {
     asAdminA()
-    await setConfig(tenantA.id, { accessMode: 'corrupt_mode' })
-    const r = await callGet()
-    expect(r.status).toBe(503)
-    expect(r.data.error).toBe('policy_unavailable')
-    await resetA()
+    // The DB CHECK normally prevents a corrupt accessMode; drop it to prove the
+    // route's parseAccessMode fail-closes (defense-in-depth) — never silently 'anonymous'.
+    await withCorruptAccessMode(tenantA.id, 'corrupt_mode', async () => {
+      const r = await callGet()
+      expect(r.status).toBe(503)
+      expect(r.data.error).toBe('policy_unavailable')
+    })
   })
 
   test('invalid policyVersion -> 503 policy_unavailable', async () => {
@@ -562,13 +581,13 @@ describe('access-config PATCH — authorization', () => {
 describe('access-config PATCH — fail closed on corrupt current policy', () => {
   test('corrupt current accessMode -> 503 policy_unavailable (PATCH does NOT repair)', async () => {
     asAdminA()
-    await setConfig(tenantA.id, { accessMode: 'corrupt_mode', policyVersion: 4 })
-    const r = await callPatch({ accessMode: 'verified_visitor' }) // even a VALID new mode is rejected
-    expect(r.status).toBe(503)
-    expect(r.data.error).toBe('policy_unavailable')
-    const cfg = await getConfig(tenantA.id)
-    expect(cfg!.accessMode).toBe('corrupt_mode') // NOT repaired
-    await resetA()
+    await withCorruptAccessMode(tenantA.id, 'corrupt_mode', async () => {
+      const r = await callPatch({ accessMode: 'verified_visitor' }) // even a VALID new mode is rejected
+      expect(r.status).toBe(503)
+      expect(r.data.error).toBe('policy_unavailable')
+      const cfg = await getConfig(tenantA.id)
+      expect(cfg!.accessMode).toBe('corrupt_mode') // NOT repaired
+    })
   })
 
   test('corrupt current policyVersion -> 503 policy_unavailable (PATCH does NOT repair)', async () => {
