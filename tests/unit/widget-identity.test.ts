@@ -29,6 +29,20 @@ import {
   tamperToken,
 } from '@/lib/widget-identity-tokens'
 
+import crypto from 'crypto'
+import { getAuthSecret } from '@/lib/env-check'
+
+// Test-only raw envelope signer — creates correctly-signed HS256 envelopes
+// with ARBITRARY claims for negative testing. Does NOT export production
+// signing primitives — test-only code in the test file.
+function signRawEnvelope(payload: Record<string, unknown>, opts?: { pastExpiry?: boolean; futureIat?: boolean }): string {
+  const now = Math.floor(Date.now() / 1000)
+  const full = { ...payload, iat: opts?.futureIat ? now + 9999 : now, exp: opts?.pastExpiry ? now - 1 : now + 300 }
+  const encoded = Buffer.from(JSON.stringify(full)).toString('base64url')
+  const sig = crypto.createHmac('sha256', getAuthSecret()).update(encoded).digest('base64url')
+  return encoded + '.' + sig
+}
+
 // --- strict parsing ---
 
 describe('parseAccessMode (strict)', () => {
@@ -233,12 +247,13 @@ describe('signExternalIdentityToken / verifyExternalIdentityToken', () => {
     expect(verifyExternalIdentityToken(tamperToken(token), tenantId, pv)).toBeNull()
   })
 
-  test('missing externalUserId → null', () => {
-    // Sign a token with empty externalUserId (bypassing the signer's check by direct manipulation)
-    // This tests the verify path's check
-    const token = signExternalIdentityToken({ tenantId, externalUserId: 'test', contactId, policyVersion: pv })
-    // A valid token with a real externalUserId should pass
-    expect(verifyExternalIdentityToken(token, tenantId, pv)).not.toBeNull()
+  test('#3 empty externalUserId → null', () => {
+    const token = signRawEnvelope({ type: 'external_identity', aud: 'sukhan-external', externalUserId: '', contactId, tenantId, identityLevel: 'external_user', policyVersion: pv })
+    expect(verifyExternalIdentityToken(token, tenantId, pv)).toBeNull()
+  })
+  test('#3 missing externalUserId → null', () => {
+    const token = signRawEnvelope({ type: 'external_identity', aud: 'sukhan-external', contactId, tenantId, identityLevel: 'external_user', policyVersion: pv })
+    expect(verifyExternalIdentityToken(token, tenantId, pv)).toBeNull()
   })
 
   test('signer rejects invalid policyVersion', () => {
@@ -280,5 +295,87 @@ describe('isIdentitySufficient', () => {
     expect(isIdentitySufficient('site_user_only', 'external_user')).toBe(true)
     expect(isIdentitySufficient('site_user_only', 'verified_contact')).toBe(false)
     expect(isIdentitySufficient('site_user_only', 'anonymous')).toBe(false)
+  })
+})
+
+// --- #4 resume credential — full negative envelope matrix ---
+
+describe('resume credential — negative envelope matrix', () => {
+  const tenantId = 't-neg', contactId = 'c-neg', pv = 1
+  const base = { contactId, tenantId, policyVersion: pv }
+
+  test('wrong audience → null', () => {
+    expect(verifyResumeCredential(signRawEnvelope({ ...base, type: 'resume', aud: 'wrong', identityLevel: 'verified_contact' }), tenantId, pv)).toBeNull()
+  })
+  test('wrong type → null', () => {
+    expect(verifyResumeCredential(signRawEnvelope({ ...base, type: 'wrong', aud: 'sukhan-resume', identityLevel: 'verified_contact' }), tenantId, pv)).toBeNull()
+  })
+  test('expired → null', () => {
+    expect(verifyResumeCredential(signRawEnvelope({ ...base, type: 'resume', aud: 'sukhan-resume', identityLevel: 'verified_contact' }, { pastExpiry: true }), tenantId, pv)).toBeNull()
+  })
+  test('future iat → null', () => {
+    expect(verifyResumeCredential(signRawEnvelope({ ...base, type: 'resume', aud: 'sukhan-resume', identityLevel: 'verified_contact' }, { futureIat: true }), tenantId, pv)).toBeNull()
+  })
+  test('missing identityLevel → null', () => {
+    expect(verifyResumeCredential(signRawEnvelope({ ...base, type: 'resume', aud: 'sukhan-resume' }), tenantId, pv)).toBeNull()
+  })
+  test('wrong identityLevel → null', () => {
+    expect(verifyResumeCredential(signRawEnvelope({ ...base, type: 'resume', aud: 'sukhan-resume', identityLevel: 'external_user' }), tenantId, pv)).toBeNull()
+  })
+  test('missing contactId → null', () => {
+    expect(verifyResumeCredential(signRawEnvelope({ tenantId, policyVersion: pv, type: 'resume', aud: 'sukhan-resume', identityLevel: 'verified_contact' }), tenantId, pv)).toBeNull()
+  })
+  test('empty contactId → null', () => {
+    expect(verifyResumeCredential(signRawEnvelope({ ...base, contactId: '', type: 'resume', aud: 'sukhan-resume', identityLevel: 'verified_contact' }), tenantId, pv)).toBeNull()
+  })
+  test('wrong tenant → null', () => {
+    expect(verifyResumeCredential(signRawEnvelope({ ...base, type: 'resume', aud: 'sukhan-resume', identityLevel: 'verified_contact' }), 'other-tenant', pv)).toBeNull()
+  })
+  test('stale policyVersion → null', () => {
+    expect(verifyResumeCredential(signRawEnvelope({ ...base, type: 'resume', aud: 'sukhan-resume', identityLevel: 'verified_contact' }), tenantId, 2)).toBeNull()
+  })
+  test('tampered signature → null', () => {
+    expect(verifyResumeCredential(tamperToken(signResumeCredential({ ...base })), tenantId, pv)).toBeNull()
+  })
+})
+
+// --- #4 external identity token — full negative envelope matrix ---
+
+describe('external identity token — negative envelope matrix', () => {
+  const tenantId = 't-ext-neg', externalUserId = 'ext-neg', contactId = 'c-ext-neg', pv = 1
+  const base = { externalUserId, contactId, tenantId, policyVersion: pv }
+
+  test('wrong audience → null', () => {
+    expect(verifyExternalIdentityToken(signRawEnvelope({ ...base, type: 'external_identity', aud: 'wrong', identityLevel: 'external_user' }), tenantId, pv)).toBeNull()
+  })
+  test('wrong type → null', () => {
+    expect(verifyExternalIdentityToken(signRawEnvelope({ ...base, type: 'resume', aud: 'sukhan-external', identityLevel: 'external_user' }), tenantId, pv)).toBeNull()
+  })
+  test('expired → null', () => {
+    expect(verifyExternalIdentityToken(signRawEnvelope({ ...base, type: 'external_identity', aud: 'sukhan-external', identityLevel: 'external_user' }, { pastExpiry: true }), tenantId, pv)).toBeNull()
+  })
+  test('future iat → null', () => {
+    expect(verifyExternalIdentityToken(signRawEnvelope({ ...base, type: 'external_identity', aud: 'sukhan-external', identityLevel: 'external_user' }, { futureIat: true }), tenantId, pv)).toBeNull()
+  })
+  test('missing identityLevel → null', () => {
+    expect(verifyExternalIdentityToken(signRawEnvelope({ ...base, type: 'external_identity', aud: 'sukhan-external' }), tenantId, pv)).toBeNull()
+  })
+  test('wrong identityLevel → null', () => {
+    expect(verifyExternalIdentityToken(signRawEnvelope({ ...base, type: 'external_identity', aud: 'sukhan-external', identityLevel: 'verified_contact' }), tenantId, pv)).toBeNull()
+  })
+  test('missing externalUserId → null', () => {
+    expect(verifyExternalIdentityToken(signRawEnvelope({ contactId, tenantId, policyVersion: pv, type: 'external_identity', aud: 'sukhan-external', identityLevel: 'external_user' }), tenantId, pv)).toBeNull()
+  })
+  test('empty externalUserId → null', () => {
+    expect(verifyExternalIdentityToken(signRawEnvelope({ ...base, externalUserId: '', type: 'external_identity', aud: 'sukhan-external', identityLevel: 'external_user' }), tenantId, pv)).toBeNull()
+  })
+  test('wrong tenant → null', () => {
+    expect(verifyExternalIdentityToken(signRawEnvelope({ ...base, type: 'external_identity', aud: 'sukhan-external', identityLevel: 'external_user' }), 'other-tenant', pv)).toBeNull()
+  })
+  test('stale policyVersion → null', () => {
+    expect(verifyExternalIdentityToken(signRawEnvelope({ ...base, type: 'external_identity', aud: 'sukhan-external', identityLevel: 'external_user' }), tenantId, 2)).toBeNull()
+  })
+  test('tampered signature → null', () => {
+    expect(verifyExternalIdentityToken(tamperToken(signExternalIdentityToken({ ...base })), tenantId, pv)).toBeNull()
   })
 })
