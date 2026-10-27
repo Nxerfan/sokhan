@@ -169,6 +169,66 @@ describe('publicAccessConfig (fail-closed)', () => {
   })
 })
 
+// --- publicAccessConfig — legacy unsafe persisted-field validation ---
+// publicAccessConfig validates the persisted login fields against the SAME
+// contract as dashboard PATCH. A legacy unsafe value fail-closes (null) ->
+// the public route returns 503 policy_unavailable. NEVER silently passed to
+// the browser, NEVER coerced.
+
+describe('publicAccessConfig — unsafe persisted fields fail-close', () => {
+  const valid = { accessMode: 'verified_visitor' as const, policyVersion: 1, loginUrl: '/login', loginButtonLabel: 'Sign in', loginReturnUrlParam: 'next', identityEndpointPath: '/api/sukhan-identity' }
+
+  test('exact safe values returned for a valid config', () => {
+    const r = publicAccessConfig(valid)
+    expect(r).not.toBeNull()
+    expect(r!.accessMode).toBe('verified_visitor')
+    expect(r!.policyVersion).toBe(1)
+    expect(r!.loginUrl).toBe('/login')
+    expect(r!.loginButtonLabel).toBe('Sign in')
+    expect(r!.loginReturnUrlParam).toBe('next')
+    expect(r!.identityEndpointPath).toBe('/api/sukhan-identity')
+  })
+
+  test('null login fields are allowed (not required)', () => {
+    const r = publicAccessConfig({ accessMode: 'anonymous', policyVersion: 1, loginUrl: null, loginButtonLabel: null, loginReturnUrlParam: null, identityEndpointPath: null })
+    expect(r).not.toBeNull()
+    expect(r!.loginUrl).toBeNull()
+    expect(r!.loginButtonLabel).toBeNull()
+    expect(r!.loginReturnUrlParam).toBeNull()
+    expect(r!.identityEndpointPath).toBeNull()
+  })
+
+  test('unsafe loginUrl -> null', () => {
+    for (const bad of ['//evil.example', 'javascript:alert(1)', 'data:text/html,x', '/\\evil', 'http://x/\\e', 'x'.repeat(501), 'ht!tp://x']) {
+      expect(publicAccessConfig({ ...valid, loginUrl: bad })).toBeNull()
+    }
+  })
+
+  test('unsafe loginButtonLabel -> null (empty/whitespace/oversized)', () => {
+    for (const bad of ['', '   ', '\t\n', 'x'.repeat(201)]) {
+      expect(publicAccessConfig({ ...valid, loginButtonLabel: bad })).toBeNull()
+    }
+  })
+
+  test('unsafe loginReturnUrlParam -> null (URL-structure/whitespace/oversized)', () => {
+    for (const bad of ['re&turn', 're?turn', 're=turn', 're#turn', 're turn', 're\tturn', 'x'.repeat(101)]) {
+      expect(publicAccessConfig({ ...valid, loginReturnUrlParam: bad })).toBeNull()
+    }
+  })
+
+  test('unsafe identityEndpointPath -> null (absolute/backslash/query/oversized)', () => {
+    for (const bad of ['https://x/api/identity', '//x/api/identity', '/\\api/identity', '/api/identity?foo=bar', '/api/identity#frag', '/?', 'x'.repeat(501)]) {
+      expect(publicAccessConfig({ ...valid, identityEndpointPath: bad })).toBeNull()
+    }
+  })
+
+  test('valid http(s) loginUrl accepted', () => {
+    for (const ok of ['http://example.com/login', 'https://example.com/login', '/account/login', '/']) {
+      expect(publicAccessConfig({ ...valid, loginUrl: ok })).not.toBeNull()
+    }
+  })
+})
+
 // --- resume credential ---
 
 describe('signResumeCredential / verifyResumeCredential', () => {

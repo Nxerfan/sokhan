@@ -56,10 +56,11 @@ mock.module('@/lib/auth', () => ({
 }))
 
 const { GET, PATCH } = await import('@/app/api/widget-config/access/route')
+const { GET: publicGet } = await import('@/app/api/widget/[slug]/config/route')
 
 // === Fixtures ===
-let tenantA: { id: string; slug: string }
-let tenantB: { id: string; slug: string }
+let tenantA: { id: string; slug: string; name: string }
+let tenantB: { id: string; slug: string; name: string }
 let adminA: { id: string; email: string }
 let viewerA: { id: string; email: string }
 let adminB: { id: string; email: string }
@@ -67,11 +68,11 @@ let adminB: { id: string; email: string }
 beforeAll(async () => {
   tenantA = await globalDb.tenant.create({
     data: { slug: `acc-a-${RUN_ID}`, name: `Acc A ${RUN_ID}`, defaultLocale: 'fa', defaultDirection: 'rtl', plan: 'free' },
-    select: { id: true, slug: true },
+    select: { id: true, slug: true, name: true },
   })
   tenantB = await globalDb.tenant.create({
     data: { slug: `acc-b-${RUN_ID}`, name: `Acc B ${RUN_ID}`, defaultLocale: 'fa', defaultDirection: 'rtl', plan: 'free' },
-    select: { id: true, slug: true },
+    select: { id: true, slug: true, name: true },
   })
   await globalDb.widgetConfig.create({
     data: { tenantId: tenantA.id, accessMode: 'anonymous', policyVersion: 4, greetingTexts: { fa: '', en: '' } },
@@ -598,6 +599,185 @@ describe('access-config PATCH — fail closed on corrupt current policy', () => 
     expect(r.data.error).toBe('policy_unavailable')
     const cfg = await getConfig(tenantA.id)
     expect(cfg!.policyVersion).toBe(0) // NOT repaired
+    await resetA()
+  })
+})
+
+
+// === PUBLIC config route (GET /api/widget/[slug]/config) — access-policy wiring ===
+// Exercises the REAL public config route against real PostgreSQL. No auth mock
+// (the public route has no session). Reuses the tenantA/tenantB fixtures +
+// withCorruptAccessMode (the file owns the DDL dance — no second global CHECK drop).
+
+async function callPublicConfig(slug: string) {
+  const req = new Request(`http://localhost/api/widget/${slug}/config`, { headers: {} })
+  const res = await publicGet(req, { params: Promise.resolve({ slug }) })
+  let data: any = null
+  try { data = await res.json() } catch { /* non-json */ }
+  return { status: res.status, data }
+}
+
+describe('public config — three access modes', () => {
+  test('anonymous: accessMode + exact policyVersion', async () => {
+    await setConfig(tenantA.id, { accessMode: 'anonymous', policyVersion: 7, loginUrl: null, loginButtonLabel: null, loginReturnUrlParam: null, identityEndpointPath: null })
+    const r = await callPublicConfig(tenantA.slug)
+    expect(r.status).toBe(200)
+    expect(r.data.accessMode).toBe('anonymous')
+    expect(r.data.policyVersion).toBe(7)
+    // additive fields present
+    expect(r.data.loginUrl).toBeNull()
+    expect(r.data.loginButtonLabel).toBeNull()
+    expect(r.data.loginReturnUrlParam).toBeNull()
+    expect(r.data.identityEndpointPath).toBeNull()
+    // visual + realtime still present
+    expect(r.data.slug).toBe(tenantA.slug)
+    expect(r.data.name).toBe(tenantA.name)
+    expect(r.data.realtime).toBeTruthy()
+  })
+
+  test('verified_visitor: accessMode + exact policyVersion', async () => {
+    await setConfig(tenantA.id, { accessMode: 'verified_visitor', policyVersion: 8 })
+    const r = await callPublicConfig(tenantA.slug)
+    expect(r.status).toBe(200)
+    expect(r.data.accessMode).toBe('verified_visitor')
+    expect(r.data.policyVersion).toBe(8)
+  })
+
+  test('site_user_only: accessMode + safe configured login fields (no integration secret required)', async () => {
+    await setConfig(tenantA.id, { accessMode: 'site_user_only', policyVersion: 9, loginUrl: '/login', loginButtonLabel: 'Sign in', loginReturnUrlParam: 'next', identityEndpointPath: '/api/sukhan-identity' })
+    const r = await callPublicConfig(tenantA.slug)
+    expect(r.status).toBe(200)
+    expect(r.data.accessMode).toBe('site_user_only')
+    expect(r.data.policyVersion).toBe(9)
+    expect(r.data.loginUrl).toBe('/login')
+    expect(r.data.loginButtonLabel).toBe('Sign in')
+    expect(r.data.loginReturnUrlParam).toBe('next')
+    expect(r.data.identityEndpointPath).toBe('/api/sukhan-identity')
+  })
+})
+
+describe('public config — customization lock does NOT modify access policy', () => {
+  test('FREE tenant: locked visuals (isLocked/poweredBy) + stored accessMode (not anonymous)', async () => {
+    // tenantA is plan='free' -> getEffectiveWidgetConfig returns locked Sukhan defaults.
+    await setConfig(tenantA.id, { accessMode: 'site_user_only', policyVersion: 4 })
+    const r = await callPublicConfig(tenantA.slug)
+    expect(r.status).toBe(200)
+    expect(r.data.isLocked).toBe(true)
+    expect(r.data.poweredBy).toBe(true)
+    // locked Sukhan visual defaults
+    expect(r.data.accentColor).toBe('#E09A2B')
+    // BUT the access policy is the REAL stored value — NOT forced to anonymous
+    expect(r.data.accessMode).toBe('site_user_only')
+    expect(r.data.policyVersion).toBe(4)
+  })
+
+  test('PAID tenant: custom visuals + same access-policy behavior', async () => {
+    // Upgrade tenantA to pro + custom visual config.
+    await globalDb.tenant.update({ where: { id: tenantA.id }, data: { plan: 'pro' } })
+    await setConfig(tenantA.id, { accessMode: 'verified_visitor', policyVersion: 5 })
+    // set a custom visual field directly (accentColor) to prove custom visuals pass through
+    await withTenant(tenantA.id, async () => db.widgetConfig.update({ where: { tenantId: tenantA.id }, data: { accentColor: '#FF0000' } }))
+    try {
+      const r = await callPublicConfig(tenantA.slug)
+      expect(r.status).toBe(200)
+      expect(r.data.isLocked).toBe(false)
+      expect(r.data.poweredBy).toBe(false)
+      expect(r.data.accentColor).toBe('#FF0000') // custom visual
+      expect(r.data.accessMode).toBe('verified_visitor') // real stored policy
+      expect(r.data.policyVersion).toBe(5)
+    } finally {
+      await globalDb.tenant.update({ where: { id: tenantA.id }, data: { plan: 'free' } })
+      await resetA()
+    }
+  })
+})
+
+describe('public config — fail-closed matrix (503 policy_unavailable)', () => {
+  test('missing WidgetConfig -> 503', async () => {
+    await withTenant(tenantA.id, async () => db.widgetConfig.delete({ where: { tenantId: tenantA.id } }))
+    try {
+      const r = await callPublicConfig(tenantA.slug)
+      expect(r.status).toBe(503)
+      expect(r.data.error).toBe('policy_unavailable')
+    } finally {
+      // re-create the WidgetConfig for subsequent tests
+      await globalDb.widgetConfig.create({ data: { tenantId: tenantA.id, accessMode: 'anonymous', policyVersion: 4, greetingTexts: { fa: '', en: '' } } })
+    }
+  })
+
+  test('invalid accessMode -> 503 (DDL dance — DB CHECK normally prevents it)', async () => {
+    await withCorruptAccessMode(tenantA.id, 'corrupt_mode', async () => {
+      const r = await callPublicConfig(tenantA.slug)
+      expect(r.status).toBe(503)
+      expect(r.data.error).toBe('policy_unavailable')
+    })
+  })
+
+  test('invalid policyVersion -> 503', async () => {
+    await setConfig(tenantA.id, { accessMode: 'anonymous', policyVersion: 0 })
+    const r = await callPublicConfig(tenantA.slug)
+    expect(r.status).toBe(503)
+    expect(r.data.error).toBe('policy_unavailable')
+    await resetA()
+  })
+
+  test('unsafe persisted loginUrl -> 503 (never returned to browser)', async () => {
+    for (const bad of ['javascript:alert(1)', '//evil.example', '/\\evil', 'data:text/html,x', 'x'.repeat(501)]) {
+      await setConfig(tenantA.id, { accessMode: 'anonymous', policyVersion: 4, loginUrl: bad })
+      const r = await callPublicConfig(tenantA.slug)
+      expect(r.status).toBe(503)
+      expect(r.data.error).toBe('policy_unavailable')
+      // the unsafe value is NEVER in the response body
+      expect(JSON.stringify(r.data)).not.toContain(bad.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    }
+    await resetA()
+  })
+
+  test('unsafe persisted loginButtonLabel -> 503', async () => {
+    for (const bad of ['', '   ', 'x'.repeat(201)]) {
+      await setConfig(tenantA.id, { accessMode: 'anonymous', policyVersion: 4, loginButtonLabel: bad })
+      const r = await callPublicConfig(tenantA.slug)
+      expect(r.status).toBe(503)
+      expect(r.data.error).toBe('policy_unavailable')
+    }
+    await resetA()
+  })
+
+  test('unsafe persisted loginReturnUrlParam -> 503', async () => {
+    for (const bad of ['re&turn', 're?turn', 're#turn', 'x'.repeat(101)]) {
+      await setConfig(tenantA.id, { accessMode: 'anonymous', policyVersion: 4, loginReturnUrlParam: bad })
+      const r = await callPublicConfig(tenantA.slug)
+      expect(r.status).toBe(503)
+      expect(r.data.error).toBe('policy_unavailable')
+    }
+    await resetA()
+  })
+
+  test('unsafe persisted identityEndpointPath -> 503', async () => {
+    for (const bad of ['https://x/api/identity', '//x/api/identity', '/\\api/identity', '/api/identity?foo=bar', '/api/identity#frag', 'x'.repeat(501)]) {
+      await setConfig(tenantA.id, { accessMode: 'anonymous', policyVersion: 4, identityEndpointPath: bad })
+      const r = await callPublicConfig(tenantA.slug)
+      expect(r.status).toBe(503)
+      expect(r.data.error).toBe('policy_unavailable')
+    }
+    await resetA()
+  })
+})
+
+describe('public config — no integration-secret leak', () => {
+  test('integration secret hash set -> response has NO secret/hash; safe policy fields return', async () => {
+    await setConfig(tenantA.id, { accessMode: 'verified_visitor', policyVersion: 6, loginUrl: '/login', loginButtonLabel: 'Sign in', loginReturnUrlParam: 'next', identityEndpointPath: '/api/sukhan-identity', integrationSecretHash: 'some-secret-hash', integrationSecretRotatedAt: new Date() })
+    const r = await callPublicConfig(tenantA.slug)
+    expect(r.status).toBe(200)
+    // safe policy fields still return
+    expect(r.data.accessMode).toBe('verified_visitor')
+    expect(r.data.policyVersion).toBe(6)
+    expect(r.data.loginUrl).toBe('/login')
+    // NEVER expose the raw secret, the hash, or any credential
+    expect(r.data.integrationSecretHash).toBeUndefined()
+    expect(r.data.integrationSecret).toBeUndefined()
+    expect(r.data.rawSecret).toBeUndefined()
+    expect(Object.keys(r.data).join(',')).not.toContain('integrationSecret')
     await resetA()
   })
 })

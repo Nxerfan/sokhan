@@ -2,7 +2,7 @@ import { NextResponse, NextRequest } from 'next/server'
 import { withSessionTenant, hasRole } from '@/lib/auth'
 import { db, getCurrentTenantId } from '@/lib/db'
 import { getIntegrationSecretStatus } from '@/lib/widget-integration-credential'
-import { parseAccessMode, parsePolicyVersion } from '@/lib/widget-access-policy'
+import { parseAccessMode, parsePolicyVersion, isValidLoginUrl, isValidLoginButtonLabel, isValidReturnUrlParam, isValidIdentityEndpointPath, ALLOWED_PATCH_KEYS } from '@/lib/widget-access-policy'
 
 /**
  * Dashboard Access & Identity configuration (feat/widget-visitor-access-modes).
@@ -29,56 +29,6 @@ import { parseAccessMode, parsePolicyVersion } from '@/lib/widget-access-policy'
  * PATCH remains admin-only. The integration secret itself is managed via the
  * dedicated /api/widget-config/integration-secret route.
  */
-
-const ALLOWED_PATCH_KEYS = ['accessMode', 'loginUrl', 'loginButtonLabel', 'loginReturnUrlParam', 'identityEndpointPath'] as const
-const LOGIN_URL_MAX = 500
-const LOGIN_BUTTON_LABEL_MAX = 200
-const LOGIN_RETURN_URL_PARAM_MAX = 100
-const IDENTITY_ENDPOINT_PATH_MAX = 500
-// ASCII control chars (0x00-0x1f + 0x7f) — covers tab/newline/etc. (Avoids the
-// ES2018 \p{Cc} requirement at the ES2017 tsconfig target.)
-const CONTROL_CHAR_RE = /[\x00-\x1f\x7f]/
-
-/** Validate a login URL — http(s) absolute OR same-origin relative; reject
- *  protocol-relative //, javascript:, data:, backslash confusion, control
- *  chars, oversized. null is handled by the caller. */
-function isValidLoginUrl(url: string): boolean {
-  if (url.length > LOGIN_URL_MAX) return false
-  if (CONTROL_CHAR_RE.test(url)) return false
-  if (url.includes('\\')) return false // backslash confusion (browser may normalize to //)
-  if (url === '/') return true
-  if (/^\/[^/]/.test(url)) return true // same-origin relative (not //)
-  if (/^https?:\/\//i.test(url)) {
-    try {
-      const u = new URL(url)
-      return u.protocol === 'http:' || u.protocol === 'https:'
-    } catch {
-      return false
-    }
-  }
-  return false // reject //, javascript:, data:, malformed, etc.
-}
-
-/** Validate a login return-URL parameter NAME (not a URL). Conservative
- *  URL-query-key charset; reject URL-structure chars (& = ? #), whitespace,
- *  control chars, oversized. */
-function isValidReturnUrlParam(p: string): boolean {
-  if (p.length > LOGIN_RETURN_URL_PARAM_MAX) return false
-  if (CONTROL_CHAR_RE.test(p)) return false
-  return /^[a-zA-Z0-9_.-]+$/.test(p) // letters, digits, _, -, .
-}
-
-/** Validate the identity endpoint path — same-origin relative path only; reject
- *  absolute URLs, protocol-relative //, backslash confusion, query/hash, control
- *  chars, oversized. null is handled by the caller. */
-function isValidIdentityEndpointPath(path: string): boolean {
-  if (path.length > IDENTITY_ENDPOINT_PATH_MAX) return false
-  if (CONTROL_CHAR_RE.test(path)) return false
-  if (path.includes('\\')) return false
-  if (path.includes('?') || path.includes('#')) return false // no query/hash
-  if (path === '/') return true
-  return /^\/[^/]/.test(path) // same-origin relative (not //)
-}
 
 export async function GET() {
   const result = await withSessionTenant(async () => {
@@ -183,10 +133,8 @@ export async function PATCH(req: NextRequest) {
       if (body.loginButtonLabel === null) {
         data.loginButtonLabel = null
       } else if (typeof body.loginButtonLabel === 'string') {
-        const label = body.loginButtonLabel
-        if (label.length > LOGIN_BUTTON_LABEL_MAX) return { error: 'invalid_login_button_label' as const }
-        if (label.trim().length === 0) return { error: 'invalid_login_button_label' as const } // no empty/whitespace-only
-        data.loginButtonLabel = label
+        if (!isValidLoginButtonLabel(body.loginButtonLabel)) return { error: 'invalid_login_button_label' as const }
+        data.loginButtonLabel = body.loginButtonLabel
       } else {
         return { error: 'invalid_login_button_label' as const }
       }
