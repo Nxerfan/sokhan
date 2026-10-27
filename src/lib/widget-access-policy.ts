@@ -102,8 +102,17 @@ export type AuthorizationDenyReason = 'verification_required' | 'website_login_r
 export function resolveLegacyTokenIdentity(args: { currentAccessMode: AccessMode; tokenIdentityLevel: unknown; tokenPolicyVersion: unknown }): IdentityLevel | null {
   const level = parseIdentityLevel(args.tokenIdentityLevel)
   const pv = parsePolicyVersion(args.tokenPolicyVersion)
+  // Both claims present + valid -> use the strict identity level.
   if (level !== null && pv !== null) return level
-  if (args.currentAccessMode === 'anonymous') return 'anonymous'
+  // Both claims genuinely ABSENT (undefined) -> legacy token. Accepted ONLY
+  // in anonymous mode. In verified_visitor/site_user_only, reject.
+  if (args.tokenIdentityLevel === undefined && args.tokenPolicyVersion === undefined) {
+    if (args.currentAccessMode === 'anonymous') return 'anonymous'
+    return null
+  }
+  // Partial claims (one present, one missing) OR malformed values -> reject.
+  // A correctly-signed modern token with malformed/partial policy claims
+  // must NOT silently degrade to anonymous (identity_token_invalid at the route).
   return null
 }
 

@@ -150,6 +150,28 @@ describe('resolveLegacyTokenIdentity', () => {
   test('legacy token in site_user_only → null (rejected)', () => {
     expect(resolveLegacyTokenIdentity({ currentAccessMode: 'site_user_only', tokenIdentityLevel: undefined, tokenPolicyVersion: undefined })).toBeNull()
   })
+  // #28 Partial/malformed claims must NOT be accepted as legacy.
+  test('identityLevel present, policyVersion absent → null (partial, not legacy)', () => {
+    expect(resolveLegacyTokenIdentity({ currentAccessMode: 'anonymous', tokenIdentityLevel: 'anonymous', tokenPolicyVersion: undefined })).toBeNull()
+  })
+  test('identityLevel absent, policyVersion present → null (partial, not legacy)', () => {
+    expect(resolveLegacyTokenIdentity({ currentAccessMode: 'anonymous', tokenIdentityLevel: undefined, tokenPolicyVersion: 1 })).toBeNull()
+  })
+  test('corrupt identityLevel → null (malformed, not legacy)', () => {
+    expect(resolveLegacyTokenIdentity({ currentAccessMode: 'anonymous', tokenIdentityLevel: 'corrupt', tokenPolicyVersion: 1 })).toBeNull()
+  })
+  test('invalid policyVersion (0) → null (malformed, not legacy)', () => {
+    expect(resolveLegacyTokenIdentity({ currentAccessMode: 'anonymous', tokenIdentityLevel: 'anonymous', tokenPolicyVersion: 0 })).toBeNull()
+  })
+  test('identityLevel=null (explicit null, not undefined) → null (not legacy)', () => {
+    expect(resolveLegacyTokenIdentity({ currentAccessMode: 'anonymous', tokenIdentityLevel: null, tokenPolicyVersion: null })).toBeNull()
+  })
+  test('valid modern identities still resolve (verified_contact)', () => {
+    expect(resolveLegacyTokenIdentity({ currentAccessMode: 'anonymous', tokenIdentityLevel: 'verified_contact', tokenPolicyVersion: 1 })).toBe('verified_contact')
+  })
+  test('valid modern identities still resolve (external_user)', () => {
+    expect(resolveLegacyTokenIdentity({ currentAccessMode: 'site_user_only', tokenIdentityLevel: 'external_user', tokenPolicyVersion: 1 })).toBe('external_user')
+  })
 })
 
 // --- publicAccessConfig fail-closed ---
