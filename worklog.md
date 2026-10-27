@@ -2051,3 +2051,30 @@ Stage Summary — VERIFIED GREEN:
 - OTP + contact/bootstrap + public config CLOSED — not touched. No message-send GET history authorization change (per #14). No realtime-server enforcement (per #22, #23 — next phase). No NPM/script widget UI (per #24).
 - PR #14 remains DRAFT (draft=True), NOT MERGED (merged=False), NO AUTO-MERGE (autoMergeRequest=None). Head = 63fcf5d (60 commits ahead of main).
 - Next phase (per the user's instructions): CURRENT-policy realtime authorization (update api/realtime.ts + mini-services/realtime/index.ts + shared conversation verification). Do NOT start until REST send enforcement is separately green (it is now).
+
+---
+Task ID: REALTIME-FOUNDATION-1
+Agent: Z.ai Code (realtime authorization — foundation)
+Task: Establish the shared pure evaluator + internal verifier endpoint + unit tests for the CURRENT-policy realtime authorization phase. The Vercel adapter, Docker wiring, conversation-join revalidation, DB-boundary parity tests, and browser extensions are follow-up (the drift removed the subagent's tracked modifications to api/realtime.ts, mini-services/realtime/index.ts, messages/route.ts refactor, and tests/realtime-authz.spec.ts).
+
+Work Log:
+- Extracted the pure zero-dependency shared evaluator (src/lib/widget-access-evaluator.ts, 403 lines): evaluateVisitorCurrentPolicyAccess + ContactIdentityClass + VisitorAccessDecision + all the frozen policy primitives (parseAccessMode, parsePolicyVersion, resolveLegacyTokenIdentity, evaluateSendAuthorization, validators, publicAccessConfig, etc.). ZERO runtime deps (no Next.js, server-only, Prisma, DB, network) — importable from the Vercel realtime function, the Docker mini-service, and pure unit tests.
+- Made widget-access-policy.ts a slim wrapper: export * from './widget-access-evaluator' (backward-compat for all existing app-side importers) + authorizeSendWithTenant (DB-touching, stays here).
+- Created the internal visitor-access verifier endpoint (src/app/api/realtime/verify-visitor-access/route.ts): GET, X-Internal-Secret (timing-safe), loads tenant+WidgetConfig+Contact, runs evaluateVisitorCurrentPolicyAccess, returns 200/403/503, no PII/secrets.
+- Added 29 unit tests (tests/unit/widget-visitor-access-evaluator.test.ts): legacy both-absent × 3 modes, partial claims × 2, malformed × 3, modern matrix × 9, stale policy × 3, contact mismatch × 5, corrupt policy × 4. 648 unit total (was 619).
+- CI run 40590574075 (db9defe): ALL 4 JOBS GREEN. The slim wrapper preserves all existing imports — the 244 DB-boundary tests (including 30 send-authorization) + browser regressions all pass.
+
+Stage Summary — VERIFIED GREEN:
+- exact SHA: db9defe428b73c701fc27b97d6b9f793814d3ee4
+- exact workflow run ID: 40590574075
+- ci: SUCCESS (648 unit pass / 0 fail / 2164 expect())
+- widget-package-qualification: SUCCESS
+- self-host-qualification: SUCCESS
+- docker-regression: SUCCESS
+  * Full DB-boundary: 244 pass / 0 fail (Ran 244 tests across 13 files) — existing tests preserved (slim wrapper re-exports the same frozen primitives)
+  * Lite DB-boundary: 244 pass / 0 fail
+  * Full browser regression: 117 passed
+  * Lite browser regression: 117 passed
+- The FOUNDATION is committed: the shared pure evaluator + the internal verifier endpoint + 29 unit tests. The WIRING (Vercel adapter in api/realtime.ts, Docker path in mini-services/realtime/index.ts, conversation-join revalidation, DB-boundary parity tests, browser realtime-authz extensions) needs re-application in a follow-up — the drift removed the subagent's tracked modifications to those files.
+- PR #14 remains DRAFT (draft=True), NOT MERGED (merged=False), NO AUTO-MERGE (autoMergeRequest=None). Head = db9defe.
+- Follow-up needed: (1) re-apply verifyVisitorAccess adapter to api/realtime.ts; (2) wire Docker mini-service to call /api/realtime/verify-visitor-access; (3) add conversation-join CURRENT-policy revalidation to both paths; (4) refactor messages/route.ts to use evaluateVisitorCurrentPolicyAccess; (5) create DB-boundary parity tests; (6) extend realtime-authz.spec.ts browser tests.
