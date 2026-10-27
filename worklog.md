@@ -2024,3 +2024,30 @@ Stage Summary — VERIFIED GREEN:
 - The three-mode contact/bootstrap phase is COMPLETE. OTP START/VERIFY/RESEND + public config CLOSED. No message-send or realtime-server enforcement yet (per #22, #23 — those are the next phases).
 - PR #14 remains DRAFT (draft=True), NOT MERGED (merged=False), NO AUTO-MERGE (autoMergeRequest=None). Head = 02203f9 (59 commits ahead of main).
 - Next phase (per the user's instructions): REST message-send CURRENT-policy authorization (enforce current accessMode + policyVersion + token identityLevel + Contact tenant binding + policy transitions + legacy missing claims ONLY in anonymous mode). Do NOT start realtime enforcement until REST send enforcement is separately green.
+
+---
+Task ID: SEND-AUTH-1
+Agent: Z.ai Code (REST message-send CURRENT-policy authorization)
+Task: Implement CURRENT-policy send authorization for POST /api/widget/[slug]/messages — enforce current WidgetConfig access policy before any message persistence. Fix resolveLegacyTokenIdentity to be precise (legacy = both claims absent, accepted ONLY in anonymous mode). Add DB-boundary route tests. OTP + contact/bootstrap + public config CLOSED.
+
+Work Log:
+- Fixed resolveLegacyTokenIdentity (src/lib/widget-access-policy.ts, commit 63fcf5d): legacy = BOTH identityLevel AND policyVersion genuinely absent (undefined). Accepted ONLY in anonymous mode (-> 'anonymous'). In verified_visitor/site_user_only -> null. Partial claims (one present, one missing) OR malformed values -> null (NOT legacy). A correctly-signed modern token with malformed/partial claims must NOT silently degrade to anonymous.
+- Added CURRENT-policy send authorization to POST /api/widget/[slug]/messages (src/app/api/widget/[slug]/messages/route.ts): after rate-limit + token verification + slug/tenant binding + body parsing, the route loads the CURRENT WidgetConfig (via tenant include) + strictly parses accessMode + policyVersion (503 on missing/invalid). Inside withTenant (BEFORE domain/message-limit/conversation/message/routing/publish/AI): resolveLegacyTokenIdentity resolves the token's identityLevel; Contact revalidation (exists, tenant binding, identity class match); evaluateSendAuthorization (frozen policy semantics). On deny -> stable error (policy_unavailable 503 / policy_changed 403 / verification_required 403 / website_login_required 403 / identity_token_invalid 403) + ZERO side effects. On allow -> existing domain/message-limit/persistence/routing/publish/AI pipeline (unchanged).
+- Unit tests (tests/unit/widget-identity.test.ts): 7 new resolveLegacyTokenIdentity tests (partial/malformed rejection + valid modern identities). 619 unit total.
+- DB-boundary tests (NEW tests/db-boundary/widget-message-send-access-modes.test.ts): 30 tests exercising the REAL POST messages route against real PostgreSQL. Coverage: anonymous mode (6), verified_visitor mode (8), site_user_only mode (6), policy transitions (1 with 5 sub-asserts), corrupt policy 503 (3), nonexistent contact (1), wrong tenant/slug (2), success-path contract (3).
+
+Stage Summary — VERIFIED GREEN:
+- exact SHA: 63fcf5dc8625be292e5987a666d934f7ec770964
+- exact workflow run ID: 40580062948
+- ci: SUCCESS (619 unit pass / 0 fail / 2107 expect())
+- widget-package-qualification: SUCCESS
+- self-host-qualification: SUCCESS
+- docker-regression: SUCCESS
+  * Full DB-boundary: 244 pass / 0 fail (Ran 244 tests across 13 files) — widget-message-send-access-modes.test.ts EXECUTED in Full (30 tests)
+  * Lite DB-boundary: 244 pass / 0 fail (Ran 244 tests across 13 files) — widget-message-send-access-modes.test.ts EXECUTED in Lite (30 tests)
+  * Full browser regression: 117 passed
+  * Lite browser regression: 117 passed
+  * new send-authorization test count: 30 (anonymous 6 + verified_visitor 8 + site_user_only 6 + transitions 1 + corrupt 3 + nonexistent 1 + wrong tenant/slug 2 + success-path 3)
+- OTP + contact/bootstrap + public config CLOSED — not touched. No message-send GET history authorization change (per #14). No realtime-server enforcement (per #22, #23 — next phase). No NPM/script widget UI (per #24).
+- PR #14 remains DRAFT (draft=True), NOT MERGED (merged=False), NO AUTO-MERGE (autoMergeRequest=None). Head = 63fcf5d (60 commits ahead of main).
+- Next phase (per the user's instructions): CURRENT-policy realtime authorization (update api/realtime.ts + mini-services/realtime/index.ts + shared conversation verification). Do NOT start until REST send enforcement is separately green (it is now).
