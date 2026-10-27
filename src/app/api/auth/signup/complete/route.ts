@@ -61,7 +61,7 @@ export async function POST(req: NextRequest) {
 
       await tx.widgetConfig.create({
         data: {
-          tenantId: tenant.id, accessMode: 'anonymous', accentColor: '#E09A2B', launcherShape: 'tab', position: 'bottom-end',
+          tenantId: tenant.id, accentColor: '#E09A2B', launcherShape: 'tab', position: 'bottom-end',
           greetingTexts: { fa: 'سلام! چطور می‌تونم کمکتون کنم؟', en: 'Hi there! How can I help?' },
           defaultLocale: 'fa',
           // Widget Visitor Access Modes (feat/widget-visitor-access-modes):
