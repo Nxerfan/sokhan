@@ -1971,3 +1971,56 @@ Stage Summary — VERIFIED GREEN:
 - OTP foundation CLOSED — START/VERIFY/RESEND + OTP migration/state-machine NOT touched.
 - PR #14 remains DRAFT (draft=True), NOT MERGED (merged=False), NO AUTO-MERGE (autoMergeRequest=None). Head = 906b4bf (51 commits ahead of main, per the user's verified state).
 - Next phase (per the user's instructions): three-mode widget contact/bootstrap behavior (anonymous historical behavior, verified_visitor verification gate, site_user_only external identity gate) — separate phase, NOT mixed into this public-config commit.
+
+---
+Task ID: CONTACT-BOOTSTRAP-1
+Agent: Z.ai Code (three-mode widget contact/bootstrap — verification record)
+Task: Verify the three-mode contact/bootstrap phase (POST /api/widget/[slug]/contact) is complete + CI-green. The user's verified head (0d8322e) predates this work — the branch advanced 6 commits to 02203f9 with the three-mode contact route (commit 5b2fdfb) + follow-up regression fixes.
+
+Work Log:
+- The three-mode contact route was implemented by commit 5b2fdfb (feat(widget-contact): three-mode contact/bootstrap). Follow-up commits fixed regressions: 7a0fff4 (contact conversation-continuity assertion), 61b8144 (self-host tests — set accessMode=anonymous after signup), 930dd13/1fe8c3f/02203f9 (signup WidgetConfig accessMode=anonymous historical default — backward compat for browser+self-host regressions).
+- Verified the committed contact route at 02203f9 meets the user's 34 requirements:
+  * #1 Strict policy resolution: parseAccessMode + parsePolicyVersion; missing WidgetConfig / invalid accessMode / invalid policyVersion -> 503 policy_unavailable. No coerceAccessMode, no fallback anonymous, no policyVersion ?? 1.
+  * #2 Bearer credential transport (Authorization: Bearer <credential>); CORS already allows Authorization.
+  * #3 anonymous: historical visitor bootstrap (visitorId identity, same visitorId -> same Contact, different visitorId + same email -> different Contact, profile update, open conversation lookup, rate-limit, locale/direction). New realtime tokens carry identityLevel=anonymous + current policyVersion.
+  * #4 anonymous identity_conflict: existing (tenantId, visitorId) Contact with incompatible identity class (identifierType !== visitorId OR externalUserId !== null) -> 403 identity_conflict. No mutation of an external-user Contact into anonymous.
+  * #5 verified_visitor: no plain anonymous bootstrap (no bearer -> 403 verification_required; no token issued, no new Contact created).
+  * #6 resume verification: verifyResumeCredential(token, tenant.id, currentPolicyVersion). Failure -> 403 verification_required (no credential oracle — doesn't expose expiry/audience/tenant/tamper/stale-policy/malformed reasons).
+  * #7 DB revalidation: Contact exists, identifierType=visitorId, externalUserId=null, emailVerifiedAt !== null. Any failure -> verification_required. No repair/mutation. No frontend email/name revalidation.
+  * #8 no profile mutation during resume (no name/email/emailVerifiedAt/externalUserId/identifier update).
+  * #9 conversation continuity (existing open conversation lookup).
+  * #10 verified_contact realtime token (type=visitor, contactId, tenantId, slug, identityLevel=verified_contact, policyVersion=CURRENT).
+  * #11 site_user_only: no visitorId/email/name/username/DOM/localStorage/frontend externalUserId trust. No anonymous Contact creation. No downgrade to anonymous. No bearer -> 403 website_login_required (hard fail-closed).
+  * #12 external token verification: verifyExternalIdentityToken(token, tenant.id, currentPolicyVersion). Failure -> 403 website_login_required (no internals exposed).
+  * #13 contactId required: token must have non-empty contactId + externalUserId. Missing -> website_login_required. No create/upsert in /contact (the mint endpoint is the authority).
+  * #14 DB binding revalidation: Contact exists, identifierType=externalUser, externalUserId === token.externalUserId. Mismatch -> website_login_required. No mutation.
+  * #15 conversation continuity (same tenant + externalUserId -> same Contact via mint route).
+  * #16 external_user realtime token (identityLevel=external_user, policyVersion=CURRENT).
+  * #17 cross-credential rejection: verified_visitor rejects external tokens (verifyResumeCredential enforces type/audience/identityLevel=verified_contact); site_user_only rejects resume credentials (verifyExternalIdentityToken enforces type/audience/identityLevel=external_user). No token-shape inference.
+  * #18 policy transitions at bootstrap: anonymous->verified_visitor (old anonymous bootstrap DENIED, current resume ALLOWED); verified_visitor->site_user_only (verified resume DENIED, current external token ALLOWED); policyVersion increment invalidates old credentials (verified + external).
+  * #19 mode is authoritative (no "any sufficiently strong credential works in any mode").
+  * #20 anonymous does NOT inherit site-user history (visitorId == externalUserId -> separate Contacts; no externalUserId query from anonymous bootstrap).
+  * #21 strict tenant binding (contact.tenantId === tenant.id checked inside withTenant — defense in depth).
+  * #22 no message-send enforcement (POST /api/widget/[slug]/messages untouched).
+  * #23 no realtime-server enforcement (api/realtime.ts, mini-services/realtime untouched).
+  * #24 no NPM/script widget UI changes.
+  * #25 body validation: malformed JSON -> 400 (not a raw exception); site_user_only doesn't depend on body identity fields; authenticated modes don't let frontend fields influence the Contact.
+  * #26 response backward compat: { contactId, conversationId, realtimeToken, locale, direction }.
+- Tests: tests/db-boundary/widget-contact-access-modes.test.ts (27 tests) covering: anonymous mode (4), verified_visitor mode (8), site_user_only mode (8), policy transitions (2), corrupt policy 503 (3). Token claims verified via verifyToken (type/contactId/tenantId/slug/identityLevel/policyVersion). Reuses the withCorruptAccessMode DDL helper from widget-access-config.test.ts (no second global CHECK-drop). Cross-credential rejection + policyVersion-stale rejection proven. No message-send or realtime-server enforcement (per #22, #23).
+- CI run 40542446953 (02203f9): ALL 4 JOBS GREEN.
+
+Stage Summary — VERIFIED GREEN:
+- exact SHA: 02203f97e1ea0c609412d715bcfaf918bf85bfd8 (the actual branch head; the user's verified 0d8322e is 6 commits behind — the contact phase work advanced the branch)
+- exact workflow run ID: 40542446953
+- ci: SUCCESS
+- widget-package-qualification: SUCCESS
+- self-host-qualification: SUCCESS
+- docker-regression: SUCCESS
+  * Full DB-boundary: 214 pass / 0 fail (Ran 214 tests across 12 files) — widget-contact-access-modes.test.ts EXECUTED in Full (27 tests)
+  * Lite DB-boundary: 214 pass / 0 fail (Ran 214 tests across 12 files) — widget-contact-access-modes.test.ts EXECUTED in Lite (27 tests)
+  * Full browser regression: 117 passed
+  * Lite browser regression: 117 passed
+  * new three-mode test count: 27 (anonymous 4 + verified_visitor 8 + site_user_only 8 + policy transitions 2 + corrupt policy 3)
+- The three-mode contact/bootstrap phase is COMPLETE. OTP START/VERIFY/RESEND + public config CLOSED. No message-send or realtime-server enforcement yet (per #22, #23 — those are the next phases).
+- PR #14 remains DRAFT (draft=True), NOT MERGED (merged=False), NO AUTO-MERGE (autoMergeRequest=None). Head = 02203f9 (59 commits ahead of main).
+- Next phase (per the user's instructions): REST message-send CURRENT-policy authorization (enforce current accessMode + policyVersion + token identityLevel + Contact tenant binding + policy transitions + legacy missing claims ONLY in anonymous mode). Do NOT start realtime enforcement until REST send enforcement is separately green.
