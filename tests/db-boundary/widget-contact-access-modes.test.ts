@@ -160,15 +160,16 @@ describe('contact — anonymous mode', () => {
   test('existing open conversation returned; historical profile update behavior', async () => {
     await setMode('anonymous', 1)
     const vid = uniq('conv')
-    // First bootstrap creates the Contact + no conversation.
+    // First bootstrap creates the Contact + no conversation (conversationId null).
     const r1 = await callContact({ visitorId: vid, name: 'First' })
+    expect(r1.data.conversationId).toBeNull()
     // Create an open conversation for this Contact.
-    await withTenant(tenant.id, async () => {
-      await db.conversation.create({ data: { tenantId: tenant.id, contactId: r1.data.contactId, status: 'open', tags: [], lastMessagePreview: '' } })
+    const conv = await withTenant(tenant.id, async () => {
+      return db.conversation.create({ data: { tenantId: tenant.id, contactId: r1.data.contactId, status: 'open', tags: [], lastMessagePreview: '' }, select: { id: true } })
     })
-    // Second bootstrap returns the existing open conversation.
+    // Second bootstrap returns the EXISTING open conversation.
     const r2 = await callContact({ visitorId: vid, name: 'Second' })
-    expect(r2.data.conversationId).toBe(r1.data.conversationId ?? null)
+    expect(r2.data.conversationId).toBe(conv.id)
   })
 
   test('identity_conflict: existing external-user Contact with a colliding identifier -> 403', async () => {
