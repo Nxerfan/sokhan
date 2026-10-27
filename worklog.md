@@ -1939,3 +1939,35 @@ Stage Summary — VERIFIED GREEN:
 - OTP foundation CLOSED — START/VERIFY/RESEND + OTP migration/state-machine NOT touched.
 - PR #14 remains DRAFT (draft=True), NOT MERGED (merged=False), NO AUTO-MERGE (autoMergeRequest=None). Head = 01b0fce (50 commits ahead of main).
 - Next phase (per the user's instructions): public /api/widget/[slug]/config access-policy wiring (separate commit; do NOT mix into this access-config commit).
+
+---
+Task ID: PUBLIC-CONFIG-1
+Agent: Z.ai Code (public widget access-policy config wiring)
+Task: Wire the REAL access policy into the public widget config route (src/app/api/widget/[slug]/config/route.ts) — additive top-level fields from the stored WidgetConfig (NOT getEffectiveWidgetConfig), fail-closed 503 on missing/invalid policy, never fabricate anonymous. Extract shared validators so publicAccessConfig() validates persisted login fields (legacy unsafe data defense) using the SAME contract as dashboard PATCH. No duplicated validation logic. OTP CLOSED.
+
+Work Log:
+- Extracted shared validators into src/lib/widget-access-policy.ts (commit 906b4bf): isValidLoginUrl, isValidLoginButtonLabel (NEW — extracted from the access route's inline label validation), isValidReturnUrlParam, isValidIdentityEndpointPath + constants (LOGIN_URL_MAX, LOGIN_BUTTON_LABEL_MAX, LOGIN_RETURN_URL_PARAM_MAX, IDENTITY_ENDPOINT_PATH_MAX, ALLOWED_PATCH_KEYS, CONTROL_CHAR_RE). Refactored the dashboard access-config route (src/app/api/widget-config/access/route.ts) to import them (removed the local copies) — semantics UNCHANGED (the 35 access-config tests remain green). publicAccessConfig() now uses the same validators to validate the persisted login fields.
+- Extended publicAccessConfig() (#4): it now strictly parses accessMode + policyVersion AND validates the persisted loginUrl/loginButtonLabel/loginReturnUrlParam/identityEndpointPath against the SAME contract as dashboard PATCH. A legacy unsafe value fail-closes (returns null -> the public route returns 503 policy_unavailable). The unsafe value is NEVER returned to the browser, NEVER coerced.
+- Wired the real access policy into the public config route (#1, #2, #3): after the existing security order (tenant slug lookup -> domain validation -> free trial expiry -> getEffectiveWidgetConfig -> 404 not_configured), the route fetches the STORED WidgetConfig (via globalDb — the public route runs without a tenant session, so the fail-closed db proxy can't read the tenant-scoped WidgetConfig directly) + calls publicAccessConfig(). Missing WidgetConfig -> 503 policy_unavailable; publicAccessConfig returns null -> 503 policy_unavailable. Additive top-level response fields: accessMode, policyVersion, loginUrl, loginButtonLabel, loginReturnUrlParam, identityEndpointPath. The visual config (locked for free, custom for paid) comes from getEffectiveWidgetConfig; the access policy comes from the STORED WidgetConfig — INDEPENDENT (a FREE tenant may have locked Sukhan visuals + accessMode=site_user_only). Never force anonymous because of the free plan. Never fabricates a fallback. No coerceAccessMode/coerceIdentityLevel. No integration-secret leak (only the explicitly safe policy fields are selected + serialized). Preserved: tenant slug lookup, domain validation (domain_not_allowed), free trial expiry (trial_expired), CORS, effective visual config, realtime config, WidgetDomain behavior.
+- Tests:
+  * Unit (tests/unit/widget-identity.test.ts): 7 new publicAccessConfig tests — returns null for invalid accessMode/policyVersion + unsafe loginUrl (//, javascript:, data:, backslash, oversized)/loginButtonLabel (empty/whitespace/oversized)/loginReturnUrlParam (& = ? # whitespace/oversized)/identityEndpointPath (absolute, //, backslash, query/hash, oversized); exact safe values for a valid config; null login fields allowed. 612 unit total (was 605).
+  * DB-boundary (tests/db-boundary/widget-access-config.test.ts): public route — three modes (anonymous/verified_visitor/site_user_only with login fields, no integration secret required); customization-lock independence (FREE: locked visuals isLocked/poweredBy + stored accessMode NOT anonymous; PAID: custom visuals + same policy); fail-closed matrix (missing WidgetConfig, invalid accessMode via the file's existing withCorruptAccessMode DDL dance, invalid policyVersion, unsafe loginUrl/label/param/path); no-secret-leak (integrationSecretHash set -> response has NO secret/hash + safe policy fields). Reuses the file's withCorruptAccessMode (no second global CHECK-drop helper — avoids racing DDL across concurrent test files).
+  * Cross-origin browser regression (tests/widget-external-origin.spec.ts): a cross-origin customer page (port 8082) fetches the Sukhan public config (port 81) + observes accessMode + policyVersion + realtime (CORS readable, Access-Control-Allow-Origin: *); no secret leak.
+- Local gate PASS: prisma validate (valid), typecheck clean, lint 0 errors, unit 612/0 (with NIXIFY_MOCK='' override — the local .env has NIXIFY_MOCK=true as a drift artifact; CI's .env is gitignored so CI is unaffected).
+- CI run 40514332387 (906b4bf): ALL 4 JOBS GREEN.
+
+Stage Summary — VERIFIED GREEN:
+- exact SHA: 906b4bfeb4aac3479d9c6fa28e18261390ab8600
+- exact workflow run ID: 40514332387
+- ci: SUCCESS (612 unit pass / 0 fail / 2100 expect())
+- widget-package-qualification: SUCCESS
+- self-host-qualification: SUCCESS
+- docker-regression: SUCCESS
+  * Full DB-boundary: 187 pass / 0 fail (Ran 187 tests across 11 files) — widget-access-config.test.ts EXECUTED in Full (35 access-config + 13 public-config tests)
+  * Lite DB-boundary: 187 pass / 0 fail (Ran 187 tests across 11 files) — widget-access-config.test.ts EXECUTED in Lite
+  * Full browser regression: 117 passed (incl. the cross-origin public config test)
+  * Lite browser regression: 117 passed (incl. the cross-origin public config test)
+- The 35 existing access-config tests remain green (shared-validator refactor did NOT change dashboard semantics). The public config route exposes the REAL stored access policy additively + fail-closes on missing/invalid/unsafe. No secret leak. Cross-origin CORS regression green.
+- OTP foundation CLOSED — START/VERIFY/RESEND + OTP migration/state-machine NOT touched.
+- PR #14 remains DRAFT (draft=True), NOT MERGED (merged=False), NO AUTO-MERGE (autoMergeRequest=None). Head = 906b4bf (51 commits ahead of main, per the user's verified state).
+- Next phase (per the user's instructions): three-mode widget contact/bootstrap behavior (anonymous historical behavior, verified_visitor verification gate, site_user_only external identity gate) — separate phase, NOT mixed into this public-config commit.
