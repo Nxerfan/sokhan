@@ -284,8 +284,11 @@ async function generateIntegrationSecret(slug: string, cookie: string): Promise<
  *  across the node→browser boundary — page.evaluate throws). The widget
  *  dispatches a `sukhan:login-required` window CustomEvent on entry; tests
  *  detect login-required via that event (page.exposeFunction + a window
- *  listener), not via a callback. */
-async function initWidgetOnCustomerPage(page: Page, slug: string, opts?: Record<string, unknown>): Promise<void> {
+ *  listener), not via a callback.
+ *  `beforeInit` runs AFTER page.goto + loadState but BEFORE the widget
+ *  evaluate — use it to install window event listeners (a listener installed
+ *  before goto would be destroyed by the navigation). */
+async function initWidgetOnCustomerPage(page: Page, slug: string, opts?: Record<string, unknown>, hooks?: { beforeInit?: () => Promise<void> }): Promise<void> {
   await page.goto(`${CUSTOMER_ORIGIN}/customer.html`)
   await page.waitForLoadState('domcontentloaded')
   // Strip any function-valued opts (onLoginRequired) — they cannot be
@@ -293,6 +296,7 @@ async function initWidgetOnCustomerPage(page: Page, slug: string, opts?: Record<
   // on window instead (the public integration surface).
   const safeOpts: Record<string, unknown> = {}
   if (opts) for (const [k, v] of Object.entries(opts)) if (typeof v !== 'function') safeOpts[k] = v
+  if (hooks?.beforeInit) await hooks.beforeInit()
   await page.evaluate(async ({ sukhanOrigin, slug, opts }) => {
     const mod = await import(`${window.location.origin}/sukhan-widget.js`)
     const inst = mod.initSukhan({ apiKey: slug, apiUrl: sukhanOrigin, ...opts })
@@ -368,11 +372,13 @@ test.describe('Widget NPM identity integration (three access modes + SPA surface
 
     const page = await ctx.newPage()
     const loginRequired = await wireLoginRequiredEvent(page)
-    await loginRequired.install()
-    await initWidgetOnCustomerPage(page, slug)
+    // Install the window listener AFTER goto (inside initWidgetOnCustomerPage
+    // via beforeInit) — a listener installed before goto is destroyed by the
+    // navigation to the customer page.
+    await initWidgetOnCustomerPage(page, slug, {}, { beforeInit: loginRequired.install })
     await page.waitForTimeout(2500)
 
-    // login-required UI rendered.
+    // login-required UI rendered (configured 'Sign in' label, since loginUrl is set).
     const hasLoginText = await page.evaluate(() => document.body.textContent?.includes('Sign in') ?? false)
     expect(hasLoginText, 'login-required UI with configured label should render').toBe(true)
     // onLoginRequired fired (via the sukhan:login-required window event).
@@ -430,9 +436,14 @@ test.describe('Widget NPM identity integration (three access modes + SPA surface
     const page = await ctx.newPage()
     await initWidgetOnCustomerPage(page, slug)
     await page.waitForTimeout(2500)
-    // Start logged out → login-required.
-    let loginText = await page.evaluate(() => document.body.textContent ?? '')
-    expect(loginText).toContain('Sign in')
+    // Start logged out → login-required (widget NOT chat-ready). The widget's
+    // mount() always creates the input bar, so use the identity-card presence
+    // (rendered only in login-required / integration-unavailable state) as the
+    // "not ready" signal. #43 does not set loginUrl, so no login LINK renders —
+    // only the localized login-required title; asserting a specific label would
+    // be locale-dependent.
+    const cardBefore = await page.evaluate(() => !!document.querySelector('.sk-id-card'))
+    expect(cardBefore, 'logged-out site_user_only must show the login-required card').toBe(true)
     // Flip the customer server session to logged-in.
     state.session = { loggedIn: true, externalUserId: 'ext_refresh', name: 'Refresh User' }
     // Call refreshIdentity WITHOUT reloading the page.
@@ -441,12 +452,14 @@ test.describe('Widget NPM identity integration (three access modes + SPA surface
       return inst?.refreshIdentity()
     })
     await page.waitForTimeout(4500)
-    // Widget becomes ready — login-required UI disappears, send becomes available.
+    // Widget becomes ready — the login-required card is gone (clearIdentityState
+    // re-renders the message list) + the chat input is present.
     const ready = await page.evaluate(() => {
+      const cardGone = !document.querySelector('.sk-id-card')
       const input = document.querySelector('.sk-input input') as HTMLInputElement | null
-      return !!input
+      return cardGone && !!input
     })
-    expect(ready, 'after refreshIdentity the chat input should be available (logged-in)').toBe(true)
+    expect(ready, 'after refreshIdentity the login-required card should be gone + chat ready').toBe(true)
     await ctx.close()
   })
 
