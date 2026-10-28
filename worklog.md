@@ -2098,3 +2098,75 @@ Stage Summary:
 - Visitor authorization is now wired end-to-end across BOTH deployment topologies: Vercel realtime function uses the adapter directly (in-process — no HTTP hop), Docker realtime service calls the internal verifier endpoint (cross-process HTTP — same shared evaluator). Both enforce CURRENT policy at connect (io.use middleware) AND at conversation:join (revalidation after a potential policy transition since connect).
 - Security contract honored: visitor tokens are revalidated against the CURRENT tenant policy on every connect + every room join — a policy transition (e.g. anonymous -> site_user_only) evicts a previously-anonymous visitor on their next conversation:join attempt, even if their signed token hasn't expired. The visitor's policyVersion claim is compared against the tenant's CURRENT WidgetConfig.policyVersion; a stale claim fails with `policy_changed`. Contact identity class is revalidated against the actual DB row (a token claiming `verified_contact` for a Contact missing `emailVerifiedAt` fails with `identity_token_invalid`).
 - DB-boundary tests are PARITY tests — they prove the Vercel adapter and the Docker endpoint agree on every documented decision, so the realtime behavior is identical across the two deployment topologies (a visitor who is allowed in Vercel is allowed in Docker and vice versa).
+
+## NPM Widget Identity Integration (PR #14 — feat/widget-visitor-access-modes)
+
+Phase: NPM widget identity integration (anonymous / verified_visitor /
+site_user_only) — packages/widget-npm only. Backend visitor-access policy
+work (OTP START/VERIFY/RESEND, access config, public config, contact
+bootstrap, REST send authorization, realtime Vercel+Docker authorization,
+live policy transition) is CLOSED at ef9ffd76 and is NOT modified by this
+phase.
+
+NPM package changes (commit c30cfce → 000844c):
+- types.ts: additive WidgetConfig access-policy fields (accessMode,
+  policyVersion, loginUrl, loginButtonLabel, loginReturnUrlParam,
+  identityEndpointPath); SukhanOptions gains identityEndpoint +
+  onLoginRequired; SukhanInstance gains setIdentity(token|null) +
+  refreshIdentity(); new types AccessMode, SukhanLoginRequiredDetail,
+  OtpStart/Verify/ResendResponse. No fallback modes — fail closed.
+- api.ts: SukhanApiError (safe code from JSON {error:string}; raw body
+  never leaked — malformed → 'unknown'); bootstrapContact(bearer) for
+  verified_visitor + site_user_only (same /contact endpoint, Bearer
+  credential); startOtp/verifyOtp/resendOtp; sendMessage throws
+  SukhanApiError on policy denials.
+- identity.ts (NEW): pure identity-endpoint resolver (same-origin only;
+  cross-origin / // / javascript: / data: / backslash rejected) + bounded
+  (5s AbortController) GET fetcher (credentials same-origin, Accept JSON,
+  NO Sukhan secret / externalUserId / visitorId / Contact id sent) +
+  strict response parser; timeout/network/non-2xx/malformed → null
+  (integration_unavailable). Token is MEMORY-ONLY.
+- socket.ts: onAuthorizationError hook; visitor policy connect_errors
+  delegate ONCE (single-flight); successful recovery reconnects; null/throw
+  recovery is terminal (no infinite loop). invalid_token/no_token refresh
+  + membership terminal preserved.
+- widget.ts: identity state machine; mode-aware bootstrap; verified_visitor
+  resume storage (separate localStorage key, opaque) + OTP UI + resend
+  (single-flight); site_user_only customer identity fetch / setIdentity;
+  login-required UI + onLoginRequired callback + sukhan:login-required
+  window CustomEvent (emitted once); setIdentity/refreshIdentity (SPA
+  user-switch / logout, generation guard); mode-aware onTokenExpired;
+  authorizationRecovery hook; sendMessage restores the typed message on
+  policy denial (never silently lost). PR5/PR9 anonymous path preserved
+  verbatim.
+- index.ts: exports setIdentity/refreshIdentity + new types.
+
+Tests:
+- tests/unit/widget-npm-api.test.ts (16), widget-npm-identity.test.ts (32),
+  widget-npm-socket-authz.test.ts (13): 64 unit tests, all pass.
+- tests/unit/npm-package-smoke.test.ts: extended to assert setIdentity +
+  refreshIdentity on the instance + SukhanApiError export + dist/identity.*
+  + new type exports + README not-published.
+- tests/widget-npm-identity.spec.ts (NEW browser spec, CI docker-regression
+  Full+Lite): 7 tests — #37 anonymous regression, #42 site_user_only
+  logged-out (login-required UI + sukhan:login-required event + no
+  anonymous Contact), #46 endpoint failure (timeout/malformed/
+  auth_true_no_token/500 → fail-closed), #43 refreshIdentity (SPA flip,
+  no page reload), #45 setIdentity user-switch (A history disappears; B
+  cannot see A), #53 credential leak (integration secret NOT in any
+  browser artifact), #47 login URL + return param. All 7 pass in BOTH
+  Full + Lite.
+- tests/realtime-authz.spec.ts: connectAndWait default timeout 5s→8s
+  (test-only) — absorbs CI timing variance under the longer browser suite.
+
+Local gate: root typecheck CLEAN; root lint CLEAN (0 errors); package
+typecheck+build CLEAN; npm pack CLEAN (18 files, 48.8 kB); full unit suite
+714/0 in CI (680/714 locally — 34 pre-existing env-isolation failures in
+widget-identity.test.ts, NOT touched by this phase; pass 82/82 standalone
+with JWT_SECRET sourced).
+
+CI gate (exact-SHA): ci SUCCESS, docker-regression SUCCESS (Full 129/129 +
+Lite 129/129 incl. the 7 NPM identity browser tests), self-host-qualification
+SUCCESS, widget-package-qualification SUCCESS. NO new runtime dependencies
+(dependencies: {} unchanged). PR #14 remains DRAFT / NOT MERGED /
+NO AUTO-MERGE. Next phase: script-widget identity parity.
