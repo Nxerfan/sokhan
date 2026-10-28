@@ -743,9 +743,22 @@ test.describe('Live policy transition — anonymous -> verified_visitor', () => 
       return r.conversationId || r.message?.conversationId
     }
     const convA = await makeConv(`msgA-${stamp}`)
-    const convB = await makeConv(`msgB-${stamp}`)
     expect(convA).toBeTruthy()
+    // Close conversation A so the next message creates a NEW conversation B.
+    // Without this, the messages route reuses the open conversation → convA === convB.
+    const closeRes = await page.evaluate(async (convId) => {
+      const r = await fetch(`/api/conversations/${convId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'closed' }),
+      })
+      return { ok: r.ok, status: r.status }
+    }, convA)
+    expect(closeRes.ok, `Failed to close conversation A: ${closeRes.status}`).toBe(true)
+    const convB = await makeConv(`msgB-${stamp}`)
     expect(convB).toBeTruthy()
+    // MANDATORY: A and B must be genuinely distinct conversations.
+    expect(convB).not.toBe(convA)
 
     // 3. Connect visitor socket
     const visitorHandle = (await connectSocket(page, visitorToken)).socket
@@ -790,17 +803,10 @@ test.describe('Live policy transition — anonymous -> verified_visitor', () => 
 
     // 7. CHANGE POLICY: anonymous -> verified_visitor (policyVersion increments)
     await setAccessMode(page, 'verified_visitor')
-    // Verify the PATCH is committed by reading back the WidgetConfig via the
-    // dashboard GET route. The verify-visitor-access endpoint reads the SAME DB,
-    // so if the GET sees 'verified_visitor', the endpoint should too.
-    const policyCheck = await page.evaluate(async () => {
-      const r = await fetch('/api/widget-config/access')
-      return r.json()
-    })
-    if (policyCheck.accessMode !== 'verified_visitor') {
-      throw new Error(`Policy change not visible: expected verified_visitor, got ${policyCheck.accessMode} (pv=${policyCheck.policyVersion})`)
-    }
-    await page.waitForTimeout(3000)
+    // setAccessMode already checks the PATCH response (throws on failure).
+    // No arbitrary sleep — the DB commit is synchronous; the verify-visitor-access
+    // endpoint reads the same DB. A small event-registration delay is inside the
+    // Promise.all pattern below.
 
     // 8. Old visitor socket attempts to join conversation B — run the
     // visitor's join+listen + the agent's typing emit IN PARALLEL.
@@ -815,7 +821,7 @@ test.describe('Live policy transition — anonymous -> verified_visitor', () => 
       }),
       (async () => {
         // Wait for the listener + join to register, then emit typing.
-        await new Promise(r => setTimeout(r, 1500))
+        await new Promise(r => setTimeout(r, 500))
         await agentPage.evaluate(({ handle, convB }) => {
           const socket = (window as unknown as Record<string, SocketLike>)[handle]
           socket.emit('typing:start', { conversationId: convB })
