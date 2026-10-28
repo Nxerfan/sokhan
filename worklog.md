@@ -2170,3 +2170,74 @@ Lite 129/129 incl. the 7 NPM identity browser tests), self-host-qualification
 SUCCESS, widget-package-qualification SUCCESS. NO new runtime dependencies
 (dependencies: {} unchanged). PR #14 remains DRAFT / NOT MERGED /
 NO AUTO-MERGE. Next phase: script-widget identity parity.
+
+## Script Widget Identity Parity (PR #14 — feat/widget-visitor-access-modes)
+
+Phase: script-tag widget identity parity (anonymous / verified_visitor /
+site_user_only) for BOTH script endpoints. NPM identity integration is
+CLOSED at 24920cb (unmodified). Backend visitor-access policy CLOSED at
+ef9ffd76 (unmodified). Scope: ONLY the two script route handlers + a shared
+runtime module + script-identity tests.
+
+Shared runtime (src/lib/widget-script-identity.ts — NEW):
+  - IDENTITY_HELPERS_JS: PURE functions (security-critical contract shared
+    verbatim by BOTH scripts) — __sk_resolveIdentityEndpoint (same-origin
+    only), __sk_parseIdentityResponse (strict), __sk_fetchIdentity (bounded
+    5s AbortController; no Sukhan secret/externalUserId/visitorId sent),
+    __sk_buildLoginUrl (relative → CUSTOMER origin; return param via
+    URLSearchParams), __sk_dispatchLoginRequired (window CustomEvent, safe
+    detail), __sk_safeApiCode (parse {error:string}; never leaks body).
+  - IDENTITY_STATEFUL_JS: stateful identity logic injected into both scripts'
+    IIFE. Uses common closure vars + typeof guards (slug has stopPolling;
+    v1 has a top-level pollTimer). Identity state kept SEPARATE (__sk_identity)
+    so the existing merge pipeline / PR5/PR9 reliability is untouched.
+    Mode-aware bootstrap; verified_visitor resume (separate localStorage key
+    sukhan_verified_resume_<slug>) + OTP UI (start/verify/resend, single-
+    flight) + canonical authenticated /contact bootstrap; site_user_only
+    customer identity fetch (data-identity-endpoint override for v1) + login-
+    required UI + onLoginRequired callback + sukhan:login-required event;
+    window.SukhanWidget.setIdentity/refreshIdentity (SPA user-switch / logout,
+    generation guard); mode-aware token refresh; __sk_authorizationRecovery
+    (socket policy connect_error → single-flight config refresh + re-bootstrap);
+    __sk_clearIdentityState (re-renders so previous identity's bubbles vanish).
+
+Both script routes (src/app/api/widget/[slug]/script/route.ts +
+src/app/api/widget/v1/sukhan.js/route.ts): inject the shared runtime + 4
+targeted edits each (import; inject before var state; mount() identifyVisitor()
+→ __sk_bootstrap(); connect_error refreshVisitorToken → __sk_modeAwareRefreshToken
++ policy-reason delegation; sendMessage policy-error handling → trigger
+recovery, NO auto-resend). buildScript exported from both (for the syntax
+test). Endpoint contracts unchanged (Cache-Control public 60s; no per-user
+identity baked).
+
+Tests:
+- tests/unit/widget-script-syntax.test.ts (NEW, 10 tests): imports buildScript
+  from both routes + validates the generated JS PARSES (new Function) for
+  docker/vercel/explicit-rt/nopoll param variants + asserts no baked secrets.
+- tests/widget-script-identity.spec.ts (NEW browser, CI docker-regression
+  Full+Lite, 11 tests × 2 suites): exercises the ACTUAL generated script
+  responses for BOTH variants — #32 anonymous regression, #37 logged-out
+  site_user_only (login-required UI + event + no anonymous Contact), #38 SPA
+  refreshIdentity, #39 setIdentity user-switch isolation, #40 logout, #41
+  endpoint security (timeout/malformed/auth_true_no_token/500 fail-closed),
+  #42 credential leak, #24 login URL + return param, #33 verified_visitor
+  OTP/resume (START + mock 123456 VERIFY + resume stored + chat ready). All
+  11 pass in BOTH Full + Lite.
+- tests/realtime-authz.spec.ts: connectAndWait default timeout 8s→12s
+  (test-only) — absorbs CI timing variance under the longer browser suite
+  (the script-identity spec adds ~90s of customer-server + socket load).
+- .github/workflows/ci.yml: wired tests/widget-script-identity.spec.ts into
+  the Full + Lite browser spec lists.
+
+Local gate: root typecheck CLEAN (after prisma generate); root lint CLEAN
+(0 errors); prisma generate OK; script syntax validation 10/10 (both routes
+parse for all param variants); full unit suite 663/724 locally (61 pre-existing
+env-isolation failures in nixify-client + widget-identity; pass 116/116
+standalone with NIXIFY_MOCK='' + JWT_SECRET sourced; CI handles env).
+
+CI gate (exact-SHA f420b57 + the 8s→12s connectAndWait bump): ci SUCCESS,
+docker-regression SUCCESS (Full 140/140 + Lite 140/140 incl. the 11
+script-identity browser tests × 2 = 22 ✓), self-host-qualification SUCCESS,
+widget-package-qualification SUCCESS. NO backend changes. NO NPM changes. NO
+dashboard UI. NO docs. PR #14 remains DRAFT / NOT MERGED / NO AUTO-MERGE.
+Next phase: Dashboard Access & Identity UI.

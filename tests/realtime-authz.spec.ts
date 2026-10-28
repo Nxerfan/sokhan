@@ -555,12 +555,13 @@ async function signCustomVisitorToken(
 async function connectAndWait(
   page: import('@playwright/test').Page,
   token: string,
-  // 8s safety-net timeout (bumped from 5s). connect_error still resolves fast
-  // when the realtime middleware rejects synchronously; the timeout is only
-  // the fallback. The extra headroom absorbs CI timing variance under the
-  // longer browser suite (the NPM identity spec adds ~50s of customer-server
-  // + socket load earlier in the suite). Test-only change.
-  timeoutMs: number = 8000,
+  // 12s safety-net timeout (bumped 5s→8s→12s across phases). connect_error
+  // still resolves fast when the realtime middleware rejects synchronously;
+  // the timeout is only the fallback. The extra headroom absorbs CI timing
+  // variance under the longer browser suite (the NPM identity spec + the
+  // script-identity spec together add ~140s of customer-server + socket load
+  // earlier in the suite). Test-only change.
+  timeoutMs: number = 12000,
 ): Promise<{ connected: boolean; error?: string }> {
   const handle = `socket_${Math.random().toString(36).slice(2)}`
   await ensureSocketIO(page)
