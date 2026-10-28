@@ -1275,6 +1275,17 @@ export class SukhanWidget implements SukhanInstance {
     }
     this.otpRequest = null
     this.resendInFlight = false
+    // Re-render the message list so the PREVIOUS identity's message bubbles
+    // disappear from the DOM immediately (SPA user-switch / logout safety).
+    // Without this, clearIdentityState clears state.messages but leaves the
+    // old bubbles rendered until the new identity's bootstrap re-renders —
+    // a race where the old identity's history is briefly visible to the new
+    // identity. renderMessages() is a no-op if bodyEl does not exist yet.
+    try {
+      this.renderMessages()
+    } catch {
+      // ignore — bodyEl may not exist pre-mount
+    }
     // NOTE: memoryIdentityToken is cleared on logout (setIdentity(null)) but
     // PRESERVED across a refresh/bootstrap re-entry so site_user_only can
     // re-use a still-valid token. Callers that must clear it do so explicitly.

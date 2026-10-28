@@ -279,18 +279,44 @@ async function generateIntegrationSecret(slug: string, cookie: string): Promise<
   return data.rawSecret as string
 }
 
-/** Load the customer page + initialize the NPM widget with the given options. */
+/** Load the customer page + initialize the NPM widget with the given options.
+ *  `onLoginRequired` is NEVER passed via opts (a function is not serializable
+ *  across the node→browser boundary — page.evaluate throws). The widget
+ *  dispatches a `sukhan:login-required` window CustomEvent on entry; tests
+ *  detect login-required via that event (page.exposeFunction + a window
+ *  listener), not via a callback. */
 async function initWidgetOnCustomerPage(page: Page, slug: string, opts?: Record<string, unknown>): Promise<void> {
   await page.goto(`${CUSTOMER_ORIGIN}/customer.html`)
   await page.waitForLoadState('domcontentloaded')
-  // The widget bundle is an ES module (dist/index.js uses `export`). Load it
-  // via a dynamic import() in the browser — do NOT addScriptTag (a classic
-  // <script> would throw a syntax error on the `export` statements).
+  // Strip any function-valued opts (onLoginRequired) — they cannot be
+  // serialized to the browser. The widget dispatches sukhan:login-required
+  // on window instead (the public integration surface).
+  const safeOpts: Record<string, unknown> = {}
+  if (opts) for (const [k, v] of Object.entries(opts)) if (typeof v !== 'function') safeOpts[k] = v
   await page.evaluate(async ({ sukhanOrigin, slug, opts }) => {
     const mod = await import(`${window.location.origin}/sukhan-widget.js`)
     const inst = mod.initSukhan({ apiKey: slug, apiUrl: sukhanOrigin, ...opts })
     ;(window as unknown as { __sukhan: unknown }).__sukhan = inst
-  }, { sukhanOrigin: SUKHAN_ORIGIN, slug, opts: opts ?? {} })
+  }, { sukhanOrigin: SUKHAN_ORIGIN, slug, opts: safeOpts })
+}
+
+/** Wire a node-side flag to the `sukhan:login-required` window event.
+ *  Returns [flag, installListener] — call installListener() on the page
+ *  BEFORE initWidgetOnCustomerPage so the listener is in place when the
+ *  widget dispatches the event. */
+async function wireLoginRequiredEvent(page: Page): Promise<{ fired: () => boolean; install: () => Promise<void> }> {
+  let didFire = false
+  await page.exposeFunction('__sukhanLoginRequiredBridge', () => { didFire = true })
+  return {
+    fired: () => didFire,
+    install: async () => {
+      await page.evaluate(() => {
+        window.addEventListener('sukhan:login-required', () => {
+          ;(window as unknown as { __sukhanLoginRequiredBridge?: () => void }).__sukhanLoginRequiredBridge?.()
+        })
+      })
+    },
+  }
 }
 
 test.describe('Widget NPM identity integration (three access modes + SPA surface)', () => {
@@ -341,28 +367,16 @@ test.describe('Widget NPM identity integration (three access modes + SPA surface
     state.session = { loggedIn: false, externalUserId: 'ext_lo' }
 
     const page = await ctx.newPage()
-    let loginRequiredFired = false
-    await page.exposeFunction('__onLoginRequired', () => { loginRequiredFired = true })
-    await initWidgetOnCustomerPage(page, slug, {
-      onLoginRequired: () => { (window as unknown as { __onLoginRequired?: () => void }).__onLoginRequired?.() },
-    })
-    await page.waitForTimeout(1500)
+    const loginRequired = await wireLoginRequiredEvent(page)
+    await loginRequired.install()
+    await initWidgetOnCustomerPage(page, slug)
+    await page.waitForTimeout(2500)
 
     // login-required UI rendered.
     const hasLoginText = await page.evaluate(() => document.body.textContent?.includes('Sign in') ?? false)
     expect(hasLoginText, 'login-required UI with configured label should render').toBe(true)
-    // onLoginRequired fired + window CustomEvent dispatched.
-    expect(loginRequiredFired, 'onLoginRequired callback should fire').toBe(true)
-    const windowEventFired = await page.evaluate(() => {
-      let fired = false
-      window.addEventListener('sukhan:login-required', () => { fired = true })
-      return fired // may be true already if it fired before listener; check via a stored flag
-    })
-    // The event is dispatched on window on entry. We can't easily assert it
-    // retroactively; instead assert the callback fired (above) which is the
-    // primary signal. The window event is best verified by a fresh listener
-    // + a re-trigger, covered in the refreshIdentity test below.
-    expect(windowEventFired).toBe(false) // no event after we attached (expected)
+    // onLoginRequired fired (via the sukhan:login-required window event).
+    expect(loginRequired.fired(), 'onLoginRequired / sukhan:login-required should fire').toBe(true)
     // NO Contact created from a frontend visitorId (no anonymous bootstrap).
     const ls = await page.evaluate(() => Object.keys(localStorage))
     expect(ls.some((k) => k.startsWith('sukhan_visitor_')), 'must NOT create an anonymous visitorId Contact').toBe(false)
@@ -382,7 +396,9 @@ test.describe('Widget NPM identity integration (three access modes + SPA surface
       state.failureMode = mode
       const page = await ctx.newPage()
       await initWidgetOnCustomerPage(page, slug)
-      await page.waitForTimeout(2000)
+      // timeout mode: the identity fetch aborts at 5s — wait long enough for
+      // the fail-closed UI to render. Other modes resolve immediately.
+      await page.waitForTimeout(mode === 'timeout' ? 6500 : 2500)
       // Must NOT bootstrap an anonymous Contact.
       const ls = await page.evaluate(() => Object.keys(localStorage))
       expect(ls.some((k) => k.startsWith('sukhan_visitor_')), `failure mode ${mode}: must NOT create anonymous Contact`).toBe(false)
@@ -413,7 +429,7 @@ test.describe('Widget NPM identity integration (three access modes + SPA surface
 
     const page = await ctx.newPage()
     await initWidgetOnCustomerPage(page, slug)
-    await page.waitForTimeout(1200)
+    await page.waitForTimeout(2500)
     // Start logged out → login-required.
     let loginText = await page.evaluate(() => document.body.textContent ?? '')
     expect(loginText).toContain('Sign in')
@@ -424,7 +440,7 @@ test.describe('Widget NPM identity integration (three access modes + SPA surface
       const inst = (window as unknown as { __sukhan?: { refreshIdentity: () => Promise<void> } }).__sukhan
       return inst?.refreshIdentity()
     })
-    await page.waitForTimeout(2000)
+    await page.waitForTimeout(4500)
     // Widget becomes ready — login-required UI disappears, send becomes available.
     const ready = await page.evaluate(() => {
       const input = document.querySelector('.sk-input input') as HTMLInputElement | null
@@ -455,7 +471,7 @@ test.describe('Widget NPM identity integration (three access modes + SPA surface
       return true
     })
     expect(sentA).toBe(true)
-    await page.waitForTimeout(1500)
+    await page.waitForTimeout(2500)
 
     // Switch to User B via setIdentity. The test customer server mints a B token.
     state.session = { loggedIn: true, externalUserId: 'ext_user_b', name: 'User B' }
@@ -466,7 +482,7 @@ test.describe('Widget NPM identity integration (three access modes + SPA surface
       const inst = (window as unknown as { __sukhan?: { setIdentity: (t: string | null) => Promise<void> } }).__sukhan
       await inst?.setIdentity(token)
     }, bToken)
-    await page.waitForTimeout(2000)
+    await page.waitForTimeout(4500)
     // B cannot see A's history ("hello from A" must NOT be in the DOM).
     const bodyText = await page.evaluate(() => document.body.textContent ?? '')
     expect(bodyText, 'B must NOT see A message history').not.toContain('hello from A')
