@@ -2241,3 +2241,67 @@ script-identity browser tests × 2 = 22 ✓), self-host-qualification SUCCESS,
 widget-package-qualification SUCCESS. NO backend changes. NO NPM changes. NO
 dashboard UI. NO docs. PR #14 remains DRAFT / NOT MERGED / NO AUTO-MERGE.
 Next phase: Dashboard Access & Identity UI.
+
+## Dashboard Access & Identity UI (PR #14 — feat/widget-visitor-access-modes)
+
+Phase: dashboard Widget → Access & Identity tab. NPM identity (24920cb),
+script-widget identity parity (3a2a6a8), backend CURRENT-policy enforcement
+(ef9ffd76) all CLOSED — none modified. Scope: ONLY the dashboard UI + tests.
+
+NEW component (src/components/dashboard/views/widget-access-identity.tsx):
+  - Loads GET /api/widget-config/access (503 → fail-closed config error, NO
+    anonymous fallback; 401/403 → safe messages; independent scoped loading/
+    error state + retry). Access policy is INDEPENDENT from the customization
+    plan-lock — never disabled on Free, never forces anonymous.
+  - Three keyboard-accessible mode cards (radio semantics, aria-checked):
+    Verified visitor (Recommended badge — the accepted NEW-row default),
+    Site user only, Anonymous (amber warning). Draft state + explicit Save
+    (one intentional PATCH; empty optional fields sent as null; mode change
+    requires a confirmation dialog; policyVersion read-only display from the
+    server response).
+  - Site-user configuration section (identityEndpointPath, loginUrl,
+    loginButtonLabel, loginReturnUrlParam) + setup-status checklist + the SPA
+    sukhan:login-required caveat. Integration secret management via the
+    DEDICATED API (Generate / Rotate / Revoke, each with confirmation; raw
+    secret shown EXACTLY ONCE in a memory-only reveal card — Copy + Dismiss,
+    NEVER persisted; no auto-revoke on mode change). Integration readiness
+    check (TRUTHFUL — NO SSRF: re-reads Sukhan-side state only, sends NO
+    secret, fetches NO customer URL). Customer integration examples (NPM
+    "Coming Soon", v1 script with data-identity-endpoint, browser endpoint
+    contract, server-to-server mint with process.env placeholder — NEVER the
+    actual secret, display fallback name→username→email→Authenticated user,
+    stable identity = externalUserId). Error mapping (invalid_*/forbidden/
+    unauthorized — no raw internals). RTL + LTR technical values + test IDs.
+
+widget-panel.tsx: third tab "Access & Identity" / "دسترسی و هویت" (data-testid
+access-identity-tab) + renders <WidgetAccessIdentity slug tenantId />. Existing
+Installation + Customization truthful semantics unchanged.
+
+Tests (tests/widget-access-identity-dashboard.spec.ts — NEW, CI docker-regression
+Full+Lite, 11 tests): #33 verified displays selected + Recommended, #34 mode save
++ policyVersion increment (verified→anonymous via UI; same-mode no-increment),
+#35 site-user settings persist + public config safe (no secret/hash), #36 invalid
+cross-origin endpoint rejected, #37 secret generate show-once + NOT in localStorage/
+sessionStorage + reload hides + GET never returns raw + public config clean, #38
+rotation (B≠A + policyVersion increments + GET never returns A/B), #39 revoke
+(status not configured + mode stays site_user_only + no auto-downgrade), #40
+integration readiness check (NO SSRF — fake customer server gets ZERO requests),
+#41 free-plan independence (mode change on Free), #42 anonymous warning, #43 NPM
+Coming Soon truth. .github/workflows/ci.yml: wired the spec into Full + Lite.
+
+tests/unit/onboarding.test.ts: accept the third 'access' tab in the source-shape
+assertion. tests/unit/npm-package-smoke.test.ts: 60s timeout for the 3 build-
+dependent tests (tsc build + npm pack can exceed the 5s default under CI
+contention). tests/invite-workspace-switching.spec.ts C8: hardened the pending-
+invitee signin assertion (NextAuth returns 200 even on auth failure — replaced
+the unreliable >= 400 status check with actual session/auth state verification
+via GET /api/auth/session + GET /api/tenants/me).
+
+Local gate: root typecheck CLEAN; root lint CLEAN (0 errors, 1 pre-existing
+warning); prisma generate OK; full unit suite 689/724 (35 pre-existing
+widget-identity env-isolation failures; pass 82/82 standalone; CI handles env).
+
+CI gate (exact-SHA): ci SUCCESS, docker-regression SUCCESS (Full 151 + Lite 151
+browser incl. 11 dashboard tests × 2 = 22 ✓), self-host-qualification SUCCESS,
+widget-package-qualification SUCCESS. NO backend changes. NO runtime changes.
+PR #14 remains DRAFT / NOT MERGED / NO AUTO-MERGE. Next phase: docs/widget-access-and-identity.md.
