@@ -109,10 +109,15 @@ io.use(async (socket: AuthSocket, next) => {
   // For visitors: enforce CURRENT policy authorization.
   if (payload.type === 'visitor') {
     const visitor = payload as VisitorTokenPayload;
-    const decision = await verifyVisitorAccess(visitor, prisma);
-    if (!decision.allowed) {
-      console.log(`[rt] REJECTED visitor — ${decision.reason} (contact=${visitor.contactId}, tenant=${visitor.tenantId})`);
-      return next(new Error(decision.reason));
+    try {
+      const decision = await verifyVisitorAccess(visitor, prisma);
+      if (!decision.allowed) {
+        console.log(`[rt] REJECTED visitor — ${decision.reason} (contact=${visitor.contactId}, tenant=${visitor.tenantId})`);
+        return next(new Error(decision.reason));
+      }
+    } catch (e) {
+      console.error('[rt] visitor access check error:', e instanceof Error ? e.name : 'unknown');
+      return next(new Error('visitor_access_check_failed'));
     }
   }
 

@@ -121,6 +121,16 @@ if (!process.env.NEXTAUTH_SECRET) {
   }
 }
 const SECRET = process.env.NEXTAUTH_SECRET
+
+// Allowlist of stable visitor-access denial reasons from the internal verifier.
+// Any response NOT in this set -> visitor_access_check_failed (fail-closed).
+const ALLOWED_VISITOR_REASONS = new Set([
+  'policy_unavailable',
+  'identity_token_invalid',
+  'policy_changed',
+  'verification_required',
+  'website_login_required',
+])
 const APP_INTERNAL_URL = process.env.APP_INTERNAL_URL || 'http://localhost:3000'
 const REDIS_URL = process.env.REDIS_URL
 
@@ -211,8 +221,13 @@ io.use(async (socket: AuthenticatedSocket, next) => {
       const verifyUrl = `${APP_INTERNAL_URL}/api/realtime/verify-visitor-access?${params}`
       const res = await fetch(verifyUrl, { headers: { 'X-Internal-Secret': SECRET! } })
       if (!res.ok) {
-        const body = await res.json().catch(() => null)
-        const reason = body?.error || 'visitor_access_check_failed'
+        let reason = 'visitor_access_check_failed'
+        try {
+          const body = await res.json()
+          if (body && typeof body.error === 'string' && ALLOWED_VISITOR_REASONS.has(body.error)) {
+            reason = body.error
+          }
+        } catch { /* not JSON — keep default */ }
         console.log(`[auth] REJECTED visitor — ${reason}`)
         return next(new Error(reason))
       }
