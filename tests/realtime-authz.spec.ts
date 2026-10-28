@@ -585,13 +585,17 @@ async function connectAndWait(
 }
 
 async function setAccessMode(page: import('@playwright/test').Page, accessMode: string): Promise<void> {
-  await page.evaluate(async (accessMode: string) => {
-    await fetch('/api/widget-config/access', {
+  const result = await page.evaluate(async (accessMode: string) => {
+    const res = await fetch('/api/widget-config/access', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ accessMode }),
     })
+    return { ok: res.ok, status: res.status, data: await res.json().catch(() => null) }
   }, accessMode)
+  if (!result.ok) {
+    throw new Error(`setAccessMode('${accessMode}') failed: ${result.status} ${JSON.stringify(result.data)}`)
+  }
 }
 
 test.describe('CURRENT-policy realtime visitor connect authorization', () => {
@@ -786,47 +790,65 @@ test.describe('Live policy transition — anonymous -> verified_visitor', () => 
 
     // 7. CHANGE POLICY: anonymous -> verified_visitor (policyVersion increments)
     await setAccessMode(page, 'verified_visitor')
-    await page.waitForTimeout(500)
-
-    // 8. Old visitor socket attempts to join conversation B
-    const phase2 = await runSocketScript(page, visitorHandle, {
-      joinConversations: [convB],
-      listenForTypingOfConversations: [convB],
-      waitMs: 2000,
+    // Verify the PATCH is committed by reading back the WidgetConfig via the
+    // dashboard GET route. The verify-visitor-access endpoint reads the SAME DB,
+    // so if the GET sees 'verified_visitor', the endpoint should too.
+    const policyCheck = await page.evaluate(async () => {
+      const r = await fetch('/api/widget-config/access')
+      return r.json()
     })
+    if (policyCheck.accessMode !== 'verified_visitor') {
+      throw new Error(`Policy change not visible: expected verified_visitor, got ${policyCheck.accessMode} (pv=${policyCheck.policyVersion})`)
+    }
+    await page.waitForTimeout(3000)
 
-    // 9. Agent emits typing:start for conversation B
-    await agentPage.evaluate(({ handle, convB }) => {
-      const socket = (window as unknown as Record<string, SocketLike>)[handle]
-      socket.emit('typing:start', { conversationId: convB })
-    }, { handle: agentHandle, convB })
-    await page.waitForTimeout(1000)
+    // 8. Old visitor socket attempts to join conversation B — run the
+    // visitor's join+listen + the agent's typing emit IN PARALLEL.
+    // The emit must happen DURING the listener's active window so that if
+    // the visitor IS in B's room (a bug), the listener catches the typing
+    // event. Same parallel pattern as the existing cross-tenant test.
+    const [phase2] = await Promise.all([
+      runSocketScript(page, visitorHandle, {
+        joinConversations: [convB],
+        listenForTypingOfConversations: [convB],
+        waitMs: 4000,
+      }),
+      (async () => {
+        // Wait for the listener + join to register, then emit typing.
+        await new Promise(r => setTimeout(r, 1500))
+        await agentPage.evaluate(({ handle, convB }) => {
+          const socket = (window as unknown as Record<string, SocketLike>)[handle]
+          socket.emit('typing:start', { conversationId: convB })
+        }, { handle: agentHandle, convB })
+      })(),
+    ])
 
-    // 10. Check what the visitor captured — should NOT have typing:start for convB
-    //    (rejected by CURRENT-policy revalidation at conversation:join)
+    // 10. Visitor should NOT receive typing:start for convB (rejected by
+    //     CURRENT-policy revalidation at conversation:join).
     const visitorTypingForB = phase2.events.filter(e => e.includes(`typing:start:${convB}`))
     expect(visitorTypingForB.length,
       `visitor should NOT receive typing:start for convB (rejected by policy revalidation). Events: ${JSON.stringify(phase2.events)}`,
     ).toBe(0)
 
-    // 11. Control: agent2 SHOULD receive the typing event (proves the room works)
-    const agent2Phase2 = await runSocketScript(agent2Page, agent2Handle, {
-      joinConversations: [],
-      listenForTypingOfConversations: [convB],
-      waitMs: 2000,
-    })
-    // Agent emits again during agent2Phase2's window
-    await agentPage.evaluate(({ handle, convB }) => {
-      const socket = (window as unknown as Record<string, SocketLike>)[handle]
-      socket.emit('typing:start', { conversationId: convB })
-    }, { handle: agentHandle, convB })
-    await page.waitForTimeout(1000)
+    // 11. Control: agent2 SHOULD receive the typing event (proves the room works).
+    // Run agent2's listener + the agent's typing emit IN PARALLEL (same
+    // pattern — the emit must happen DURING the listener's active window).
+    const [agent2Phase3] = await Promise.all([
+      runSocketScript(agent2Page, agent2Handle, {
+        joinConversations: [],
+        listenForTypingOfConversations: [convB],
+        waitMs: 4000,
+      }),
+      (async () => {
+        // Wait for the listener to register, then emit.
+        await new Promise(r => setTimeout(r, 1000))
+        await agentPage.evaluate(({ handle, convB }) => {
+          const socket = (window as unknown as Record<string, SocketLike>)[handle]
+          socket.emit('typing:start', { conversationId: convB })
+        }, { handle: agentHandle, convB })
+      })(),
+    ])
 
-    const agent2Phase3 = await runSocketScript(agent2Page, agent2Handle, {
-      joinConversations: [],
-      listenForTypingOfConversations: [convB],
-      waitMs: 2000,
-    })
     const agent2TypingForB = agent2Phase3.events.filter(e => e.includes(`typing:start:${convB}`))
     expect(agent2TypingForB.length,
       `control agent2 SHOULD receive typing:start for convB (proves room mechanism works). Events: ${JSON.stringify(agent2Phase3.events)}`,
