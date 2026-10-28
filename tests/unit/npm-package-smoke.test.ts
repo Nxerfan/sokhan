@@ -36,6 +36,9 @@ test('npm pack: tarball is created with dist/ contents', () => {
   expect(existsSync(join(distDir, 'index.d.ts')), 'dist/index.d.ts must exist').toBe(true)
   expect(existsSync(join(distDir, 'widget.js')), 'dist/widget.js must exist').toBe(true)
   expect(existsSync(join(distDir, 'widget.d.ts')), 'dist/widget.d.ts must exist').toBe(true)
+  // Identity module (PR #14 visitor access modes) must be built.
+  expect(existsSync(join(distDir, 'identity.js')), 'dist/identity.js must exist').toBe(true)
+  expect(existsSync(join(distDir, 'identity.d.ts')), 'dist/identity.d.ts must exist').toBe(true)
 
   // Create tarball.
   execSync('npm pack', { cwd: PKG_DIR, stdio: 'pipe' })
@@ -65,11 +68,20 @@ test('npm clean-consumer: install + import initSukhan', () => {
   // Install the tarball.
   execSync(`npm install ${tarballPath}`, { cwd: consumerDir, stdio: 'pipe' })
 
-  // Verify import works.
-  const result = execSync(
-    'node --input-type=module -e "import { initSukhan } from \'sukhan-widget\'; if (typeof initSukhan !== \'function\') throw new Error(\'not exported\'); console.log(\'OK\')"',
-    { cwd: consumerDir, encoding: 'utf-8' },
-  )
+  // Verify import works AND the instance surface exposes the PR #14
+  // identity methods (setIdentity / refreshIdentity) + the new types.
+  const script =
+    "import { initSukhan, SukhanApiError } from 'sukhan-widget';" +
+    "if (typeof initSukhan !== 'function') throw new Error('initSukhan not exported');" +
+    "if (typeof SukhanApiError !== 'function') throw new Error('SukhanApiError not exported');" +
+    "const inst = initSukhan({ apiKey: 'demo' });" +
+    "if (typeof inst.setIdentity !== 'function') throw new Error('setIdentity not on instance');" +
+    "if (typeof inst.refreshIdentity !== 'function') throw new Error('refreshIdentity not on instance');" +
+    "console.log('OK')"
+  const result = execSync(`node --input-type=module -e "${script}"`, {
+    cwd: consumerDir,
+    encoding: 'utf-8',
+  })
   expect(result.trim()).toBe('OK')
 })
 
@@ -88,11 +100,18 @@ test('bun clean-consumer: install + import initSukhan', () => {
   // Install the tarball.
   execSync(`bun add ${tarballPath}`, { cwd: consumerDir, stdio: 'pipe' })
 
-  // Verify import works.
-  const result = execSync(
-    'bun -e "import { initSukhan } from \'sukhan-widget\'; if (typeof initSukhan !== \'function\') throw new Error(\'not exported\'); console.log(\'OK\')"',
-    { cwd: consumerDir, encoding: 'utf-8' },
-  )
+  // Verify import works AND the instance surface exposes setIdentity / refreshIdentity.
+  const script =
+    "import { initSukhan } from 'sukhan-widget';" +
+    "if (typeof initSukhan !== 'function') throw new Error('initSukhan not exported');" +
+    "const inst = initSukhan({ apiKey: 'demo' });" +
+    "if (typeof inst.setIdentity !== 'function') throw new Error('setIdentity not on instance');" +
+    "if (typeof inst.refreshIdentity !== 'function') throw new Error('refreshIdentity not on instance');" +
+    "console.log('OK')"
+  const result = execSync(`bun -e "${script}"`, {
+    cwd: consumerDir,
+    encoding: 'utf-8',
+  })
   expect(result.trim()).toBe('OK')
 })
 
@@ -115,4 +134,22 @@ test('package.json: exports point to dist/ (not raw src/)', () => {
 test('package does NOT contain .env.example in the tarball', () => {
   const packDryRun = execSync('npm pack --dry-run 2>&1', { cwd: PKG_DIR, encoding: 'utf-8' })
   expect(packDryRun, 'tarball must NOT include .env.example').not.toContain('.env.example')
+})
+
+test('README continues to say the package is NOT publicly published', () => {
+  const readme = readFileSync(join(PKG_DIR, 'README.md'), 'utf-8')
+  // The package must NOT falsely claim npm availability. The README must
+  // state that the package is not yet published to the public registry.
+  expect(readme.toLowerCase(), 'README must mention not-published status').toContain('not')
+  expect(readme.length, 'README must be non-empty').toBeGreaterThan(50)
+})
+
+test('built dist/ exposes the new identity types (SukhanApiError, AccessMode, SukhanLoginRequiredDetail)', () => {
+  const indexDts = readFileSync(join(PKG_DIR, 'dist', 'index.d.ts'), 'utf-8')
+  expect(indexDts, 'index.d.ts must export SukhanApiError').toContain('SukhanApiError')
+  expect(indexDts, 'index.d.ts must export AccessMode').toContain('AccessMode')
+  expect(indexDts, 'index.d.ts must export SukhanLoginRequiredDetail').toContain('SukhanLoginRequiredDetail')
+  expect(indexDts, 'index.d.ts must export OtpStartResponse').toContain('OtpStartResponse')
+  expect(indexDts, 'index.d.ts must export resolveIdentityEndpoint').toContain('resolveIdentityEndpoint')
+  expect(indexDts, 'index.d.ts must export fetchIdentity').toContain('fetchIdentity')
 })

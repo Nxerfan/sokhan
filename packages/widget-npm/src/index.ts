@@ -18,7 +18,7 @@
  *   in a server component or during SSR — initialization is deferred to
  *   the client.
  *
- * ## Runtime contract (Task W)
+ * ## Runtime contract (Task W + PR #14 visitor access modes)
  *
  * - The hosted default `apiUrl` is `https://app.sukhan.chat`. The widget
  *   NEVER falls back to `window.location.origin` — the host page origin
@@ -28,6 +28,13 @@
  *   response (additive field). The widget passes it explicitly to
  *   `SukhanSocket` (no `window.__sukhan_api_url` coupling). An optional
  *   `SukhanOptions.realtime` override takes priority.
+ * - The CURRENT visitor access policy (`accessMode` + `policyVersion` +
+ *   login fields) is consumed from the public config. The widget drives
+ *   the correct identity flow (anonymous / verified_visitor /
+ *   site_user_only) and re-evaluates on every policy authorization
+ *   failure. `setIdentity(token)` / `refreshIdentity()` expose the
+ *   SPA/modal post-login integration surface. The package is NOT
+ *   published to npm until external publication actually happens.
  *
  * @packageDocumentation
  */
@@ -36,9 +43,17 @@ import { SukhanWidget } from './widget.js'
 import type { SukhanOptions, SukhanInstance } from './types.js'
 
 export { SukhanWidget } from './widget.js'
-export { ApiClient, normalizeApiKey, resolveApiUrl } from './api.js'
+export type { SukhanWidgetDeps } from './widget.js'
+export { ApiClient, SukhanApiError, normalizeApiKey, resolveApiUrl } from './api.js'
 export { SukhanSocket, loadScriptOnce } from './socket.js'
 export type { SukhanSocketDeps } from './socket.js'
+export {
+  resolveIdentityEndpoint,
+  fetchIdentity,
+  parseIdentityResponse,
+  IDENTITY_TIMEOUT_MS,
+  type IdentityResult,
+} from './identity.js'
 export {
   resolveRealtimeUrl,
   resolveRealtimeFromConfig,
@@ -55,19 +70,24 @@ export type {
   MessageAttachment,
   SenderType,
   IdentifyResponse,
+  OtpStartResponse,
+  OtpVerifyResponse,
+  OtpResendResponse,
+  AccessMode,
   SukhanOptions,
   SukhanInstance,
   SukhanSocketOptions,
   SocketEvent,
   SocketHandler,
+  SukhanLoginRequiredDetail,
   RealtimeTransport,
   RealtimeEndpointConfig,
 } from './types.js'
 
 /**
- * Initialize the Sukhan widget. Returns a handle with open/close/send/destroy
- * methods. Calling this more than once per page is a no-op (guarded by
- * `window.__sukhan_mounted`).
+ * Initialize the Sukhan widget. Returns a handle with open/close/send/
+ * setIdentity/refreshIdentity/destroy methods. Calling this more than
+ * once per page is a no-op (guarded by `window.__sukhan_mounted`).
  */
 export function initSukhan(options: SukhanOptions = {}): SukhanInstance {
   const apiKey =
@@ -99,6 +119,8 @@ export function initSukhan(options: SukhanOptions = {}): SukhanInstance {
     toggle: () => widget.toggle(),
     send: (text: string) => widget.send(text),
     destroy: () => widget.destroy(),
+    setIdentity: (token: string | null) => widget.setIdentity(token),
+    refreshIdentity: () => widget.refreshIdentity(),
     get config() {
       return widget.config
     },

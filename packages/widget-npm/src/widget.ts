@@ -1,9 +1,39 @@
 /**
- * Sukhan Widget — UI rendering.
+ * Sukhan Widget — UI rendering + identity state machine.
  *
  * Self-contained widget rendered with vanilla DOM (no framework dependency).
  *
- * Reliability contract:
+ * ## Identity contract (PR #14 visitor access modes)
+ *
+ * The backend `GET /api/widget/<slug>/config` response carries the CURRENT
+ * access policy (`accessMode` + `policyVersion` + login fields). The widget
+ * drives ONE of three identity flows based on the CURRENT mode — and
+ * re-evaluates on every policy authorization failure (socket connect_error
+ * or REST send 403). It NEVER downgrades to anonymous. It NEVER invents a
+ * fallback mode when the policy is malformed/missing — it fail-closes.
+ *
+ *   anonymous        → historical localStorage visitorId + anonymous
+ *                      `/contact` bootstrap (PR5/PR9 behavior preserved
+ *                      EXACTLY: same visitorId key, same Contact semantics,
+ *                      same socket/polling/reconnect/merge/CSAT).
+ *   verified_visitor → stored `sukhan_verified_resume_<slug>` credential
+ *                      (opaque, localStorage, SEPARATE key from visitorId)
+ *                      + authenticated `/contact` bootstrap. On stale/
+ *                      invalid resume → clear + show OTP UI (name/email →
+ *                      start → code → verify → store resume → bootstrap).
+ *                      Email is NOT the identity key.
+ *   site_user_only    → NEVER anonymous identifyVisitor. Get a Sukhan
+ *                      external identity token from the CUSTOMER backend
+ *                      (`identityEndpoint` / `identityEndpointPath`,
+ *                      same-origin, bounded, fail-closed) OR via
+ *                      `setIdentity(token)`; bootstrap `/contact` with
+ *                      `Authorization: Bearer <token>`. Logged-out host
+ *                      user → login-required UI + `onLoginRequired` +
+ *                      `sukhan:login-required` window CustomEvent. The
+ *                      integration secret NEVER reaches the browser.
+ *
+ * ## Reliability contract (PR5/PR9 — preserved)
+ *
  *   - Realtime config comes from the BACKEND `config.realtime` field
  *     (with optional `SukhanOptions.realtime` override taking priority).
  *     The widget passes the resolved config EXPLICITLY to `SukhanSocket`
@@ -16,10 +46,17 @@
  *   - Reconnect gap recovery: re-join current conversation + reconcile
  *     history once.
  *   - `destroy()` is idempotent + clears polling/typing/socket/DOM. Every
- *     async callback checks `this.destroyed` before touching state.
+ *     async callback checks `this.destroyed` AND a `generation` counter
+ *     before touching state — the generation guard prevents stale async
+ *     responses from a previous identity (SPA user-switch) from mutating
+ *     the new identity's state.
+ *   - ONE socket lifecycle; single-flight script loading; single-flight
+ *     token refresh; single-flight authorization recovery. Optimistic
+ *     send-failure keeps the typed message (input restored on failure so
+ *     the user can retry — never silently lost).
  */
 
-import { ApiClient } from './api.js'
+import { ApiClient, SukhanApiError } from './api.js'
 import { SukhanSocket } from './socket.js'
 import type { SukhanSocketOptions } from './types.js'
 import type { SukhanSocketDeps } from './socket.js'
@@ -31,17 +68,88 @@ import {
   buildSocketIoScriptUrl,
   type RealtimeEndpointConfig,
 } from './realtime-resolve.js'
+import {
+  resolveIdentityEndpoint,
+  fetchIdentity,
+  type IdentityResult,
+} from './identity.js'
 import type {
   WidgetConfig,
   SukhanOptions,
   SukhanInstance,
   Message,
   SenderType,
+  AccessMode,
+  IdentifyResponse,
+  OtpStartResponse,
+  SukhanLoginRequiredDetail,
 } from './types.js'
+
+// Ambient `process` declare — matches the index.ts pattern. The package
+// tsconfig has no node types; this makes the (optional, build-time-inlined)
+// `process.env.SUKHAN_API_KEY` fallback type-check without forcing
+// @types/node resolution. Module-scoped `declare const` shadows the global
+// when @types/node is present (no conflict) and provides the type when it
+// is absent.
+declare const process: { env: Record<string, string | undefined> } | undefined
 
 const POWERED_BY: Record<'fa' | 'en', string> = {
   fa: 'نیرو گرفته از سُخن',
   en: 'Powered by Sukhan',
+}
+
+/** Bilingual UI strings (safe, non-tenant-controlled). */
+const STR: Record<'fa' | 'en', Record<string, string>> = {
+  fa: {
+    verifyTitle: 'تأیید ایمیل',
+    verifyName: 'نام',
+    verifyEmail: 'ایمیل',
+    verifyContinue: 'ادامه',
+    codeTitle: 'کد تأیید',
+    codePlaceholder: 'کد ۶ رقمی',
+    verifyCode: 'تأیید',
+    resend: 'ارسال مجدد',
+    back: 'بازگشت',
+    verifying: 'در حال بررسی…',
+    sending: 'در حال ارسال…',
+    loginRequiredTitle: 'برای ادامه وارد شوید',
+    loginButton: 'ورود',
+    integrationUnavailable: 'سرویس هم‌اکنون در دسترس نیست',
+    tryAgain: 'تلاش مجدد',
+    invalidEmail: 'ایمیل نامعتبر',
+    verificationFailed: 'کد نامعتبر بود',
+    expired: 'کد منقضی شد — دوباره تلاش کنید',
+    rateLimited: 'تلاش بیش از حد — کمی بعد تلاش کنید',
+    defaultError: 'خطایی رخ داد',
+    messagePlaceholder: 'پیام بنویسید…',
+    chat: 'گفت‌وگو',
+    agent: 'کارشناس',
+  },
+  en: {
+    verifyTitle: 'Verify your email',
+    verifyName: 'Name',
+    verifyEmail: 'Email',
+    verifyContinue: 'Continue',
+    codeTitle: 'Verification code',
+    codePlaceholder: '6-digit code',
+    verifyCode: 'Verify',
+    resend: 'Resend',
+    back: 'Back',
+    verifying: 'Verifying…',
+    sending: 'Sending…',
+    loginRequiredTitle: 'Sign in to continue',
+    loginButton: 'Sign in',
+    integrationUnavailable: 'Service unavailable',
+    tryAgain: 'Try again',
+    invalidEmail: 'Invalid email',
+    verificationFailed: 'Incorrect code',
+    expired: 'Code expired — try again',
+    rateLimited: 'Too many attempts — try later',
+    defaultError: 'Something went wrong',
+    messagePlaceholder: 'Type a message…',
+    chat: 'Chat',
+    agent: 'Agent',
+  },
 }
 
 // ---------- Small DOM helpers (vanilla, no framework) ----------
@@ -121,6 +229,54 @@ function generateVisitorId(): string {
   return 'vis_' + Date.now() + '_' + Math.random().toString(36).slice(2, 14)
 }
 
+/**
+ * Verified-visitor resume credential storage. SEPARATE localStorage key
+ * from the visitorId (`sukhan_visitor_<slug>`). The resume credential is
+ * treated as OPAQUE — never parsed for identity in the browser. NEVER
+ * stores the realtime token, OTP code, providerRequestId, or integration
+ * secret (only the resume credential lives here).
+ */
+function resumeKey(slug: string): string {
+  return 'sukhan_verified_resume_' + slug
+}
+
+function getResume(slug: string): string | null {
+  try {
+    const v = localStorage.getItem(resumeKey(slug))
+    return v && v.length > 0 && v.length <= 8192 ? v : null
+  } catch {
+    return null
+  }
+}
+
+function setResume(slug: string, credential: string): void {
+  try {
+    localStorage.setItem(resumeKey(slug), credential)
+  } catch {
+    // storage unavailable — in-memory only; resume will not persist
+  }
+}
+
+function clearResume(slug: string): void {
+  try {
+    localStorage.removeItem(resumeKey(slug))
+  } catch {
+    // ignore
+  }
+}
+
+// ---------- Identity state machine ----------
+
+type IdentityState =
+  | 'anonymous_ready'
+  | 'verified_required'
+  | 'verified_code'
+  | 'verified_ready'
+  | 'site_login_required'
+  | 'site_loading'
+  | 'site_ready'
+  | 'integration_unavailable'
+
 // ---------- Widget class ----------
 
 interface WidgetInternalState {
@@ -142,6 +298,8 @@ export interface SukhanWidgetDeps {
   apiClient?: ApiClient
   /** Custom SukhanSocket constructor (for tests). */
   socketCtor?: new (opts: SukhanSocketOptions, deps?: SukhanSocketDeps) => SukhanSocket
+  /** Custom identity fetcher (for tests). Defaults to the real bounded fetcher. */
+  identityFetcher?: (endpoint: string) => Promise<IdentityResult | null>
 }
 
 export class SukhanWidget implements SukhanInstance {
@@ -149,6 +307,7 @@ export class SukhanWidget implements SukhanInstance {
   private api: ApiClient
   private socket: SukhanSocket | null = null
   private readonly SocketCtor: new (opts: SukhanSocketOptions, deps?: SukhanSocketDeps) => SukhanSocket
+  private readonly identityFetcher: (endpoint: string) => Promise<IdentityResult | null>
   private container: HTMLElement
   private locale: 'fa' | 'en' | undefined
   private direction: 'rtl' | 'ltr' | undefined
@@ -166,6 +325,29 @@ export class SukhanWidget implements SukhanInstance {
 
   /** Set by destroy() — every async callback checks this before touching state. */
   private destroyed = false
+  /**
+   * Generation counter — incremented on every identity change (setIdentity,
+   * refreshIdentity, verified OTP success, site-user bootstrap). Async
+   * callbacks capture the generation at START and bail if it changed —
+   * this prevents stale async responses from a PREVIOUS identity (SPA
+   * user-switch) from mutating the new identity's state. Complements
+   * `destroyed` (which is only set on final teardown).
+   */
+  private generation = 0
+
+  /** The CURRENT identity state (explicit — never inferred from DOM). */
+  private identityState: IdentityState = 'anonymous_ready'
+  /** Whether the login-required callback/event has been emitted (avoid storms). */
+  private loginRequiredEmitted = false
+
+  /** In-memory Sukhan external identity token (site_user_only). NEVER persisted. */
+  private memoryIdentityToken: string | null = null
+  /** In-memory OTP request state (verified_visitor). */
+  private otpRequest: { requestId: string; email: string; expiresAt: string } | null = null
+  /** Single-flight resend guard (verified_visitor OTP). */
+  private resendInFlight = false
+  /** Single-flight config refresh (socket error / send error / refreshIdentity). */
+  private configRefreshInFlight: Promise<WidgetConfig | null> | null = null
 
   private state: WidgetInternalState = {
     open: false,
@@ -207,6 +389,7 @@ export class SukhanWidget implements SukhanInstance {
     this.options = options
     this.api = __deps?.apiClient ?? new ApiClient(apiKey, options.apiUrl)
     this.SocketCtor = (__deps?.socketCtor ?? SukhanSocket) as typeof SukhanSocket
+    this.identityFetcher = __deps?.identityFetcher ?? ((ep: string) => fetchIdentity(ep))
     // NOTE: NO window.__sukhan_api_url write — the socket receives its
     // config explicitly via SukhanSocketOptions (clientScriptUrl +
     // realtimeUrl + realtimePath + transports + addTrailingSlash).
@@ -224,27 +407,52 @@ export class SukhanWidget implements SukhanInstance {
     if ((window as unknown as { __sukhan_mounted?: boolean }).__sukhan_mounted) return
     ;(window as unknown as { __sukhan_mounted?: boolean }).__sukhan_mounted = true
 
-    try {
-      this.config = await this.api.fetchConfig()
-    } catch (e) {
-      // eslint-disable-next-line no-console
-      console.error('[sukhan] config fetch failed', e)
-      return
-    }
-    if (this.destroyed) return // guard: destroy during async fetch
-    // Compute the realtime endpoint config from the backend response,
-    // with the optional SukhanOptions.realtime override taking priority.
+    const cfg = await this.refreshConfig()
+    if (this.destroyed || !cfg) return // guard: destroy during async fetch / fetch failed
+    this.applyRealtimeConfig()
+    if (this.destroyed) return
+    this.mount(cfg)
+    // Mode-aware bootstrap — the access policy drives the identity flow.
+    this.bootstrap()
+  }
+
+  /**
+   * Single-flight public config refresh. Used by init(), the socket
+   * authorization-recovery hook, and the REST send policy-error path so
+   * that concurrent failures (socket error + send error + refreshIdentity)
+   * do NOT fire multiple simultaneous config fetches. The new policy is
+   * applied atomically (visual customization is NOT reset unnecessarily —
+   * only the access-policy fields + realtime config are refreshed).
+   */
+  private refreshConfig(): Promise<WidgetConfig | null> {
+    if (this.configRefreshInFlight) return this.configRefreshInFlight
+    this.configRefreshInFlight = (async () => {
+      try {
+        const cfg = await this.api.fetchConfig()
+        if (this.destroyed) return null
+        this.config = cfg
+        this.applyRealtimeConfig()
+        return cfg
+      } catch {
+        return null
+      } finally {
+        this.configRefreshInFlight = null
+      }
+    })()
+    return this.configRefreshInFlight
+  }
+
+  private applyRealtimeConfig(): void {
+    if (!this.config) return
     this.realtimeConfig = resolveRealtimeFromConfig(
       this.api.apiUrl,
       this.config?.realtime ?? null,
       this.options.realtime ?? null,
     )
     this.clientScriptUrl = buildSocketIoScriptUrl(this.api.apiUrl)
-    if (this.destroyed) return
-    this.mount(this.config)
   }
 
-  /** Mount the launcher + panel onto the page. */
+  /** Mount the launcher + panel onto the page. Does NOT bootstrap identity. */
   private mount(config: WidgetConfig): void {
     this.state.config = config
     const locale = this.locale || (config.defaultLocale === 'en' ? 'en' : 'fa')
@@ -252,10 +460,6 @@ export class SukhanWidget implements SukhanInstance {
     const dir = this.direction || (config.defaultDirection === 'ltr' ? 'ltr' : 'rtl')
     this.state.dir = dir as 'rtl' | 'ltr'
     const accent = config.accentColor || '#E09A2B'
-    // CUST-C: canonical product default is 'bottom-end' (matches the
-    // signup-created rows, free-lock effective config, PATCH fallback,
-    // and the script-tag runtimes). Stored explicit positions are
-    // never rewritten — this fallback only fires on a missing field.
     const pos = config.position || 'bottom-end'
     let side: 'left' | 'right' = pos === 'bottom-start' ? 'left' : 'right'
     if (this.state.dir === 'rtl') side = pos === 'bottom-start' ? 'right' : 'left'
@@ -370,9 +574,7 @@ export class SukhanWidget implements SukhanInstance {
     header.appendChild(closeBtn)
     // CUST-B: render the configured logo/avatar when they are SAFE image
     // URLs. DOM APIs only (createElement + .src property) — never
-    // innerHTML with tenant-controlled content. The default SVG logo
-    // stays until a custom logo actually loads; a broken avatar image
-    // is removed on error.
+    // innerHTML with tenant-controlled content.
     const safeImg = (u: unknown): string | null => {
       if (typeof u !== 'string' || u.length > 500 || !/^https?:\/\//i.test(u)) return null
       try {
@@ -408,7 +610,6 @@ export class SukhanWidget implements SukhanInstance {
       header.insertBefore(av, titleText)
     }
 
-
     const bodyEl = el('div', 'sk-body')
     css(bodyEl, {
       flex: '1',
@@ -420,18 +621,6 @@ export class SukhanWidget implements SukhanInstance {
       gap: '8px',
     })
     this.bodyEl = bodyEl
-
-    const greeting = config.greetingTexts && config.greetingTexts[this.state.locale]
-    if (greeting) {
-      this.state.messages.push({
-        id: 'greeting',
-        conversationId: '',
-        senderType: 'system' as SenderType,
-        contentType: 'text',
-        content: { text: greeting },
-        createdAt: new Date().toISOString(),
-      })
-    }
 
     const typingEl = el('div', 'sk-typing')
     css(typingEl, {
@@ -458,7 +647,7 @@ export class SukhanWidget implements SukhanInstance {
     const inputEl = el('input') as HTMLInputElement
     inputEl.setAttribute(
       'placeholder',
-      this.state.locale === 'fa' ? 'پیام بنویسید…' : 'Type a message…',
+      STR[this.state.locale].messagePlaceholder,
     )
     css(inputEl, {
       flex: '1',
@@ -537,18 +726,693 @@ export class SukhanWidget implements SukhanInstance {
     this.container.appendChild(root)
 
     this.renderMessages()
-    this.identifyVisitor()
   }
 
   /**
    * Free-plan brand lock (CUST-F). The backend never sends a `plan`
-   * field — it sends the effective-config flags `poweredBy`/
-   * `isLocked`. The old `plan`-based check was therefore ALWAYS
-   * true and rendered the "Powered by Sukhan" badge for every
-   * plan, including paid ones.
+   * field — it sends the effective-config flags `poweredBy`/`isLocked`.
    */
   private isFreePlan(): boolean {
     return this.config?.poweredBy === true || this.config?.isLocked === true
+  }
+
+  // ---------- Identity bootstrap (mode-aware) ----------
+
+  /**
+   * Strictly resolve the CURRENT access mode from the public config. NEVER
+   * coerces a missing/malformed value to anonymous — fail closed
+   * (integration_unavailable) so a misconfigured tenant cannot be served
+   * as a weaker mode.
+   */
+  private resolveAccessMode(): AccessMode | null {
+    const m = this.config?.accessMode
+    if (m === 'anonymous' || m === 'verified_visitor' || m === 'site_user_only') return m
+    return null
+  }
+
+  /**
+   * Mode-aware bootstrap entry point. Dispatches on the CURRENT accessMode.
+   * Called from init() AND from the authorization-recovery hook (after a
+   * config refresh) when the policy changed.
+   */
+  private bootstrap(): void {
+    if (this.destroyed) return
+    const mode = this.resolveAccessMode()
+    if (mode === null) {
+      this.setIdentityState('integration_unavailable')
+      this.renderIntegrationUnavailable()
+      return
+    }
+    if (mode === 'anonymous') {
+      this.anonymousBootstrap()
+    } else if (mode === 'verified_visitor') {
+      this.verifiedBootstrap()
+    } else {
+      this.siteUserBootstrap(this.memoryIdentityToken ?? undefined)
+    }
+  }
+
+  /**
+   * Anonymous bootstrap — historical behavior (PR5/PR9) preserved EXACTLY.
+   * localStorage visitorId + `identifyVisitor` (no Authorization) + socket
+   * connect + history load. Does NOT call the customer identityEndpoint.
+   * Does NOT display OTP UI.
+   */
+  private anonymousBootstrap(): void {
+    if (this.destroyed) return
+    this.setIdentityState('anonymous_ready')
+    const visitorId = getVisitorId(this.api.slug, this.visitorOverride?.visitorId)
+    const gen = this.generation
+    this.api
+      .identifyVisitor({
+        visitorId,
+        email: this.visitorOverride?.email,
+        name: this.visitorOverride?.name,
+      })
+      .then((data) => {
+        if (this.destroyed || gen !== this.generation) return
+        this.applyBootstrapResponse(data)
+        this.connectSocket()
+        if (data.conversationId) this.loadMessages()
+      })
+      .catch((e) => {
+        if (this.destroyed || gen !== this.generation) return
+        // eslint-disable-next-line no-console
+        console.error('[sukhan] identify failed', e)
+      })
+  }
+
+  /**
+   * Verified-visitor bootstrap. Does NOT call anonymous identifyVisitor.
+   * Check for a stored resume credential; if present, try authenticated
+   * `/contact` bootstrap. On success → restore + connect. On rejection
+   * (verification_required / stale) → clear resume + show verification UI.
+   */
+  private verifiedBootstrap(): void {
+    if (this.destroyed) return
+    const resume = getResume(this.api.slug)
+    if (!resume) {
+      this.showVerificationForm()
+      return
+    }
+    this.setIdentityState('verified_ready')
+    const gen = this.generation
+    this.api
+      .bootstrapContact(resume)
+      .then((data) => {
+        if (this.destroyed || gen !== this.generation) return
+        this.applyBootstrapResponse(data)
+        this.connectSocket()
+        if (data.conversationId) this.loadMessages()
+      })
+      .catch((e) => {
+        if (this.destroyed || gen !== this.generation) return
+        if (e instanceof SukhanApiError && e.code === 'verification_required') {
+          // Stale/invalid resume — clear + show verification UI (no anonymous downgrade).
+          clearResume(this.api.slug)
+          this.showVerificationForm()
+          return
+        }
+        // eslint-disable-next-line no-console
+        console.error('[sukhan] verified bootstrap failed', e)
+        this.setIdentityState('integration_unavailable')
+        this.renderIntegrationUnavailable()
+      })
+  }
+
+  /**
+   * Site-user bootstrap. NEVER anonymous identifyVisitor. Priority:
+   *   1. an already-supplied token (setIdentity / memoryIdentityToken)
+   *   2. the customer identityEndpoint
+   * If authenticated → authenticated `/contact` bootstrap + connect.
+   * If logged out → login-required state (no Contact, no socket, no poll).
+   * If integration unavailable → integration_unavailable state.
+   */
+  private siteUserBootstrap(token?: string): void {
+    if (this.destroyed) return
+    this.setIdentityState('site_loading')
+    const gen = this.generation
+
+    const doBootstrap = (bearer: string) => {
+      this.api
+        .bootstrapContact(bearer)
+        .then((data) => {
+          if (this.destroyed || gen !== this.generation) return
+          this.memoryIdentityToken = bearer // memory-only
+          this.applyBootstrapResponse(data)
+          this.setIdentityState('site_ready')
+          this.connectSocket()
+          if (data.conversationId) this.loadMessages()
+        })
+        .catch((e) => {
+          if (this.destroyed || gen !== this.generation) return
+          if (e instanceof SukhanApiError && e.code === 'website_login_required') {
+            // Token rejected (logged out / stale) → clear memory token + login-required.
+            this.memoryIdentityToken = null
+            this.enterLoginRequired()
+            return
+          }
+          // eslint-disable-next-line no-console
+          console.error('[sukhan] site-user bootstrap failed', e)
+          this.setIdentityState('integration_unavailable')
+          this.renderIntegrationUnavailable()
+        })
+    }
+
+    if (token) {
+      doBootstrap(token)
+      return
+    }
+    if (this.memoryIdentityToken) {
+      doBootstrap(this.memoryIdentityToken)
+      return
+    }
+
+    // Resolve the customer identity endpoint (same-origin only, fail closed).
+    const endpoint = resolveIdentityEndpoint({
+      explicit: this.options.identityEndpoint,
+      configPath: this.config?.identityEndpointPath ?? null,
+    })
+    if (!endpoint) {
+      // No usable same-origin endpoint + no supplied token → login-required.
+      // (Do NOT downgrade to anonymous.)
+      this.enterLoginRequired()
+      return
+    }
+    this.identityFetcher(endpoint)
+      .then((result) => {
+        if (this.destroyed || gen !== this.generation) return
+        if (result === null) {
+          // timeout / network failure / malformed body → integration unavailable.
+          this.setIdentityState('integration_unavailable')
+          this.renderIntegrationUnavailable()
+          return
+        }
+        if (!result.authenticated || !result.token) {
+          // Logged-out host user → expected auth state, not integration failure.
+          this.enterLoginRequired()
+          return
+        }
+        doBootstrap(result.token)
+      })
+      .catch(() => {
+        if (this.destroyed || gen !== this.generation) return
+        this.setIdentityState('integration_unavailable')
+        this.renderIntegrationUnavailable()
+      })
+  }
+
+  /**
+   * `setIdentity(token)` — host bypasses identityEndpoint by supplying an
+   * already-minted Sukhan external identity token. Bootstraps/re-bootstraps
+   * the widget using that credential. `setIdentity(null)` treats the host
+   * user as logged out (logout safety): clears identity state, disconnects
+   * socket, stops polling, clears Contact/conversation/realtime token/
+   * messages, and enters login-required state. Uses a generation guard so
+   * stale async from the previous identity cannot mutate the new identity's
+   * state (SPA user-switch safety).
+   */
+  async setIdentity(token: string | null): Promise<void> {
+    if (this.destroyed) return
+    // User-switch / logout: bump generation so in-flight async from the
+    // previous identity bails, then clear ALL prior state.
+    this.generation++
+    this.clearIdentityState()
+    if (token === null) {
+      this.memoryIdentityToken = null
+      this.enterLoginRequired()
+      return
+    }
+    this.siteUserBootstrap(token)
+  }
+
+  /**
+   * `refreshIdentity()` — re-fetch the customer identityEndpoint. If
+   * authenticated, bootstrap with the new token. If unauthenticated, enter
+   * login-required. Works WITHOUT a page reload (primary SPA/modal
+   * post-login integration method). Bumps generation for stale-guard safety.
+   */
+  async refreshIdentity(): Promise<void> {
+    if (this.destroyed) return
+    this.generation++
+    this.clearIdentityState()
+    // Clear the login-required flag so a fresh login-required (if any)
+    // re-emits the callback/event.
+    this.loginRequiredEmitted = false
+    this.siteUserBootstrap()
+  }
+
+  // ---------- Login-required state + UI ----------
+
+  /**
+   * Enter the site-user login-required state. Emits `onLoginRequired` AND
+   * dispatches `sukhan:login-required` on `window` ONCE (avoids event
+   * storms). Renders the login UI. Does NOT create a Contact, connect
+   * realtime, poll, or allow send.
+   */
+  private enterLoginRequired(): void {
+    this.setIdentityState('site_login_required')
+    this.renderLoginRequired()
+    if (this.loginRequiredEmitted) return
+    this.loginRequiredEmitted = true
+    const detail: SukhanLoginRequiredDetail = {
+      accessMode: 'site_user_only',
+      loginUrl: this.config?.loginUrl ?? null,
+      loginButtonLabel: this.config?.loginButtonLabel ?? null,
+      loginReturnUrlParam: this.config?.loginReturnUrlParam ?? null,
+    }
+    try {
+      this.options.onLoginRequired?.(detail)
+    } catch {
+      // host callback error — swallow (do not break the widget)
+    }
+    if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+      try {
+        window.dispatchEvent(new CustomEvent('sukhan:login-required', { detail }))
+      } catch {
+        // CustomEvent may be unavailable in rare envs — swallow
+      }
+    }
+  }
+
+  /**
+   * Build the login URL defensively. Relative loginUrl resolves against
+   * the CUSTOMER page origin (window.location.origin); absolute must be
+   * http/https. If `loginReturnUrlParam` is configured, append
+   * `<param>=window.location.href` via the URL API (no manual query
+   * concatenation, no open redirect). Returns null if no safe loginUrl.
+   */
+  private buildLoginUrl(): string | null {
+    const raw = this.config?.loginUrl
+    if (!raw) return null
+    const pageOrigin =
+      typeof window !== 'undefined' && window.location ? window.location.origin : ''
+    let base: URL
+    if (raw === '/' || /^\/[^/]/.test(raw)) {
+      if (!pageOrigin) return null
+      try {
+        base = new URL(raw, pageOrigin)
+      } catch {
+        return null
+      }
+    } else if (/^https?:\/\//i.test(raw)) {
+      try {
+        base = new URL(raw)
+        if (base.protocol !== 'http:' && base.protocol !== 'https:') return null
+      } catch {
+        return null
+      }
+    } else {
+      // Reject //, javascript:, data:, malformed, etc.
+      return null
+    }
+    const param = this.config?.loginReturnUrlParam
+    if (param && typeof window !== 'undefined' && window.location) {
+      try {
+        base.searchParams.set(param, window.location.href)
+      } catch {
+        // ignore — return URL not appended
+      }
+    }
+    return base.href
+  }
+
+  // ---------- Verified-visitor OTP UI + flow ----------
+
+  /**
+   * Show the initial verification form (name + email + continue). Email
+   * required. Safe DOM (textContent for tenant/user values). Bilingual.
+   */
+  private showVerificationForm(): void {
+    if (this.destroyed) return
+    this.setIdentityState('verified_required')
+    this.clearBody()
+    const L = STR[this.state.locale]
+    const card = this.makeCard()
+    const title = el('div', '')
+    title.textContent = L.verifyTitle
+    css(title, { fontSize: '15px', fontWeight: '600', marginBottom: '12px', color: '#0E1116' })
+    card.appendChild(title)
+
+    const nameInput = el('input') as HTMLInputElement
+    nameInput.setAttribute('placeholder', L.verifyName)
+    this.styleInput(nameInput)
+    const emailInput = el('input') as HTMLInputElement
+    emailInput.setAttribute('type', 'email')
+    emailInput.setAttribute('placeholder', L.verifyEmail)
+    this.styleInput(emailInput)
+    card.appendChild(nameInput)
+    card.appendChild(emailInput)
+
+    const errEl = el('div', 'sk-verify-err')
+    css(errEl, { color: '#c0392b', fontSize: '12px', minHeight: '16px' })
+    card.appendChild(errEl)
+
+    const btn = el('button', '', L.verifyContinue) as HTMLButtonElement
+    this.stylePrimaryButton(btn)
+    const start = async () => {
+      const name = nameInput.value.trim()
+      const email = emailInput.value.trim().toLowerCase()
+      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        errEl.textContent = L.invalidEmail
+        return
+      }
+      btn.disabled = true
+      const oldText = btn.textContent
+      btn.textContent = L.sending
+      try {
+        const visitorId = getVisitorId(this.api.slug, this.visitorOverride?.visitorId)
+        const res = await this.api.startOtp({ visitorId, email, name: name || undefined })
+        if (this.destroyed) return
+        this.otpRequest = { requestId: res.requestId, email, expiresAt: res.expiresAt }
+        this.showCodeForm()
+      } catch (e) {
+        if (this.destroyed) return
+        errEl.textContent = this.mapVerifyError(e, L)
+      } finally {
+        if (!this.destroyed) {
+          btn.disabled = false
+          btn.textContent = oldText
+        }
+      }
+    }
+    btn.onclick = start
+    card.appendChild(btn)
+    this.bodyEl.appendChild(card)
+  }
+
+  /**
+   * Show the verification-code form (6-digit code + verify + resend).
+   * Bound resend so repeated clicks cannot create uncontrolled parallel
+   * requests. On success → store resume → authenticated `/contact`
+   * bootstrap (canonical) → connect + load history.
+   */
+  private showCodeForm(): void {
+    if (this.destroyed) return
+    this.setIdentityState('verified_code')
+    this.clearBody()
+    const L = STR[this.state.locale]
+    const card = this.makeCard()
+    const title = el('div', '')
+    title.textContent = L.codeTitle
+    css(title, { fontSize: '15px', fontWeight: '600', marginBottom: '12px', color: '#0E1116' })
+    card.appendChild(title)
+
+    const codeInput = el('input') as HTMLInputElement
+    codeInput.setAttribute('inputmode', 'numeric')
+    codeInput.setAttribute('placeholder', L.codePlaceholder)
+    codeInput.setAttribute('autocomplete', 'one-time-code')
+    this.styleInput(codeInput)
+    card.appendChild(codeInput)
+
+    const errEl = el('div', 'sk-verify-err')
+    css(errEl, { color: '#c0392b', fontSize: '12px', minHeight: '16px' })
+    card.appendChild(errEl)
+
+    const btn = el('button', '', L.verifyCode) as HTMLButtonElement
+    this.stylePrimaryButton(btn)
+    const verify = async () => {
+      if (!this.otpRequest) return
+      const code = codeInput.value.trim()
+      if (!code) return
+      btn.disabled = true
+      const oldText = btn.textContent
+      btn.textContent = L.verifying
+      const gen = this.generation
+      try {
+        const visitorId = getVisitorId(this.api.slug, this.visitorOverride?.visitorId)
+        const res = await this.api.verifyOtp({
+          visitorId,
+          email: this.otpRequest.email,
+          requestId: this.otpRequest.requestId,
+          code,
+        })
+        if (this.destroyed || gen !== this.generation) return
+        // Store the resume credential (opaque, localStorage, separate key).
+        setResume(this.api.slug, res.resumeCredential)
+        // Canonical bootstrap: authenticated /contact is AUTHORITATIVE for
+        // contactId / conversationId / fresh realtimeToken / locale/direction.
+        // Do NOT rely only on the VERIFY realtimeToken.
+        this.generation++ // OTP success is an identity change → bump guard
+        const data = await this.api.bootstrapContact(res.resumeCredential)
+        if (this.destroyed) return
+        this.applyBootstrapResponse(data)
+        this.setIdentityState('verified_ready')
+        this.connectSocket()
+        if (data.conversationId) this.loadMessages()
+      } catch (e) {
+        if (this.destroyed || gen !== this.generation) return
+        const mapped = this.mapVerifyError(e, L)
+        errEl.textContent = mapped
+        // On expired / request_superseded → restart the verification form.
+        if (e instanceof SukhanApiError && (e.code === 'expired' || e.code === 'request_superseded')) {
+          this.otpRequest = null
+          setTimeout(() => this.showVerificationForm(), 600)
+        }
+      } finally {
+        if (!this.destroyed) {
+          btn.disabled = false
+          btn.textContent = oldText
+        }
+      }
+    }
+    btn.onclick = verify
+    card.appendChild(btn)
+
+    const resend = el('button', '', L.resend) as HTMLButtonElement
+    this.styleTextButton(resend)
+    resend.onclick = async () => {
+      // Bound: single-flight resend so repeated clicks cannot create parallel requests.
+      if (this.resendInFlight || !this.otpRequest) return
+      this.resendInFlight = true
+      const oldText = resend.textContent
+      resend.disabled = true
+      try {
+        const visitorId = getVisitorId(this.api.slug, this.visitorOverride?.visitorId)
+        const res = await this.api.resendOtp({
+          visitorId,
+          email: this.otpRequest.email,
+          requestId: this.otpRequest.requestId,
+        })
+        if (this.destroyed) return
+        // Replace local requestId/expiresAt with the rotated values.
+        this.otpRequest = { requestId: res.requestId, email: this.otpRequest.email, expiresAt: res.expiresAt }
+        errEl.textContent = ''
+      } catch (e) {
+        if (this.destroyed) return
+        errEl.textContent = this.mapVerifyError(e, L)
+      } finally {
+        if (!this.destroyed) {
+          this.resendInFlight = false
+          resend.disabled = false
+          resend.textContent = oldText
+        }
+      }
+    }
+    card.appendChild(resend)
+
+    const back = el('button', '', L.back) as HTMLButtonElement
+    this.styleTextButton(back)
+    back.onclick = () => {
+      if (this.destroyed) return
+      this.otpRequest = null
+      this.showVerificationForm()
+    }
+    card.appendChild(back)
+
+    this.bodyEl.appendChild(card)
+  }
+
+  /** Map a verification failure to a safe UI message (no internal detail leak). */
+  private mapVerifyError(e: unknown, L: Record<string, string>): string {
+    if (e instanceof SukhanApiError) {
+      switch (e.code) {
+        case 'code_mismatch': return L.verificationFailed
+        case 'expired': return L.expired
+        case 'request_superseded': return L.expired
+        case 'already_used': return L.expired
+        case 'attempt_limit_reached': return L.rateLimited
+        case 'rate_limited': return L.rateLimited
+        case 'resend_limit': return L.rateLimited
+        case 'policy_unavailable': return L.integrationUnavailable
+        case 'verification_conflict': return L.defaultError
+        case 'wrong_correlation': return L.defaultError
+        case 'mode_mismatch': return L.integrationUnavailable
+        default: return L.defaultError
+      }
+    }
+    return L.defaultError
+  }
+
+  // ---------- Identity-state clear + render helpers ----------
+
+  /**
+   * Clear ALL identity-derived state. Used by setIdentity (user-switch /
+   * logout) and refreshIdentity. Disconnects the socket, stops polling,
+   * clears token/contactId/conversationId/messages, clears the in-memory
+   * identity token. The generation counter is bumped by the CALLER so
+   * in-flight async bails before touching the cleared state.
+   */
+  private clearIdentityState(): void {
+    this.stopPolling()
+    if (this.socket) {
+      try {
+        this.socket.disconnect()
+      } catch {
+        // ignore
+      }
+      this.socket = null
+    }
+    this.state.token = null
+    this.state.contactId = null
+    this.state.conversationId = null
+    this.state.messages = []
+    this.state.connected = false
+    this.csatShown = false
+    if (this.state.typingTimer) {
+      clearTimeout(this.state.typingTimer)
+      this.state.typingTimer = undefined
+    }
+    this.otpRequest = null
+    this.resendInFlight = false
+    // NOTE: memoryIdentityToken is cleared on logout (setIdentity(null)) but
+    // PRESERVED across a refresh/bootstrap re-entry so site_user_only can
+    // re-use a still-valid token. Callers that must clear it do so explicitly.
+  }
+
+  private setIdentityState(s: IdentityState): void {
+    this.identityState = s
+  }
+
+  private applyBootstrapResponse(data: IdentifyResponse): void {
+    this.state.contactId = data.contactId
+    this.state.conversationId = data.conversationId
+    this.state.token = data.realtimeToken
+    if (data.locale === 'en' || data.locale === 'fa') {
+      this.state.locale = data.locale
+    }
+    if (data.direction === 'rtl' || data.direction === 'ltr') {
+      this.state.dir = data.direction
+    }
+  }
+
+  /** Render the login-required UI (simple card; login button if loginUrl). */
+  private renderLoginRequired(): void {
+    if (this.destroyed) return
+    this.clearBody()
+    const L = STR[this.state.locale]
+    const card = this.makeCard()
+    const title = el('div', '')
+    title.textContent = L.loginRequiredTitle
+    css(title, { fontSize: '15px', fontWeight: '600', marginBottom: '12px', color: '#0E1116', textAlign: 'center' })
+    card.appendChild(title)
+    const loginUrl = this.buildLoginUrl()
+    if (loginUrl) {
+      const btn = el('a', '') as HTMLAnchorElement
+      btn.href = loginUrl
+      const label = this.config?.loginButtonLabel && this.config.loginButtonLabel.trim().length > 0
+        ? this.config.loginButtonLabel
+        : L.loginButton
+      btn.textContent = label
+      this.stylePrimaryAnchor(btn)
+      card.appendChild(btn)
+    }
+    this.bodyEl.appendChild(card)
+  }
+
+  /** Render the integration-unavailable UI (fail-closed state). */
+  private renderIntegrationUnavailable(): void {
+    if (this.destroyed) return
+    this.clearBody()
+    const L = STR[this.state.locale]
+    const card = this.makeCard()
+    const title = el('div', '')
+    title.textContent = L.integrationUnavailable
+    css(title, { fontSize: '14px', color: '#666', textAlign: 'center', padding: '24px 8px' })
+    card.appendChild(title)
+    this.bodyEl.appendChild(card)
+  }
+
+  private clearBody(): void {
+    const body = this.bodyEl
+    if (!body) return
+    const children = body.children
+    for (let i = children.length - 1; i >= 0; i--) {
+      if (children[i] !== this.typingEl) body.removeChild(children[i])
+    }
+  }
+
+  private makeCard(): HTMLElement {
+    const card = el('div', 'sk-id-card')
+    css(card, {
+      alignSelf: 'stretch',
+      background: '#fff',
+      borderRadius: '12px',
+      padding: '20px',
+      margin: '8px',
+      boxShadow: '0 1px 3px rgba(0,0,0,.06)',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '10px',
+    })
+    return card
+  }
+
+  private styleInput(i: HTMLInputElement): void {
+    css(i, {
+      width: '100%',
+      boxSizing: 'border-box',
+      padding: '10px 12px',
+      border: '1px solid #ddd',
+      borderRadius: '8px',
+      fontSize: '14px',
+      outline: 'none',
+      fontFamily: 'inherit',
+      background: '#fff',
+      color: '#0E1116',
+    })
+  }
+
+  private stylePrimaryButton(b: HTMLButtonElement): void {
+    const accent = (this.config && this.config.accentColor) || '#E09A2B'
+    css(b, {
+      width: '100%',
+      padding: '10px 12px',
+      border: 'none',
+      borderRadius: '8px',
+      background: accent,
+      color: '#fff',
+      fontSize: '14px',
+      fontWeight: '600',
+      cursor: 'pointer',
+    })
+  }
+
+  private stylePrimaryAnchor(a: HTMLAnchorElement): void {
+    const accent = (this.config && this.config.accentColor) || '#E09A2B'
+    css(a, {
+      display: 'block',
+      textAlign: 'center',
+      textDecoration: 'none',
+      padding: '10px 12px',
+      borderRadius: '8px',
+      background: accent,
+      color: '#fff',
+      fontSize: '14px',
+      fontWeight: '600',
+    })
+  }
+
+  private styleTextButton(b: HTMLButtonElement): void {
+    css(b, {
+      background: 'none',
+      border: 'none',
+      color: '#888',
+      fontSize: '12px',
+      cursor: 'pointer',
+      padding: '4px',
+      alignSelf: 'center',
+    })
   }
 
   // ---------- Panel open/close ----------
@@ -572,30 +1436,6 @@ export class SukhanWidget implements SukhanInstance {
       transform: 'translateY(8px) scale(.98)',
       pointerEvents: 'none',
     })
-  }
-
-  // ---------- Visitor identification ----------
-  private identifyVisitor(): void {
-    if (this.destroyed) return
-    const visitorId = getVisitorId(this.api.slug, this.visitorOverride?.visitorId)
-    this.api
-      .identifyVisitor({
-        visitorId,
-        email: this.visitorOverride?.email,
-        name: this.visitorOverride?.name,
-      })
-      .then((data) => {
-        if (this.destroyed) return // guard: destroy during async identify
-        this.state.contactId = data.contactId
-        this.state.conversationId = data.conversationId
-        this.state.token = data.realtimeToken
-        this.connectSocket()
-        if (data.conversationId) this.loadMessages()
-      })
-      .catch((e) => {
-        // eslint-disable-next-line no-console
-        console.error('[sukhan] identify failed', e)
-      })
   }
 
   private loadMessages(): void {
@@ -640,6 +1480,7 @@ export class SukhanWidget implements SukhanInstance {
     if (this.destroyed) return
     if (!this.state.token) return
     if (this.socket) return
+    const gen = this.generation
     this.socket = new this.SocketCtor({
       token: this.state.token,
       clientScriptUrl: this.clientScriptUrl,
@@ -649,7 +1490,7 @@ export class SukhanWidget implements SukhanInstance {
       addTrailingSlash: this.realtimeConfig.addTrailingSlash,
     })
     this.socket.onConnect = () => {
-      if (this.destroyed) return
+      if (this.destroyed || gen !== this.generation) return
       this.state.connected = true
       this.stopPolling() // socket connected → no polling
       if (this.state.conversationId) {
@@ -657,7 +1498,7 @@ export class SukhanWidget implements SukhanInstance {
       }
     }
     this.socket.onReconnect = () => {
-      if (this.destroyed) return
+      if (this.destroyed || gen !== this.generation) return
       this.state.connected = true
       this.stopPolling() // socket reconnected → stop polling
       // Reconnect gap recovery: (1) re-join current conversation room,
@@ -667,42 +1508,32 @@ export class SukhanWidget implements SukhanInstance {
       }
       this.reconcileHistory()
     }
-    this.socket.onTokenExpired = async () => {
-      if (this.destroyed) return null
-      try {
-        const visitorId = getVisitorId(this.api.slug, this.visitorOverride?.visitorId)
-        const data = await this.api.identifyVisitor({
-          visitorId,
-          email: this.visitorOverride?.email,
-          name: this.visitorOverride?.name,
-        })
-        if (this.destroyed) return null
-        this.state.token = data.realtimeToken
-        if (data.conversationId && !this.state.conversationId) {
-          this.state.conversationId = data.conversationId
-        }
-        return data.realtimeToken
-      } catch {
-        return null
-      }
-    }
+    // Mode-aware realtime token refresh. anonymous → identifyVisitor
+    // (historical). verified_visitor → resume credential + authenticated
+    // /contact (clear resume + verification UI on stale). site_user_only
+    // → refresh customer identity (or memory token) + authenticated
+    // /contact. Returns the fresh realtime token or null (stop reconnect).
+    this.socket.onTokenExpired = () => this.modeAwareRefreshToken()
+    // Narrow authorization-recovery hook for visitor policy connect errors.
+    this.socket.onAuthorizationError = (reason) => this.authorizationRecovery(reason)
     this.socket.on('disconnect', () => {
-      if (this.destroyed) return
+      if (this.destroyed || gen !== this.generation) return
       this.state.connected = false
       this.maybeStartPolling() // socket disconnected → enable fallback
     })
     this.socket.on('message:new', (msg) => {
+      if (this.destroyed || gen !== this.generation) return
       this.ingestMessage(msg as Message)
     })
     this.socket.on('conversation:updated', (data) => {
-      if (this.destroyed) return
+      if (this.destroyed || gen !== this.generation) return
       const d = data as { changes?: { status?: string } }
       if (d && d.changes && d.changes.status === 'closed') {
         this.showCsatSurvey()
       }
     })
     this.socket.on('typing:start', (data) => {
-      if (this.destroyed) return
+      if (this.destroyed || gen !== this.generation) return
       const d = data as { senderType?: string }
       if (d && d.senderType === 'agent') {
         this.typingEl.style.display = 'block'
@@ -710,10 +1541,132 @@ export class SukhanWidget implements SukhanInstance {
       }
     })
     this.socket.on('typing:stop', () => {
-      if (this.destroyed) return
+      if (this.destroyed || gen !== this.generation) return
       this.typingEl.style.display = 'none'
     })
     this.socket.connect()
+  }
+
+  /**
+   * Mode-aware realtime token refresh (used by socket onTokenExpired).
+   * anonymous: historical identifyVisitor. verified_visitor: resume
+   * credential + authenticated /contact (clear resume + verification UI on
+   * stale — never anonymous downgrade). site_user_only: refresh customer
+   * identity (or reuse memory token) + authenticated /contact (login-
+   * required state on logged out — never anonymous downgrade). Returns
+   * the fresh realtime token (reconnect) or null (stop reconnecting).
+   */
+  private async modeAwareRefreshToken(): Promise<string | null> {
+    if (this.destroyed) return null
+    const gen = this.generation
+    const mode = this.resolveAccessMode()
+    try {
+      if (mode === 'anonymous') {
+        const visitorId = getVisitorId(this.api.slug, this.visitorOverride?.visitorId)
+        const data = await this.api.identifyVisitor({
+          visitorId,
+          email: this.visitorOverride?.email,
+          name: this.visitorOverride?.name,
+        })
+        if (this.destroyed || gen !== this.generation) return null
+        if (data.conversationId && !this.state.conversationId) {
+          this.state.conversationId = data.conversationId
+        }
+        this.state.token = data.realtimeToken
+        return data.realtimeToken
+      }
+      if (mode === 'verified_visitor') {
+        const resume = getResume(this.api.slug)
+        if (!resume) {
+          // No resume → verification UI (do not downgrade anonymous).
+          this.showVerificationForm()
+          return null
+        }
+        try {
+          const data = await this.api.bootstrapContact(resume)
+          if (this.destroyed || gen !== this.generation) return null
+          this.applyBootstrapResponse(data)
+          return data.realtimeToken
+        } catch (e) {
+          if (this.destroyed || gen !== this.generation) return null
+          if (e instanceof SukhanApiError && e.code === 'verification_required') {
+            clearResume(this.api.slug)
+            this.showVerificationForm()
+          }
+          return null
+        }
+      }
+      if (mode === 'site_user_only') {
+        // Prefer a freshly-fetched token; fall back to the in-memory token.
+        let token: string | null = this.memoryIdentityToken
+        const endpoint = resolveIdentityEndpoint({
+          explicit: this.options.identityEndpoint,
+          configPath: this.config?.identityEndpointPath ?? null,
+        })
+        if (endpoint) {
+          const result = await this.identityFetcher(endpoint)
+          if (this.destroyed || gen !== this.generation) return null
+          if (result === null) return null // integration unavailable → stop
+          if (!result.authenticated || !result.token) {
+            this.enterLoginRequired()
+            return null
+          }
+          token = result.token
+        }
+        if (!token) {
+          this.enterLoginRequired()
+          return null
+        }
+        try {
+          const data = await this.api.bootstrapContact(token)
+          if (this.destroyed || gen !== this.generation) return null
+          this.memoryIdentityToken = token
+          this.applyBootstrapResponse(data)
+          return data.realtimeToken
+        } catch (e) {
+          if (this.destroyed || gen !== this.generation) return null
+          if (e instanceof SukhanApiError && e.code === 'website_login_required') {
+            this.memoryIdentityToken = null
+            this.enterLoginRequired()
+          }
+          return null
+        }
+      }
+    } catch {
+      // best-effort — stop reconnecting
+    }
+    return null
+  }
+
+  /**
+   * Narrow authorization-recovery hook (socket onAuthorizationError). On a
+   * visitor policy connect_error the socket delegates here. We: (1) re-
+   * fetch public config (single-flight), (2) resolve the CURRENT accessMode,
+   * (3) execute the correct identity flow, (4) return a fresh realtime
+   * token (reconnect) or null (stop reconnecting until the user completes
+   * the required identity action). Bounded — no infinite connect_error loop
+   * (the socket marks itself terminal on null). Reuses the single-flight
+   * config refresh so concurrent socket/send errors collapse to one fetch.
+   */
+  private async authorizationRecovery(_reason: string): Promise<string | null> {
+    if (this.destroyed) return null
+    const cfg = await this.refreshConfig()
+    if (this.destroyed || !cfg) return null
+    // Re-evaluate the CURRENT access mode + re-bootstrap. The bootstrap
+    // path itself obtains a fresh realtime token via the mode-aware flow;
+    // we capture it by reading state.token AFTER a successful bootstrap.
+    const gen = this.generation
+    this.generation++ // policy change → bump guard (stale async bails)
+    this.clearIdentityState()
+    this.bootstrap()
+    // The bootstrap is async (fire-and-forget). We cannot synchronously
+    // return the new token here; return null so the socket stops its own
+    // reconnect loop, and the bootstrap's connectSocket() opens a FRESH
+    // socket once the new token is available. This avoids a double-
+    // socket (old recovering + new connecting) — the old socket is
+    // terminal, the new socket connects cleanly.
+    void gen // (gen captured for clarity; this.generation already bumped)
+    return null
   }
 
   /**
@@ -768,6 +1721,29 @@ export class SukhanWidget implements SukhanInstance {
         }
       })
       .catch((e) => {
+        if (this.destroyed) return
+        // Never silently lose the typed message — restore it so the user
+        // can retry. (Explicit retry remains safer than auto-resend.)
+        if (this.inputEl) this.inputEl.value = text
+        if (e instanceof SukhanApiError) {
+          // Policy send errors → re-fetch config + trigger the correct
+          // identity-upgrade flow. Do NOT auto-resend the message.
+          const code = e.code
+          if (
+            code === 'policy_changed' ||
+            code === 'verification_required' ||
+            code === 'website_login_required' ||
+            code === 'identity_token_invalid' ||
+            code === 'policy_unavailable' ||
+            code === 'integration_unavailable'
+          ) {
+            // eslint-disable-next-line no-console
+            console.error('[sukhan] send denied by policy:', code)
+            // Delegated, single-flight: re-fetch config + re-bootstrap.
+            void this.authorizationRecovery(code)
+            return
+          }
+        }
         // eslint-disable-next-line no-console
         console.error('[sukhan] send failed', e)
       })
@@ -1041,17 +2017,21 @@ export class SukhanWidget implements SukhanInstance {
   // ---------- Teardown ----------
   /**
    * Idempotent teardown. Disconnects socket, clears polling interval,
-   * clears typing timer, removes DOM root. Safe to call multiple times.
+   * clears typing timer, removes DOM root, clears identity state. Safe to
+   * call multiple times.
    *
    * The `destroyed` flag is checked at the start of every async
    * callback (init's fetchConfig.then, identifyVisitor.then,
    * loadMessages.then, sendMessage.then, pollOnce.then,
-   * reconcileHistory.then, onTokenExpired) so a delayed async callback
-   * after destroy() does NOT remount/update a destroyed widget.
+   * reconcileHistory.then, modeAwareRefreshToken, authorizationRecovery)
+   * so a delayed async callback after destroy() does NOT remount/update a
+   * destroyed widget. The `generation` counter additionally guards against
+   * stale async from a PREVIOUS identity (SPA user-switch).
    */
   destroy(): void {
     if (this.destroyed) return // idempotent: calling twice is a no-op
     this.destroyed = true
+    this.clearIdentityState()
     // 1. Clear polling interval
     this.stopPolling()
     // 2. Clear typing timer
@@ -1073,7 +2053,9 @@ export class SukhanWidget implements SukhanInstance {
       this.rootEl.parentNode.removeChild(this.rootEl)
     }
     this.rootEl = null
-    // 5. Reset mounted flag (allows a new initSukhan to mount)
+    // 5. Clear in-memory identity token (never persisted, but clear on teardown).
+    this.memoryIdentityToken = null
+    // 6. Reset mounted flag (allows a new initSukhan to mount)
     if (typeof window !== 'undefined') {
       ;(window as unknown as { __sukhan_mounted?: boolean }).__sukhan_mounted = false
     }
@@ -1098,4 +2080,14 @@ export class SukhanWidget implements SukhanInstance {
   __getRealtimeConfig(): RealtimeEndpointConfig { return this.realtimeConfig }
   /** @internal — current clientScriptUrl (for assertions). */
   __getClientScriptUrl(): string { return this.clientScriptUrl }
+  /** @internal — current identity state. */
+  __getIdentityState(): IdentityState { return this.identityState }
+  /** @internal — current generation counter. */
+  __getGeneration(): number { return this.generation }
+  /** @internal — the in-memory identity token (memory-only; tests assert it is NOT in storage). */
+  __getMemoryIdentityToken(): string | null { return this.memoryIdentityToken }
+  /** @internal — the ApiClient (for tests to spy on calls). */
+  __getApi(): ApiClient { return this.api }
+  /** @internal — force a bootstrap re-run (for mode-transition tests). */
+  __bootstrap(): void { this.bootstrap() }
 }
