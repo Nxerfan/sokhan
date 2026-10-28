@@ -183,10 +183,33 @@ test.beforeAll(async () => {
       res.end('<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Customer</title></head><body><h1>Customer</h1></body></html>')
       return
     }
+    // Serve the built NPM bundle. The bundle (dist/index.js) is an ES
+    // module whose internal imports resolve to sibling files
+    // (./widget.js, ./api.js, ./identity.js, ./socket.js, ./merge.js,
+    // ./realtime-resolve.js, ./types.js). The browser resolves those to
+    // same-origin paths (/<file>), so the customer server must serve the
+    // WHOLE dist/ directory — not just index.js. /sukhan-widget.js is an
+    // alias for dist/index.js (the entry the dynamic import() targets).
+    const serveDistFile = (distBasename: string): boolean => {
+      const p = join(PKG_DIR, 'dist', distBasename)
+      if (!existsSync(p) || distBasename.includes('..')) return false
+      const isJs = distBasename.endsWith('.js')
+      const isMap = distBasename.endsWith('.js.map')
+      const isDts = distBasename.endsWith('.d.ts')
+      const mime = isJs ? 'application/javascript; charset=utf-8'
+        : isMap ? 'application/json; charset=utf-8'
+        : isDts ? 'text/plain; charset=utf-8'
+        : 'application/octet-stream'
+      res.writeHead(200, { 'Content-Type': mime })
+      res.end(readFileSync(p, 'utf-8'))
+      return true
+    }
     if (url === '/sukhan-widget.js') {
-      res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8' })
-      res.end(readWidgetBundle())
-      return
+      if (serveDistFile('index.js')) return
+    }
+    // Serve any dist/ file by basename (e.g. /widget.js -> dist/widget.js).
+    if (/^\/[A-Za-z0-9_.-]+\.(js|js\.map|d\.ts)$/.test(url)) {
+      if (serveDistFile(url.slice(1))) return
     }
     res.writeHead(404, { 'Content-Type': 'text/plain' })
     res.end('Not Found')
@@ -249,9 +272,11 @@ async function generateIntegrationSecret(slug: string, cookie: string): Promise<
     body: JSON.stringify({}),
   })
   expect(res.ok, 'integration-secret generation should succeed').toBe(true)
-  const data = (await res.json()) as { secret?: string }
-  expect(data.secret, 'integration secret should be returned').toBeTruthy()
-  return data.secret as string
+  // The route returns { rawSecret, hasSecret, rotatedAt } — the raw secret is
+  // returned EXACTLY ONCE on POST (generate/rotate). Field is `rawSecret`.
+  const data = (await res.json()) as { rawSecret?: string }
+  expect(data.rawSecret, 'integration secret (rawSecret) should be returned').toBeTruthy()
+  return data.rawSecret as string
 }
 
 /** Load the customer page + initialize the NPM widget with the given options. */
@@ -281,8 +306,10 @@ test.describe('Widget NPM identity integration (three access modes + SPA surface
     const page = await ctx.newPage()
     let identityEndpointCalled = false
     // Intercept the customer identity endpoint to prove it is NOT called.
-    await page.route(`${CUSTOMER_ORIGIN}/api/sukhan-identity`, () => {
+    // continue() so a request (if incorrectly made) proceeds + is counted.
+    await page.route(`${CUSTOMER_ORIGIN}/api/sukhan-identity`, async (route) => {
       identityEndpointCalled = true
+      await route.continue()
     })
     await initWidgetOnCustomerPage(page, slug)
     await page.waitForTimeout(1500)
