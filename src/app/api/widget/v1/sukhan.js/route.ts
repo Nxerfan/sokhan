@@ -1,5 +1,6 @@
 import { db } from '@/lib/db'
 import { normalizeApiKey } from '@/lib/widget/widget-utils'
+import { IDENTITY_HELPERS_JS, IDENTITY_STATEFUL_JS } from '@/lib/widget-script-identity'
 
 /**
  * Script-tag alternative endpoint — versioned under `/api/widget/v1/`.
@@ -34,7 +35,7 @@ import { normalizeApiKey } from '@/lib/widget/widget-utils'
  *     the contract is forward-compatible).
  */
 
-function buildScript(socketUrlOverride: string | null, isVercel: boolean): string {
+export function buildScript(socketUrlOverride: string | null, isVercel: boolean): string {
   // When isVercel is true and no explicit override is set, the script resolves
   // SOCKET_URL at runtime from the Sukhan origin (API_URL). The placeholder
   // "__API_URL__" is baked-in server-side and the script replaces it at runtime.
@@ -105,7 +106,8 @@ function buildScript(socketUrlOverride: string | null, isVercel: boolean): strin
   if (${forceVercelPath ? 'true' : 'false'} && SOCKET_PATH === '/') {
     SOCKET_PATH = "/api/realtime";
   }
-
+${IDENTITY_HELPERS_JS}
+${IDENTITY_STATEFUL_JS}
   var state = {
     open: false,
     config: null,
@@ -332,7 +334,9 @@ function buildScript(socketUrlOverride: string | null, isVercel: boolean): strin
     document.body.appendChild(root);
 
     renderMessages();
-    identifyVisitor();
+    // Mode-aware identity bootstrap (anonymous/verified_visitor/site_user_only).
+    // The anonymous path still calls identifyVisitor() internally via __sk_bootstrap().
+    __sk_bootstrap();
   }
 
   function toggle(){
@@ -436,12 +440,18 @@ function buildScript(socketUrlOverride: string | null, isVercel: boolean): strin
         }
         if (visitorMembershipRevoked) return;
         if (err.message === 'invalid_token' || err.message === 'no_token') {
-          refreshVisitorToken(function(data){
+          // Mode-aware token refresh (anonymous=refreshVisitorToken;
+          // verified_visitor=resume credential; site_user_only=customer identity).
+          __sk_modeAwareRefreshToken(function(data){
             if (data && data.realtimeToken && state.socket) {
               state.socket.auth = { token: data.realtimeToken };
               state.socket.connect();
             }
           });
+        } else if (__sk_POLICY_REASONS[err.message]) {
+          // Visitor policy connect_error → re-fetch config + re-bootstrap on the
+          // CURRENT policy (single-flight, bounded — no infinite reconnect loop).
+          __sk_authorizationRecovery(err.message);
         }
       });
       state.socket.on('message:new', function(msg){
@@ -476,8 +486,22 @@ function buildScript(socketUrlOverride: string | null, isVercel: boolean): strin
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + state.token },
       body: JSON.stringify({ text: text }),
     })
-    .then(function(r){ return r.json(); })
+    .then(function(r){
+      if (!r.ok) {
+        // Policy send errors → trigger identity recovery. Preserve the typed
+        // message (restore the input) so the user can explicitly retry after
+        // re-authenticating — no auto-resend (PR9 semantics).
+        return __sk_safeApiCode(r).then(function(code){
+          if (inputEl) inputEl.value = text;
+          if (code && __sk_POLICY_REASONS[code]) { __sk_authorizationRecovery(code); }
+          console.error('[sukhan] send failed:', code);
+          return null;
+        });
+      }
+      return r.json();
+    })
     .then(function(data){
+      if (!data) return;
       if (data.message) {
         state.messages.push(data.message);
         renderMessages();
@@ -490,7 +514,10 @@ function buildScript(socketUrlOverride: string | null, isVercel: boolean): strin
       }
       startPolling();
     })
-    .catch(function(e){ console.error('[sukhan] send failed', e); });
+    .catch(function(e){
+      if (inputEl) inputEl.value = text; // never silently lose the typed message
+      console.error('[sukhan] send failed', e);
+    });
   }
 
   var pollTimer = null;

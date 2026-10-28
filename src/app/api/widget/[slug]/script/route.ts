@@ -1,4 +1,5 @@
 import { db } from '@/lib/db'
+import { IDENTITY_HELPERS_JS, IDENTITY_STATEFUL_JS } from '@/lib/widget-script-identity'
 
 /**
  * Embeddable widget script (Module 2 — real two-way chat client).
@@ -17,7 +18,7 @@ import { db } from '@/lib/db'
  * Fully self-contained (no framework), RTL-aware via the config's defaultDirection.
  */
 
-function buildScript(_origin: string, slug: string, disablePolling: boolean, socketUrl: string, isVercel: boolean): string {
+export function buildScript(_origin: string, slug: string, disablePolling: boolean, socketUrl: string, isVercel: boolean): string {
   // The baked SOCKET_URL value can be one of THREE things:
   //   1. The literal placeholder string "__API_URL__" (Vercel, no explicit
   //      override) — the script replaces this with API_URL at runtime.
@@ -98,7 +99,8 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
   if (${isVercel ? 'true' : 'false'} && SOCKET_PATH === '/') {
     SOCKET_PATH = "/api/realtime";
   }
-
+${IDENTITY_HELPERS_JS}
+${IDENTITY_STATEFUL_JS}
   var state = {
     open: false,
     config: null,
@@ -556,8 +558,10 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
     root.appendChild(panel); root.appendChild(launcher);
     document.body.appendChild(root);
 
-    // Identify visitor and connect
-    identifyVisitor();
+    // Mode-aware identity bootstrap (anonymous/verified_visitor/site_user_only).
+    // Replaces the historical anonymous-only identifyVisitor() call — the
+    // anonymous path still calls identifyVisitor() internally via __sk_bootstrap().
+    __sk_bootstrap();
   }
 
   function toggle(){
@@ -751,12 +755,18 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
         }
         if (visitorMembershipRevoked) return;
         if (err.message === 'invalid_token' || err.message === 'no_token') {
-          refreshVisitorToken(function(data){
+          // Mode-aware token refresh (anonymous=identifyVisitor refresh;
+          // verified_visitor=resume credential; site_user_only=customer identity).
+          __sk_modeAwareRefreshToken(function(data){
             if (data && data.realtimeToken && state.socket) {
               state.socket.auth = { token: data.realtimeToken };
               state.socket.connect();
             }
           });
+        } else if (__sk_POLICY_REASONS[err.message]) {
+          // Visitor policy connect_error → re-fetch config + re-bootstrap on the
+          // CURRENT policy (single-flight, bounded — no infinite reconnect loop).
+          __sk_authorizationRecovery(err.message);
         }
       });
       state.socket.on('message:new', function(msg){
@@ -946,6 +956,13 @@ function buildScript(_origin: string, slug: string, disablePolling: boolean, soc
         }
       }
       renderMessages();
+      // Policy send errors (policy_changed / verification_required /
+      // website_login_required / identity_token_invalid) → trigger identity
+      // recovery. The optimistic entry STAYS failed/retryable — the user must
+      // explicitly retry after re-authenticating (PR9 semantics: no auto-resend).
+      var codeMatch = safeMsg && safeMsg.indexOf ? safeMsg.match(/send_failed_(.+)$/) : null;
+      var pcode = codeMatch ? codeMatch[1] : null;
+      if (pcode && __sk_POLICY_REASONS[pcode]) { __sk_authorizationRecovery(pcode); }
     });
   }
 
