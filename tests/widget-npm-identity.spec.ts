@@ -251,9 +251,11 @@ async function generateIntegrationSecret(slug: string, cookie: string): Promise<
 async function initWidgetOnCustomerPage(page: Page, slug: string, opts?: Record<string, unknown>): Promise<void> {
   await page.goto(`${CUSTOMER_ORIGIN}/customer.html`)
   await page.waitForLoadState('domcontentloaded')
-  await page.addScriptTag({ url: `${CUSTOMER_ORIGIN}/sukhan-widget.js` })
+  // The widget bundle is an ES module (dist/index.js uses `export`). Load it
+  // via a dynamic import() in the browser — do NOT addScriptTag (a classic
+  // <script> would throw a syntax error on the `export` statements).
   await page.evaluate(async ({ sukhanOrigin, slug, opts }) => {
-    const mod = await import(/* @vite-ignore */ `${window.location.origin}/sukhan-widget.js`)
+    const mod = await import(`${window.location.origin}/sukhan-widget.js`)
     const inst = mod.initSukhan({ apiKey: slug, apiUrl: sukhanOrigin, ...opts })
     ;(window as unknown as { __sukhan: unknown }).__sukhan = inst
   }, { sukhanOrigin: SUKHAN_ORIGIN, slug, opts: opts ?? {} })
@@ -337,7 +339,7 @@ test.describe('Widget NPM identity integration (three access modes + SPA surface
     const stamp = `${process.pid}-${Date.now()}-fail`
     const ctx = await browser.newContext()
     const { slug, cookie } = await signupAndAuth(ctx, `fail-${stamp}@test.com`, `FailWS ${stamp}`)
-    if (!state.integrationSecret) state.integrationSecret = await generateIntegrationSecret(slug, cookie)
+    state.integrationSecret = await generateIntegrationSecret(slug, cookie)
     await setAccessMode(slug, cookie, 'site_user_only', { identityEndpointPath: '/api/sukhan-identity' })
     state.tenantSlug = slug
     state.session = { loggedIn: true, externalUserId: 'ext_fail' }
@@ -366,7 +368,7 @@ test.describe('Widget NPM identity integration (three access modes + SPA surface
     const stamp = `${process.pid}-${Date.now()}-refresh`
     const ctx = await browser.newContext()
     const { slug, cookie } = await signupAndAuth(ctx, `refresh-${stamp}@test.com`, `RefreshWS ${stamp}`)
-    if (!state.integrationSecret) state.integrationSecret = await generateIntegrationSecret(slug, cookie)
+    state.integrationSecret = await generateIntegrationSecret(slug, cookie)
     await setAccessMode(slug, cookie, 'site_user_only', {
       identityEndpointPath: '/api/sukhan-identity',
       loginButtonLabel: 'Sign in',
@@ -402,7 +404,7 @@ test.describe('Widget NPM identity integration (three access modes + SPA surface
     const stamp = `${process.pid}-${Date.now()}-switch`
     const ctx = await browser.newContext()
     const { slug, cookie } = await signupAndAuth(ctx, `switch-${stamp}@test.com`, `SwitchWS ${stamp}`)
-    if (!state.integrationSecret) state.integrationSecret = await generateIntegrationSecret(slug, cookie)
+    state.integrationSecret = await generateIntegrationSecret(slug, cookie)
     await setAccessMode(slug, cookie, 'site_user_only', { identityEndpointPath: '/api/sukhan-identity' })
     state.tenantSlug = slug
     state.failureMode = 'none'
@@ -469,7 +471,7 @@ test.describe('Widget NPM identity integration (three access modes + SPA surface
     const stamp = `${process.pid}-${Date.now()}-loginurl`
     const ctx = await browser.newContext()
     const { slug, cookie } = await signupAndAuth(ctx, `loginurl-${stamp}@test.com`, `LoginUrlWS ${stamp}`)
-    if (!state.integrationSecret) state.integrationSecret = await generateIntegrationSecret(slug, cookie)
+    state.integrationSecret = await generateIntegrationSecret(slug, cookie)
     await setAccessMode(slug, cookie, 'site_user_only', {
       identityEndpointPath: '/api/sukhan-identity',
       loginUrl: '/login',
