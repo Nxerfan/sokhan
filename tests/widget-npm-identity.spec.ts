@@ -3,7 +3,14 @@ import { createServer, type Server, type IncomingMessage, type ServerResponse } 
 import { otpSignupPlaywright } from './helpers/otp-signup'
 import { execSync } from 'child_process'
 import { existsSync, rmSync, readFileSync } from 'fs'
-import { join, resolve } from 'path'
+import { join, resolve, dirname } from 'path'
+import { fileURLToPath } from 'node:url'
+
+// Playwright spec files are ES modules — `__dirname` is not defined in ESM.
+// Emulate it via `import.meta.url` so the repo root + package dir resolve
+// identically in CI + local bun:test. (A distinct name avoids redeclaring
+// the bun-types global `__dirname` under the root tsconfig.)
+const SPEC_DIR = dirname(fileURLToPath(import.meta.url))
 
 /**
  * Widget NPM identity integration browser tests (requirements #36–#47, #52, #53).
@@ -61,7 +68,7 @@ const SUKHAN_ORIGIN = 'http://127.0.0.1:81'
 const CUSTOMER_PORT = 8084
 const CUSTOMER_ORIGIN = `http://127.0.0.1:${CUSTOMER_PORT}`
 
-const REPO_ROOT = resolve(__dirname, '..')
+const REPO_ROOT = resolve(SPEC_DIR, '..')
 const PKG_DIR = join(REPO_ROOT, 'packages/widget-npm')
 const WIDGET_BUNDLE = join(PKG_DIR, 'dist', 'index.js')
 
