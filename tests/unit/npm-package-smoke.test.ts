@@ -50,7 +50,7 @@ test('npm pack: tarball is created with dist/ contents', () => {
   expect(packDryRun, 'tarball must NOT include raw src/').not.toContain('src/index.ts')
   expect(packDryRun, 'tarball must include dist/').toContain('dist/index.js')
   expect(packDryRun, 'tarball must include package.json').toContain('package.json')
-})
+}, 60000)
 
 test('npm clean-consumer: install + import initSukhan', () => {
   const consumerDir = join(TMP_ROOT, 'npm-consumer')
@@ -83,7 +83,7 @@ test('npm clean-consumer: install + import initSukhan', () => {
     encoding: 'utf-8',
   })
   expect(result.trim()).toBe('OK')
-})
+}, 60000)
 
 test('bun clean-consumer: install + import initSukhan', () => {
   const consumerDir = join(TMP_ROOT, 'bun-consumer')
@@ -113,7 +113,7 @@ test('bun clean-consumer: install + import initSukhan', () => {
     encoding: 'utf-8',
   })
   expect(result.trim()).toBe('OK')
-})
+}, 60000)
 
 test('package.json: exports point to dist/ (not raw src/)', () => {
   const pkgJson = JSON.parse(readFileSync(join(PKG_DIR, 'package.json'), 'utf-8'))
