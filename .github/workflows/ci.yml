@@ -69,7 +69,13 @@ jobs:
 
   docker-regression:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Bumped 30→60: the browser suites grew to 151 tests × 2 editions (Full +
+    # Lite) across the visitor-access-modes phases (NPM identity, script
+    # identity, dashboard Access & Identity) + the connectAndWait safety-net
+    # timeout (12s) + the identity/dashboard specs' waits. The job now exceeds
+    # the prior 30-min limit → cancelled by the timeout (not a code failure).
+    # 60 min gives comfortable headroom; local/CI runs finish in ~30-35 min.
+    timeout-minutes: 60
     env:
       NEXTAUTH_SECRET: ci-docker-test-secret-not-production
       POSTGRES_PASSWORD: ci-postgres-password
