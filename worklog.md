@@ -2323,3 +2323,5 @@ error codes, TTLs (resume 30d, external token 5m), limits (MAX_VERIFY_ATTEMPTS=5
 MAX_RESENDS=3), constants (RAW_LENGTH_BYTES=48, SHA-256) verified against the
 actual production files. NPM publication stated as pending; dashboard 'Coming
 Soon' preserved. PR #14 DRAFT / NOT MERGED / NO AUTO-MERGE.
+
+## Docs-phase retrigger (74d5226 had 2 pre-existing timing flakes on Lite: realtime-authz:613 connectAndWait + workspace-switcher:331 switch — not caused by docs; Full suite green. Retriggering for a deterministic green SHA.)
