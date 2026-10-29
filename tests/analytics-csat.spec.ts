@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test'
 import { otpSignupPlaywright } from './helpers/otp-signup'
+import { setAccessMode } from './helpers/set-access'
 
 /**
  * Analytics + CSAT — behavioral regression (stabilization audit,
@@ -50,6 +51,10 @@ async function signupAndGetSlug(page: Page, email: string, workspace: string): P
   const tenantRes = await page.request.get(`${DASHBOARD}/api/tenants/me`)
   const slug = (await tenantRes.json()).tenant?.slug
   expect(slug, 'slug should be set').toBeTruthy()
+  // Fresh OTP signups default to accessMode='verified_visitor' (the frozen
+  // DB contract). The /contact flow below requires anonymous visitor tokens,
+  // so explicitly switch the tenant to anonymous before any visitor traffic.
+  await setAccessMode(page, 'anonymous')
   return slug as string
 }
 

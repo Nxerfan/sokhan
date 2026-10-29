@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test'
+import { setAccessMode } from './helpers/set-access'
 
 /**
  * Vercel deployment regression suite.
@@ -80,6 +81,11 @@ async function signupAndSignIn(page: Page, email: string, workspace: string) {
     const r = await fetch('/api/tenants/me')
     return r.json()
   })
+  // Fresh OTP signups default to accessMode='verified_visitor' (the frozen
+  // DB contract). The /contact flow below requires anonymous visitor
+  // tokens, so explicitly switch the tenant to anonymous before any visitor
+  // traffic. (Helper used by tests that POST /api/widget/<slug>/contact.)
+  await setAccessMode(page, 'anonymous')
   return tenantRes.tenant
 }
 

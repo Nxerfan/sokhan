@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test'
 import { otpSignupPlaywright } from './helpers/otp-signup'
+import { setAccessMode } from './helpers/set-access'
 
 /**
  * Inbox burst dedup (PR#5 final race fix) — two Socket.IO MESSAGE_NEW events
@@ -51,6 +52,10 @@ async function signupAndGetSlug(page: Page, email: string, workspace: string): P
   ).catch(() => {})
   await page.waitForTimeout(2000) // let the socket connect + join the tenant room
   const tenantRes = await page.request.get(`${DASHBOARD}/api/tenants/me`)
+  // Fresh OTP signups default to accessMode='verified_visitor' (the frozen
+  // DB contract). The /contact flow below requires anonymous visitor tokens,
+  // so explicitly switch the tenant to anonymous before any visitor traffic.
+  await setAccessMode(page, 'anonymous')
   return (await tenantRes.json()).tenant.slug
 }
 

@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test'
 import { otpSignupPlaywright } from './helpers/otp-signup'
+import { setAccessMode } from './helpers/set-access'
 
 /**
  * Module 4 tests — AI FAQ auto-responder + Product Q&A.
@@ -49,6 +50,11 @@ async function signupAndSignin(page: Page, email: string, workspace: string): Pr
   if (subscribeData.invoiceId) {
     await page.request.get(`${DASHBOARD}/api/billing/callback/zarinpal?invoiceId=${subscribeData.invoiceId}&Status=OK`, { maxRedirects: 0 })
   }
+
+  // Fresh OTP signups default to accessMode='verified_visitor' (the frozen
+  // DB contract). The /contact flow below requires anonymous visitor tokens,
+  // so explicitly switch the tenant to anonymous before any visitor traffic.
+  await setAccessMode(page, 'anonymous')
 
   return slug
 }
@@ -244,6 +250,11 @@ test.describe('Module 4 — AI features', () => {
     const tenantRes = await page.request.get(`${DASHBOARD}/api/tenants/me`)
     const tenantData = await tenantRes.json()
     const slug = tenantData.tenant?.slug
+
+    // Fresh OTP signups default to accessMode='verified_visitor' (the frozen
+    // DB contract). The /contact flow below requires anonymous visitor tokens,
+    // so explicitly switch the tenant to anonymous before any visitor traffic.
+    await setAccessMode(page, 'anonymous')
 
     // Try to enable the FAQ feature (even though free tier has aiActions: 0)
     await page.request.patch(`${DASHBOARD}/api/ai-config`, {

@@ -94,6 +94,11 @@ async function signupAndSignin(ctx: BrowserContext, email: string, workspace: st
   await page.goto(DASHBOARD)
   await page.waitForLoadState('networkidle')
   await page.waitForTimeout(1000)
+  // Fresh signup defaults to verified_visitor; the anonymous-mode + cross-
+  // tenant/cross-contact realtime tests POST /contact for a visitor token,
+  // which requires anonymous. The policy-transition test sets verified_visitor
+  // explicitly after the anonymous socket connects.
+  await setAccessMode(page, 'anonymous')
   return { page, slug, tenantId, realtimeToken: tokenData.token }
 }
 

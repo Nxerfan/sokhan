@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test'
 import { otpSignupPlaywright } from './helpers/otp-signup'
+import { setAccessMode } from './helpers/set-access'
 
 /**
  * Module 3 tests — Contacts panel, Billing flow, CSAT submission.
@@ -25,6 +26,10 @@ async function signupAndSignin(page: Page, email: string, workspace: string): Pr
   await page.goto(DASHBOARD)
   await page.waitForLoadState('networkidle')
   await page.waitForTimeout(3000)
+  // Fresh OTP signups default to accessMode='verified_visitor' (the frozen
+  // DB contract). The /contact flow below requires anonymous visitor tokens,
+  // so explicitly switch the tenant to anonymous before any visitor traffic.
+  await setAccessMode(page, 'anonymous')
   return slug
 }
 

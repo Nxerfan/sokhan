@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test'
+import { setAccessMode } from './helpers/set-access'
 
 /**
  * Cross-tenant isolation test — the definitive proof that Tenant B cannot see
@@ -59,6 +60,13 @@ test.describe('Cross-tenant isolation', () => {
 
     expect(tenantAData.slug, 'Tenant A should have a slug').toBeTruthy()
     console.log(`Tenant A: slug=${tenantAData.slug}`)
+
+    // Fresh OTP signups default to accessMode='verified_visitor' (the frozen
+    // DB contract). The /contact flow below requires anonymous visitor
+    // tokens, so explicitly switch the tenant to anonymous before any
+    // visitor traffic. (Tenant B does not POST /contact, so it does not
+    // need this switch — its checks are dashboard-side isolation checks.)
+    await setAccessMode(pageA, 'anonymous')
 
     // Create a conversation via the widget API (as a visitor)
     const convData = await pageA.evaluate(async (slug) => {
