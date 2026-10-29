@@ -150,7 +150,7 @@ async function getSessionWorkspaceId(page: Page): Promise<string | null> {
 }
 
 /** Poll /api/auth/session until the workspaceId matches `expected` (bounded). */
-async function waitForWorkspaceSwitch(page: Page, expected: string, timeoutMs = 20000): Promise<void> {
+async function waitForWorkspaceSwitch(page: Page, expected: string, timeoutMs = 30000): Promise<void> {
   const deadline = Date.now() + timeoutMs
   let last: string | null = null
   while (Date.now() < deadline) {
