@@ -22,6 +22,7 @@ import type { PlanSlug } from './plans'
  * Numbers represent maximums (0 = disabled). Strings represent tiers.
  */
 export interface WidgetEntitlements {
+  /** @readonly — use Object.freeze for runtime immutability */
   /** Position: 3 predefined positions (Free) vs unrestricted (paid). */
   presetPositioning: boolean
   /** Precise X/Y pixel positioning + drag + slider. */
@@ -85,7 +86,7 @@ const FREE_ENTITLEMENTS: WidgetEntitlements = {
 }
 
 /** Pro plan entitlements — full customization. */
-const PRO_ENTITLEMENTS: WidgetEntitlements = {
+const PRO_ENTITLEMENTS: Readonly<WidgetEntitlements> = Object.freeze<WidgetEntitlements>({
   presetPositioning: true,
   precisePositioning: true,
   presetColors: true,
@@ -102,35 +103,51 @@ const PRO_ENTITLEMENTS: WidgetEntitlements = {
   playground: true,
   brandingRemoval: true,
   legacyCustomizationUnlocked: true,
-}
+})
 
 /** Max plan entitlements — same as Pro (full customization). */
-const MAX_ENTITLEMENTS: WidgetEntitlements = { ...PRO_ENTITLEMENTS }
+const MAX_ENTITLEMENTS: Readonly<WidgetEntitlements> = Object.freeze<WidgetEntitlements>({ ...PRO_ENTITLEMENTS })
 
 /** Self-hosted plan entitlements — same as Pro/Max (full customization). */
-const SELF_HOSTED_ENTITLEMENTS: WidgetEntitlements = { ...PRO_ENTITLEMENTS }
+const SELF_HOSTED_ENTITLEMENTS: Readonly<WidgetEntitlements> = Object.freeze<WidgetEntitlements>({ ...PRO_ENTITLEMENTS })
 
-/** The canonical entitlement catalog. Source of truth. */
-const ENTITLEMENT_CATALOG: Partial<Record<PlanSlug, WidgetEntitlements>> = {
-  free: FREE_ENTITLEMENTS,
-  pro: PRO_ENTITLEMENTS,
-  max: MAX_ENTITLEMENTS,
-  'self-hosted': SELF_HOSTED_ENTITLEMENTS,
-}
+// Freeze the Free entitlements too (was a plain object).
+// (FREE_ENTITLEMENTS is defined above as a plain object — freeze it here.)
+Object.freeze(FREE_ENTITLEMENTS)
+
+/**
+ * The canonical entitlement catalog — a Map (prototype-free) so that
+ * inherited Object properties (constructor, toString, __proto__, etc.)
+ * can NEVER be confused with legitimate plan slugs. Every key is an
+ * own property; unknown keys (including prototype names) return null.
+ *
+ * The values are frozen (Object.freeze) to prevent accidental mutation
+ * across requests.
+ */
+const ENTITLEMENT_CATALOG: ReadonlyMap<string, Readonly<WidgetEntitlements>> = new Map([
+  ['free', FREE_ENTITLEMENTS],
+  ['pro', PRO_ENTITLEMENTS],
+  ['max', MAX_ENTITLEMENTS],
+  ['self-hosted', SELF_HOSTED_ENTITLEMENTS],
+])
 
 /**
  * Get the widget customization entitlements for a plan slug.
  *
- * Returns null for unknown/invalid plans (FAIL CLOSED). The caller must
- * treat null as "no customization allowed" — never default to a permissive
- * entitlement set.
+ * Returns null for unknown/invalid plans (FAIL CLOSED). Uses a Map
+ * (prototype-free) so inherited Object properties (constructor, toString,
+ * __proto__, etc.) return null — not a non-null value that could be
+ * mistaken for a legitimate entitlement set.
+ *
+ * The caller must treat null as "no customization allowed" — never default
+ * to a permissive entitlement set.
  *
  * Server-authoritative: the plan slug comes from the Tenant row (server-side),
  * never from client-supplied info.
  */
-export function getEntitlements(planSlug: string | null | undefined): WidgetEntitlements | null {
-  if (!planSlug) return null
-  return ENTITLEMENT_CATALOG[planSlug as PlanSlug] ?? null
+export function getEntitlements(planSlug: string | null | undefined): Readonly<WidgetEntitlements> | null {
+  if (!planSlug || typeof planSlug !== 'string') return null
+  return ENTITLEMENT_CATALOG.get(planSlug) ?? null
 }
 
 /**

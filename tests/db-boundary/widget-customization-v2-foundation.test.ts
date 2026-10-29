@@ -83,7 +83,17 @@ describe('Widget Customization V2 Foundation — migration + compatibility', () 
     await globalDb.widgetConfig.delete({ where: { id: wc.id } })
   })
 
-  test('existing V1 flat fields are preserved when appearanceV2 is set', async () => {
+  // EVIDENCE NOTE: This test creates a NEW record after the migration has
+  // already run. It proves POST-MIGRATION COEXISTENCE (V1 flat fields +
+  // appearanceV2 can coexist on the same row) — NOT that a PRE-EXISTING
+  // row was preserved DURING the migration. The migration-time preservation
+  // guarantee is the idempotent additive SQL: `ALTER TABLE "WidgetConfig"
+  // ADD COLUMN IF NOT EXISTS "appearanceV2" JSONB` — a nullable column add
+  // that does NOT rewrite or touch existing rows. A dedicated migration test
+  // (seed a row before the migration, run the migration SQL, verify the row
+  // is untouched) would require a baseline PostgreSQL snapshot — not
+  // available in this test environment. The additive SQL is the guarantee.
+  test('post-migration coexistence: V1 flat fields + appearanceV2 on the same row', async () => {
     const wc = await globalDb.widgetConfig.create({
       data: {
         tenantId,

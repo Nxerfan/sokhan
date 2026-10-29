@@ -62,35 +62,51 @@ export const DEFAULT_APPEARANCE_V2: AppearanceV2 = {
  *
  * Accepts ONLY:
  *   - null / undefined → null (no V2 config; fall back to V1 flat fields).
- *   - An object with version === 1 + optional desktop/mobile objects.
+ *   - An object with EXACTLY version === 1 + optional desktop/mobile objects.
  *
  * Rejects (returns null):
  *   - Non-object values.
  *   - Arrays.
  *   - Missing or non-integer version.
  *   - Unknown version (version !== 1).
- *   - desktop/mobile present but not objects.
+ *   - desktop/mobile present but not plain objects.
+ *   - Unexpected top-level keys (only version, desktop, mobile are allowed).
+ *   - Unexpected keys inside desktop/mobile (Phase 1 defines no device fields).
+ *
+ * Returns a CANONICAL object (not the raw input reference) so callers never
+ * hold an unvalidated object.
  *
  * Never throws. Returns null on any malformed shape so the caller fails closed
  * (falls back to V1 flat-field behavior).
  */
+
+/** Allowed top-level keys in an AppearanceV2 object. */
+const ALLOWED_TOP_LEVEL_KEYS = new Set(['version', 'desktop', 'mobile'])
+
 export function parseAppearanceV2(value: unknown): AppearanceV2 | null {
   if (value === null || value === undefined) return null
   if (typeof value !== 'object' || Array.isArray(value)) return null
 
   const v = value as Record<string, unknown>
 
+  // Reject unexpected top-level keys — only version, desktop, mobile are allowed.
+  for (const key of Object.keys(v)) {
+    if (!ALLOWED_TOP_LEVEL_KEYS.has(key)) return null
+  }
+
   // version must be exactly 1 (the current version).
   if (typeof v.version !== 'number' || !Number.isInteger(v.version) || v.version !== APPEARANCE_V2_VERSION) {
     return null
   }
 
-  // desktop / mobile: if present, must be plain objects (or null/undefined).
+  // desktop / mobile: if present, must be plain objects with NO unexpected keys.
   const desktop = parseDeviceAppearance(v.desktop)
   if (desktop === undefined) return null // malformed → fail closed
   const mobile = parseDeviceAppearance(v.mobile)
   if (mobile === undefined) return null
 
+  // Return a CANONICAL object (not the raw input reference) so callers
+  // never hold an unvalidated object.
   return {
     version: APPEARANCE_V2_VERSION,
     desktop: desktop ?? {},
@@ -102,14 +118,22 @@ export function parseAppearanceV2(value: unknown): AppearanceV2 | null {
  * Parse a device-specific appearance. Returns:
  *   - undefined → malformed (caller fails closed).
  *   - null → absent (no device config).
- *   - DeviceAppearance → valid (possibly empty).
+ *   - {} → valid (canonical empty object — Phase 1 defines no device fields).
+ *
+ * Phase 1: DeviceAppearance has NO fields. Any key inside a device object
+ * is UNEXPECTED and causes rejection (returns undefined). This enforces
+ * strict parsing — no arbitrary unvalidated object references pass through.
  */
 function parseDeviceAppearance(value: unknown): DeviceAppearance | null | undefined {
   if (value === null || value === undefined) return null
   if (typeof value !== 'object' || Array.isArray(value)) return undefined // malformed
-  // Phase 1: DeviceAppearance has no fields, so any plain object is valid
-  // (future fields will be validated here). Return the object as-is (typed).
-  return value as DeviceAppearance
+  // Phase 1: DeviceAppearance has no fields. Reject ANY keys — only an
+  // empty object (or absent) is valid. Future phases will add + validate
+  // specific device fields here.
+  const keys = Object.keys(value as Record<string, unknown>)
+  if (keys.length > 0) return undefined // unexpected keys → fail closed
+  // Return a canonical empty object (not the raw input reference).
+  return {}
 }
 
 /**
