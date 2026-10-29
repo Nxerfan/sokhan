@@ -1,6 +1,7 @@
 import { test, expect, type BrowserContext } from '@playwright/test'
 import { createServer, type Server } from 'node:http'
 import { otpSignupPlaywright } from './helpers/otp-signup'
+import { setAccessMode } from './helpers/set-access'
 
 /**
  * External-origin slug widget regression test.
@@ -92,6 +93,12 @@ async function signupAndGetSlug(ctx: BrowserContext, email: string, workspace: s
   const tenantData = await tenantRes.json()
   const slug = tenantData.tenant?.slug
   expect(slug, `slug should be set (tenant data: ${JSON.stringify(tenantData)})`).toBeTruthy()
+  // Anonymous widget-flow regression requires the tenant to be in the
+  // historical `anonymous` access mode (a fresh OTP signup now defaults
+  // to `verified_visitor`). Switch it before the widget script loads
+  // and the test's main flow begins. Must run before the helper's page
+  // is closed — page.request carries the authenticated session.
+  await setAccessMode(page, 'anonymous')
   await page.close()
   return { slug }
 }

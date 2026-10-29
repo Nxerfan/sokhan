@@ -1,5 +1,6 @@
 import { test, expect, type Page, type BrowserContext } from '@playwright/test'
 import { otpSignupPlaywright } from './helpers/otp-signup'
+import { setAccessMode } from './helpers/set-access'
 
 /**
  * Socket race condition test — verifies that an agent reply sent IMMEDIATELY
@@ -52,6 +53,12 @@ async function signupAndSignin(ctx: BrowserContext, email: string, workspace: st
   await page.reload()
   await page.waitForLoadState('networkidle')
   await page.waitForTimeout(3000)
+
+  // Anonymous widget-flow regression requires the tenant to be in the
+  // historical `anonymous` access mode (a fresh OTP signup now defaults
+  // to `verified_visitor`). Switch it before the widget script loads
+  // and the test's main flow begins.
+  await setAccessMode(page, 'anonymous')
 
   return { page, slug }
 }

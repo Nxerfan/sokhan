@@ -85,6 +85,21 @@ interface Draft {
   identityEndpointPath: string
 }
 
+/**
+ * The PATCH /api/widget-config/access response. This is NOT a full AccessConfig
+ * — the PATCH returns ONLY {accessMode, policyVersion, accessModeChanged}.
+ * Casting it to AccessConfig would DROP integrationSecret / loginUrl /
+ * loginButtonLabel / loginReturnUrlParam / identityEndpointPath, corrupting
+ * the local state (the site-user UI could crash or render stale/missing
+ * fields after Save). After a successful PATCH we MUST re-fetch
+ * GET /api/widget-config/access for the authoritative full AccessConfig.
+ */
+interface AccessPatchResponse {
+  accessMode: AccessMode
+  policyVersion: number
+  accessModeChanged: boolean
+}
+
 /** Build a draft from the loaded access config (empty-string for null fields). */
 function toDraft(c: AccessConfig): Draft {
   return {
@@ -202,7 +217,22 @@ export function WidgetAccessIdentity({ slug }: { slug: string; tenantId: string 
         toast.error(errMsg(code, fa))
         return
       }
-      const data = (await res.json()) as AccessConfig
+      // The PATCH response is ONLY {accessMode, policyVersion, accessModeChanged}
+      // — NOT a full AccessConfig. Consume + discard it (do NOT cast to
+      // AccessConfig — that would drop integrationSecret / loginUrl / etc. and
+      // corrupt the local state). Then re-fetch GET /api/widget-config/access
+      // for the AUTHORITATIVE full config (the source of truth for policyVersion,
+      // integrationSecret status, login fields, identity endpoint).
+      await res.json()
+      const reloadRes = await fetch('/api/widget-config/access')
+      if (!reloadRes.ok) {
+        // PATCH succeeded but the authoritative GET failed — surface a safe
+        // error + reload the component state on next mount. Do NOT synthesize.
+        setSaveError(errMsg('policy_unavailable', fa))
+        toast.error(errMsg('policy_unavailable', fa))
+        return
+      }
+      const data = (await reloadRes.json()) as AccessConfig
       setConfig(data)
       setDraft(toDraft(data))
       toast.success(fa ? 'تنظیمات دسترسی ذخیره شد' : 'Access settings saved')

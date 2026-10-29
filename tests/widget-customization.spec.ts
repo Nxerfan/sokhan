@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test'
 import { createServer, type Server } from 'node:http'
 import { otpSignupPlaywright } from './helpers/otp-signup'
+import { setAccessMode } from './helpers/set-access'
 
 /**
  * Widget Customization — behavioral regression (stabilization audit,
@@ -98,6 +99,11 @@ async function signupAndGetSlug(page: Page, email: string, workspace: string): P
   const tenantRes = await page.request.get(`${DASHBOARD}/api/tenants/me`)
   const slug = (await tenantRes.json()).tenant?.slug
   expect(slug, 'slug should be set').toBeTruthy()
+  // Anonymous widget-flow regression requires the tenant to be in the
+  // historical `anonymous` access mode (a fresh OTP signup now defaults
+  // to `verified_visitor`). Switch it before the widget script loads
+  // and the test's main flow begins.
+  await setAccessMode(page, 'anonymous')
   return slug as string
 }
 

@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test'
+import { setAccessMode } from './helpers/set-access'
 
 /**
  * Module 6 tests — Plan restructure + widget domains + free plan limits.
@@ -31,6 +32,9 @@ test.describe('Module 6 — Plan restructure + domains', () => {
     const ctx = await browser.newContext()
     const page = await ctx.newPage()
     const slug = await signupAndGetSlug(page, `weekly-${stamp}@test.com`, `Weekly ${stamp}`)
+    // Fresh signup defaults to verified_visitor; this test exercises the
+    // ANONYMOUS visitor /contact + /messages flow — set anonymous.
+    await setAccessMode(page, 'anonymous')
 
     // Identify as visitor
     const contactRes = await page.evaluate(async ({ slug, stamp }) => {
