@@ -1,5 +1,6 @@
 import { test, expect, type BrowserContext } from '@playwright/test'
 import { otpSignupPlaywright } from './helpers/otp-signup'
+import { setAccessMode } from './helpers/set-access'
 
 /**
  * Widget optimistic-send failure regression.
@@ -56,6 +57,12 @@ async function signupAndGetSlug(ctx: BrowserContext, email: string, workspace: s
   const tenantRes = await page.request.get(`${DASHBOARD}/api/tenants/me`)
   const slug = (await tenantRes.json()).tenant?.slug
   expect(slug, 'slug should be set').toBeTruthy()
+  // Anonymous widget-flow regression requires the tenant to be in the
+  // historical `anonymous` access mode (a fresh OTP signup now defaults
+  // to `verified_visitor`). Switch it before the widget script loads
+  // and the test's main flow begins. Must run before the helper's page
+  // is closed — page.request carries the authenticated session.
+  await setAccessMode(page, 'anonymous')
   await page.close()
   return slug as string
 }

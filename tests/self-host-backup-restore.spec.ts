@@ -233,6 +233,14 @@ for (const spec of EDITIONS) {
       const slug = tenantData.tenant?.slug
       expect(slug, 'slug should be set').toBeTruthy()
 
+      // Set the tenant's accessMode to 'anonymous' so the historical anonymous
+      // widget bootstrap succeeds (the self-host tests test the anonymous flow;
+      // the DB default for new WidgetConfig rows is 'verified_visitor').
+      const setAccessModeRes = await page.request.patch(`${ORIGIN}/api/widget-config/access`, {
+        data: { accessMode: 'anonymous' },
+      })
+      expect(setAccessModeRes.ok(), `should set accessMode to anonymous (got ${setAccessModeRes.status()})`).toBe(true)
+
       // ---- Step 5: Create visitor + conversation + messages through Caddy. ----
       const visitorId = `bakres-${stamp}`
       const contactRes = await page.request.post(`${ORIGIN}/api/widget/${slug}/contact`, {

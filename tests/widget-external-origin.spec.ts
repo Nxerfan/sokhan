@@ -1,6 +1,7 @@
 import { test, expect, type BrowserContext } from '@playwright/test'
 import { createServer, type Server } from 'node:http'
 import { otpSignupPlaywright } from './helpers/otp-signup'
+import { setAccessMode } from './helpers/set-access'
 
 /**
  * External-origin slug widget regression test.
@@ -92,6 +93,12 @@ async function signupAndGetSlug(ctx: BrowserContext, email: string, workspace: s
   const tenantData = await tenantRes.json()
   const slug = tenantData.tenant?.slug
   expect(slug, `slug should be set (tenant data: ${JSON.stringify(tenantData)})`).toBeTruthy()
+  // Anonymous widget-flow regression requires the tenant to be in the
+  // historical `anonymous` access mode (a fresh OTP signup now defaults
+  // to `verified_visitor`). Switch it before the widget script loads
+  // and the test's main flow begins. Must run before the helper's page
+  // is closed — page.request carries the authenticated session.
+  await setAccessMode(page, 'anonymous')
   await page.close()
   return { slug }
 }
@@ -229,6 +236,40 @@ test.describe('External-origin slug widget', () => {
     ).toBeTruthy()
     expect(socketHandshake!.replace(/^\[ws\] /, '').replace(/^[a-z]+:\/\//, '').startsWith(sukhanHostPort), `socket handshake should be on ${sukhanHostPort}`).toBe(true)
 
+    await ctx.close()
+  })
+
+  test('cross-origin public config response includes additive access-policy fields + realtime (CORS readable)', async ({ browser }) => {
+    const stamp = `${process.pid}-${Date.now()}-cfg`
+    const email = `cfg-${stamp}@test.com`
+    const ctx = await browser.newContext()
+    const { slug } = await signupAndGetSlug(ctx, email, `CFGSUM ${stamp}`)
+    expect(slug).toBeTruthy()
+
+    const page = await ctx.newPage()
+    await page.goto(`${CUSTOMER_ORIGIN}/customer.html`)
+    await page.waitForLoadState('domcontentloaded')
+
+    // Cross-origin fetch from the customer page (port 8082) to the Sukhan public
+    // config endpoint (port 81). The config route sets CORS headers
+    // (Access-Control-Allow-Origin: *) so the response is readable cross-origin.
+    const result = await page.evaluate(async (args: { origin: string; slug: string }) => {
+      const r = await fetch(`${args.origin}/api/widget/${args.slug}/config`)
+      let json: any = null
+      try { json = await r.json() } catch { /* non-json */ }
+      return { status: r.status, json }
+    }, { origin: SUKHAN_ORIGIN, slug })
+
+    expect(result.status, `config fetch should succeed (got: ${JSON.stringify(result)})`).toBe(200)
+    // Additive access-policy fields are present.
+    expect(result.json.accessMode, 'accessMode should be present (additive field)').toBeTruthy()
+    expect(['anonymous', 'verified_visitor', 'site_user_only']).toContain(result.json.accessMode)
+    expect(result.json.policyVersion, 'policyVersion should be present (additive field)').toBeGreaterThan(0)
+    // Realtime field still present.
+    expect(result.json.realtime, 'realtime field should still be present').toBeTruthy()
+    // No integration-secret leak in the public response.
+    expect(result.json.integrationSecretHash).toBeUndefined()
+    expect(result.json.integrationSecret).toBeUndefined()
     await ctx.close()
   })
 })

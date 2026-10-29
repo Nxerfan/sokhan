@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test'
+import { setAccessMode } from './helpers/set-access'
 
 /**
  * Socket.IO verification test — isolates real-time delivery from polling.
@@ -74,6 +75,12 @@ async function signupAndGetSlug(ctx: import('@playwright/test').BrowserContext, 
   await page.reload()
   await page.waitForLoadState('networkidle')
   await page.waitForTimeout(3000)
+
+  // Anonymous widget-flow regression requires the tenant to be in the
+  // historical `anonymous` access mode (a fresh OTP signup now defaults
+  // to `verified_visitor`). Switch it before the widget script loads
+  // and the test's main flow begins.
+  await setAccessMode(page, 'anonymous')
 
   return { page, slug }
 }

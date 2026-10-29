@@ -94,6 +94,11 @@ async function signupAndSignin(ctx: BrowserContext, email: string, workspace: st
   await page.goto(DASHBOARD)
   await page.waitForLoadState('networkidle')
   await page.waitForTimeout(1000)
+  // Fresh signup defaults to verified_visitor; the anonymous-mode + cross-
+  // tenant/cross-contact realtime tests POST /contact for a visitor token,
+  // which requires anonymous. The policy-transition test sets verified_visitor
+  // explicitly after the anonymous socket connects.
+  await setAccessMode(page, 'anonymous')
   return { page, slug, tenantId, realtimeToken: tokenData.token }
 }
 
@@ -530,5 +535,344 @@ test.describe('Realtime conversation:join authz', () => {
     await ctx.close()
     await ctxV1.close()
     await ctxV2.close()
+  })
+})
+
+// =====================================================================
+// CURRENT-POLICY REALTIME VISITOR AUTHORIZATION TESTS
+// =====================================================================
+
+async function signCustomVisitorToken(
+  page: import('@playwright/test').Page,
+  params: { contactId: string; tenantId: string; slug: string; identityLevel?: string; policyVersion?: number },
+): Promise<string> {
+  const result = await page.evaluate(async (params: Record<string, unknown>) => {
+    const r = await fetch('/api/dev/sign-realtime-token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    })
+    return r.json()
+  }, params as Record<string, unknown>)
+  return result.token
+}
+
+async function connectAndWait(
+  page: import('@playwright/test').Page,
+  token: string,
+  // 12s safety-net timeout (bumped 5s→8s→12s across phases). connect_error
+  // still resolves fast when the realtime middleware rejects synchronously;
+  // the timeout is only the fallback. The extra headroom absorbs CI timing
+  // variance under the longer browser suite (the NPM identity spec + the
+  // script-identity spec together add ~140s of customer-server + socket load
+  // earlier in the suite). Test-only change.
+  timeoutMs: number = 15000,
+): Promise<{ connected: boolean; error?: string }> {
+  const handle = `socket_${Math.random().toString(36).slice(2)}`
+  await ensureSocketIO(page)
+  await page.evaluate(async ({ token, handle }) => {
+    const ioFn = (window as unknown as { io: (url: string, opts: object) => SocketLike }).io
+    const socket = ioFn('/?XTransformPort=3003', { path: '/', auth: { token }, transports: ['websocket'] })
+    ;(window as unknown as Record<string, unknown>)[handle] = socket
+  }, { token, handle })
+
+  const result = await page.evaluate(({ handle, timeoutMs }) => {
+    return new Promise<{ connected: boolean; error?: string }>((resolve) => {
+      const socket = (window as unknown as Record<string, SocketLike & { connected?: boolean }>)[handle]
+      if (!socket) { resolve({ connected: false, error: 'socket_not_found' }); return }
+      const done = (r: { connected: boolean; error?: string }) => { resolve(r) }
+      socket.on('connect', () => done({ connected: true }))
+      socket.on('connect_error', (err: unknown) => done({ connected: false, error: (err as Error).message }))
+      setTimeout(() => done({ connected: false, error: 'timeout' }), timeoutMs)
+    })
+  }, { handle, timeoutMs })
+
+  await page.evaluate(({ handle }) => {
+    const s = (window as unknown as Record<string, SocketLike & { disconnect?: () => void }>)[handle]
+    if (s && s.disconnect) s.disconnect()
+  }, { handle }).catch(() => {})
+
+  return result
+}
+
+async function setAccessMode(page: import('@playwright/test').Page, accessMode: string): Promise<void> {
+  const result = await page.evaluate(async (accessMode: string) => {
+    const res = await fetch('/api/widget-config/access', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accessMode }),
+    })
+    return { ok: res.ok, status: res.status, data: await res.json().catch(() => null) }
+  }, accessMode)
+  if (!result.ok) {
+    throw new Error(`setAccessMode('${accessMode}') failed: ${result.status} ${JSON.stringify(result.data)}`)
+  }
+}
+
+test.describe('CURRENT-policy realtime visitor connect authorization', () => {
+  test('anonymous mode: modern anonymous token connects', async ({ browser }) => {
+    const stamp = `${process.pid}-${Date.now()}-rt-anon`
+    const email = `rt-anon-${stamp}@test.com`
+    const ctx = await browser.newContext()
+    const tenant = await signupAndSignin(ctx, email, `RT Anon ${stamp}`)
+    const page = tenant.page
+    await ensureSocketIO(page)
+
+    const visitorResult = await page.evaluate(async ({ slug, visitorId }) => {
+      const r = await fetch(`/api/widget/${slug}/contact`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ visitorId }),
+      })
+      return r.json()
+    }, { slug: tenant.slug, visitorId: `vis-rt-anon-${stamp}` })
+
+    expect(visitorResult.realtimeToken).toBeTruthy()
+    const result = await connectAndWait(page, visitorResult.realtimeToken)
+    expect(result.connected, `modern anonymous token should connect (result: ${JSON.stringify(result)})`).toBe(true)
+    await ctx.close()
+  })
+
+  test('anonymous mode: legacy token (both claims absent) connects', async ({ browser }) => {
+    const stamp = `${process.pid}-${Date.now()}-rt-leg`
+    const email = `rt-leg-${stamp}@test.com`
+    const ctx = await browser.newContext()
+    const tenant = await signupAndSignin(ctx, email, `RT Leg ${stamp}`)
+    const page = tenant.page
+    await ensureSocketIO(page)
+
+    const visitorResult = await page.evaluate(async ({ slug, visitorId }) => {
+      const r = await fetch(`/api/widget/${slug}/contact`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ visitorId }),
+      })
+      return r.json()
+    }, { slug: tenant.slug, visitorId: `vis-rt-leg-${stamp}` })
+
+    const legacyToken = await signCustomVisitorToken(page, {
+      contactId: visitorResult.contactId,
+      tenantId: tenant.tenantId,
+      slug: tenant.slug,
+    })
+    const result = await connectAndWait(page, legacyToken)
+    expect(result.connected, `legacy token should connect in anonymous mode (result: ${JSON.stringify(result)})`).toBe(true)
+    await ctx.close()
+  })
+
+  test('anonymous mode: partial token (identityLevel only) -> connect_error:identity_token_invalid', async ({ browser }) => {
+    const stamp = `${process.pid}-${Date.now()}-rt-part`
+    const email = `rt-part-${stamp}@test.com`
+    const ctx = await browser.newContext()
+    const tenant = await signupAndSignin(ctx, email, `RT Part ${stamp}`)
+    const page = tenant.page
+    await ensureSocketIO(page)
+
+    const visitorResult = await page.evaluate(async ({ slug, visitorId }) => {
+      const r = await fetch(`/api/widget/${slug}/contact`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ visitorId }),
+      })
+      return r.json()
+    }, { slug: tenant.slug, visitorId: `vis-rt-part-${stamp}` })
+
+    const partialToken = await signCustomVisitorToken(page, {
+      contactId: visitorResult.contactId,
+      tenantId: tenant.tenantId,
+      slug: tenant.slug,
+      identityLevel: 'anonymous',
+    })
+    const result = await connectAndWait(page, partialToken)
+    expect(result.connected).toBe(false)
+    expect(result.error).toBe('identity_token_invalid')
+    await ctx.close()
+  })
+
+  test('anonymous mode: malformed identityLevel -> connect_error:identity_token_invalid', async ({ browser }) => {
+    const stamp = `${process.pid}-${Date.now()}-rt-mal`
+    const email = `rt-mal-${stamp}@test.com`
+    const ctx = await browser.newContext()
+    const tenant = await signupAndSignin(ctx, email, `RT Mal ${stamp}`)
+    const page = tenant.page
+    await ensureSocketIO(page)
+
+    const visitorResult = await page.evaluate(async ({ slug, visitorId }) => {
+      const r = await fetch(`/api/widget/${slug}/contact`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ visitorId }),
+      })
+      return r.json()
+    }, { slug: tenant.slug, visitorId: `vis-rt-mal-${stamp}` })
+
+    const malformedToken = await signCustomVisitorToken(page, {
+      contactId: visitorResult.contactId,
+      tenantId: tenant.tenantId,
+      slug: tenant.slug,
+      identityLevel: 'corrupt',
+      policyVersion: 1,
+    })
+    const result = await connectAndWait(page, malformedToken)
+    expect(result.connected).toBe(false)
+    expect(result.error).toBe('identity_token_invalid')
+    await ctx.close()
+  })
+})
+
+test.describe('Live policy transition — anonymous -> verified_visitor', () => {
+  test('connected anonymous socket cannot join a NEW conversation after policy change', async ({ browser }) => {
+    const stamp = `${process.pid}-${Date.now()}-rt-trans`
+    const email = `rt-trans-${stamp}@test.com`
+    const ctx = await browser.newContext()
+    const tenant = await signupAndSignin(ctx, email, `RT Trans ${stamp}`)
+    const page = tenant.page
+    await ensureSocketIO(page)
+
+    // 1. Create visitor Contact → modern anonymous token
+    const visitorResult = await page.evaluate(async ({ slug, visitorId }) => {
+      const r = await fetch(`/api/widget/${slug}/contact`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ visitorId }),
+      })
+      return r.json()
+    }, { slug: tenant.slug, visitorId: `vis-rt-trans-${stamp}` })
+    const visitorToken = visitorResult.realtimeToken
+    expect(visitorToken).toBeTruthy()
+
+    // 2. Create conversation A + B via messages (mode still anonymous)
+    const makeConv = async (msg: string) => {
+      const r = await page.evaluate(async ({ slug, token, message }) => {
+        const r = await fetch(`/api/widget/${slug}/messages`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ text: message }),
+        })
+        return r.json()
+      }, { slug: tenant.slug, token: visitorToken, message: msg })
+      return r.conversationId || r.message?.conversationId
+    }
+    const convA = await makeConv(`msgA-${stamp}`)
+    expect(convA).toBeTruthy()
+    // Close conversation A so the next message creates a NEW conversation B.
+    // Without this, the messages route reuses the open conversation → convA === convB.
+    const closeRes = await page.evaluate(async (convId) => {
+      const r = await fetch(`/api/conversations/${convId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'closed' }),
+      })
+      return { ok: r.ok, status: r.status }
+    }, convA)
+    expect(closeRes.ok, `Failed to close conversation A: ${closeRes.status}`).toBe(true)
+    const convB = await makeConv(`msgB-${stamp}`)
+    expect(convB).toBeTruthy()
+    // MANDATORY: A and B must be genuinely distinct conversations.
+    expect(convB).not.toBe(convA)
+
+    // 3. Connect visitor socket
+    const visitorHandle = (await connectSocket(page, visitorToken)).socket
+
+    // 4. Visitor joins conversation A
+    const phase1 = await runSocketScript(page, visitorHandle, {
+      joinConversations: [convA],
+      listenForTypingOfConversations: [],
+      waitMs: 2000,
+    })
+    expect(phase1.connected).toBe(true)
+
+    // 5. Connect agent socket (control emitter for B)
+    const agentCtx = await browser.newContext()
+    const agentPage = await agentCtx.newPage()
+    await agentPage.goto(DASHBOARD)
+    await agentPage.waitForLoadState('networkidle')
+    await agentPage.waitForTimeout(500)
+    await ensureSocketIO(agentPage)
+    const agentHandle = (await connectSocket(agentPage, tenant.realtimeToken)).socket
+    const agentPhase1 = await runSocketScript(agentPage, agentHandle, {
+      joinConversations: [convB],
+      listenForTypingOfConversations: [],
+      waitMs: 2000,
+    })
+    expect(agentPhase1.connected).toBe(true)
+
+    // 6. Connect second agent socket (control receiver for B)
+    const agentCtx2 = await browser.newContext()
+    const agent2Page = await agentCtx2.newPage()
+    await agent2Page.goto(DASHBOARD)
+    await agent2Page.waitForLoadState('networkidle')
+    await agent2Page.waitForTimeout(500)
+    await ensureSocketIO(agent2Page)
+    const agent2Handle = (await connectSocket(agent2Page, tenant.realtimeToken)).socket
+    const agent2Phase1 = await runSocketScript(agent2Page, agent2Handle, {
+      joinConversations: [convB],
+      listenForTypingOfConversations: [convB],
+      waitMs: 1000,
+    })
+    expect(agent2Phase1.connected).toBe(true)
+
+    // 7. CHANGE POLICY: anonymous -> verified_visitor (policyVersion increments)
+    await setAccessMode(page, 'verified_visitor')
+    // setAccessMode already checks the PATCH response (throws on failure).
+    // No arbitrary sleep — the DB commit is synchronous; the verify-visitor-access
+    // endpoint reads the same DB. A small event-registration delay is inside the
+    // Promise.all pattern below.
+
+    // 8. Old visitor socket attempts to join conversation B — run the
+    // visitor's join+listen + the agent's typing emit IN PARALLEL.
+    // The emit must happen DURING the listener's active window so that if
+    // the visitor IS in B's room (a bug), the listener catches the typing
+    // event. Same parallel pattern as the existing cross-tenant test.
+    const [phase2] = await Promise.all([
+      runSocketScript(page, visitorHandle, {
+        joinConversations: [convB],
+        listenForTypingOfConversations: [convB],
+        waitMs: 4000,
+      }),
+      (async () => {
+        // Wait for the listener + join to register, then emit typing.
+        await new Promise(r => setTimeout(r, 500))
+        await agentPage.evaluate(({ handle, convB }) => {
+          const socket = (window as unknown as Record<string, SocketLike>)[handle]
+          socket.emit('typing:start', { conversationId: convB })
+        }, { handle: agentHandle, convB })
+      })(),
+    ])
+
+    // 10. Visitor should NOT receive typing:start for convB (rejected by
+    //     CURRENT-policy revalidation at conversation:join).
+    const visitorTypingForB = phase2.events.filter(e => e.includes(`typing:start:${convB}`))
+    expect(visitorTypingForB.length,
+      `visitor should NOT receive typing:start for convB (rejected by policy revalidation). Events: ${JSON.stringify(phase2.events)}`,
+    ).toBe(0)
+
+    // 11. Control: agent2 SHOULD receive the typing event (proves the room works).
+    // Run agent2's listener + the agent's typing emit IN PARALLEL (same
+    // pattern — the emit must happen DURING the listener's active window).
+    const [agent2Phase3] = await Promise.all([
+      runSocketScript(agent2Page, agent2Handle, {
+        joinConversations: [],
+        listenForTypingOfConversations: [convB],
+        waitMs: 4000,
+      }),
+      (async () => {
+        // Wait for the listener to register, then emit.
+        await new Promise(r => setTimeout(r, 1000))
+        await agentPage.evaluate(({ handle, convB }) => {
+          const socket = (window as unknown as Record<string, SocketLike>)[handle]
+          socket.emit('typing:start', { conversationId: convB })
+        }, { handle: agentHandle, convB })
+      })(),
+    ])
+
+    const agent2TypingForB = agent2Phase3.events.filter(e => e.includes(`typing:start:${convB}`))
+    expect(agent2TypingForB.length,
+      `control agent2 SHOULD receive typing:start for convB (proves room mechanism works). Events: ${JSON.stringify(agent2Phase3.events)}`,
+    ).toBeGreaterThan(0)
+
+    await ctx.close()
+    await agentCtx.close()
+    await agentCtx2.close()
   })
 })

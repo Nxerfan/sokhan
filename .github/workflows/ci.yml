@@ -69,7 +69,13 @@ jobs:
 
   docker-regression:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Bumped 30→60: the browser suites grew to 151 tests × 2 editions (Full +
+    # Lite) across the visitor-access-modes phases (NPM identity, script
+    # identity, dashboard Access & Identity) + the connectAndWait safety-net
+    # timeout (12s) + the identity/dashboard specs' waits. The job now exceeds
+    # the prior 30-min limit → cancelled by the timeout (not a code failure).
+    # 60 min gives comfortable headroom; local/CI runs finish in ~30-35 min.
+    timeout-minutes: 60
     env:
       NEXTAUTH_SECRET: ci-docker-test-secret-not-production
       POSTGRES_PASSWORD: ci-postgres-password
@@ -125,7 +131,7 @@ jobs:
         run: bun test tests/db-boundary/
       - name: Run Full regression tests
         run: |
-          bunx playwright test             tests/module2.spec.ts             tests/socketio-verify.spec.ts             tests/socket-race.spec.ts             tests/realtime-authz.spec.ts             tests/widget-external-origin.spec.ts tests/reconnect-regression.spec.ts tests/tenant-security.spec.ts tests/inbox-reply-echo-dedup.spec.ts tests/inbox-stale-selection.spec.ts tests/widget-npm-external-origin.spec.ts tests/inbox-burst-dedup.spec.ts tests/onboarding.spec.ts tests/anonymous-isolation.spec.ts tests/widget-live-messaging.spec.ts tests/widget-optimistic-failure.spec.ts tests/widget-duplicate-messages.spec.ts tests/widget-adversarial-ordering.spec.ts tests/caddy-public-boundary.spec.ts tests/invite-workspace-switching.spec.ts tests/widget-customization.spec.ts tests/widget-domains.spec.ts tests/analytics-csat.spec.ts tests/workspace-switcher.spec.ts tests/password-reset.spec.ts tests/contacts-identity.spec.ts
+          bunx playwright test             tests/module2.spec.ts             tests/socketio-verify.spec.ts             tests/socket-race.spec.ts             tests/realtime-authz.spec.ts             tests/widget-external-origin.spec.ts tests/reconnect-regression.spec.ts tests/tenant-security.spec.ts tests/inbox-reply-echo-dedup.spec.ts tests/inbox-stale-selection.spec.ts tests/widget-npm-external-origin.spec.ts tests/widget-npm-identity.spec.ts tests/widget-script-identity.spec.ts tests/widget-access-identity-dashboard.spec.ts tests/inbox-burst-dedup.spec.ts tests/onboarding.spec.ts tests/anonymous-isolation.spec.ts tests/widget-live-messaging.spec.ts tests/widget-optimistic-failure.spec.ts tests/widget-duplicate-messages.spec.ts tests/widget-adversarial-ordering.spec.ts tests/caddy-public-boundary.spec.ts tests/invite-workspace-switching.spec.ts tests/widget-customization.spec.ts tests/widget-domains.spec.ts tests/analytics-csat.spec.ts tests/workspace-switcher.spec.ts tests/password-reset.spec.ts tests/contacts-identity.spec.ts
       - name: Print Full container logs on failure
         if: failure()
         run: |
@@ -158,7 +164,7 @@ jobs:
         run: bun test tests/db-boundary/
       - name: Run Lite regression tests
         run: |
-          bunx playwright test             tests/module2.spec.ts             tests/socketio-verify.spec.ts             tests/socket-race.spec.ts             tests/realtime-authz.spec.ts             tests/widget-external-origin.spec.ts tests/reconnect-regression.spec.ts tests/tenant-security.spec.ts tests/inbox-reply-echo-dedup.spec.ts tests/inbox-stale-selection.spec.ts tests/widget-npm-external-origin.spec.ts tests/inbox-burst-dedup.spec.ts tests/onboarding.spec.ts tests/anonymous-isolation.spec.ts tests/widget-live-messaging.spec.ts tests/widget-optimistic-failure.spec.ts tests/widget-duplicate-messages.spec.ts tests/widget-adversarial-ordering.spec.ts tests/caddy-public-boundary.spec.ts tests/invite-workspace-switching.spec.ts tests/widget-customization.spec.ts tests/widget-domains.spec.ts tests/analytics-csat.spec.ts tests/workspace-switcher.spec.ts tests/password-reset.spec.ts tests/contacts-identity.spec.ts
+          bunx playwright test             tests/module2.spec.ts             tests/socketio-verify.spec.ts             tests/socket-race.spec.ts             tests/realtime-authz.spec.ts             tests/widget-external-origin.spec.ts tests/reconnect-regression.spec.ts tests/tenant-security.spec.ts tests/inbox-reply-echo-dedup.spec.ts tests/inbox-stale-selection.spec.ts tests/widget-npm-external-origin.spec.ts tests/widget-npm-identity.spec.ts tests/widget-script-identity.spec.ts tests/widget-access-identity-dashboard.spec.ts tests/inbox-burst-dedup.spec.ts tests/onboarding.spec.ts tests/anonymous-isolation.spec.ts tests/widget-live-messaging.spec.ts tests/widget-optimistic-failure.spec.ts tests/widget-duplicate-messages.spec.ts tests/widget-adversarial-ordering.spec.ts tests/caddy-public-boundary.spec.ts tests/invite-workspace-switching.spec.ts tests/widget-customization.spec.ts tests/widget-domains.spec.ts tests/analytics-csat.spec.ts tests/workspace-switcher.spec.ts tests/password-reset.spec.ts tests/contacts-identity.spec.ts
       - name: Print Lite container logs on failure
         if: failure()
         run: |

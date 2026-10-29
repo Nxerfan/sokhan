@@ -121,6 +121,16 @@ if (!process.env.NEXTAUTH_SECRET) {
   }
 }
 const SECRET = process.env.NEXTAUTH_SECRET
+
+// Allowlist of stable visitor-access denial reasons from the internal verifier.
+// Any response NOT in this set -> visitor_access_check_failed (fail-closed).
+const ALLOWED_VISITOR_REASONS = new Set([
+  'policy_unavailable',
+  'identity_token_invalid',
+  'policy_changed',
+  'verification_required',
+  'website_login_required',
+])
 const APP_INTERNAL_URL = process.env.APP_INTERNAL_URL || 'http://localhost:3000'
 const REDIS_URL = process.env.REDIS_URL
 
@@ -195,6 +205,38 @@ io.use(async (socket: AuthenticatedSocket, next) => {
     }
   }
 
+  // For visitors: call the internal verify-visitor-access endpoint.
+  if (payload.type === 'visitor') {
+    const visitor = payload as VisitorTokenPayload
+    const params = new URLSearchParams({
+      contactId: visitor.contactId,
+      tenantId: visitor.tenantId,
+      slug: visitor.slug,
+    })
+    // IMPORTANT: only send identityLevel/policyVersion if actually present.
+    // For legacy tokens (both absent), OMIT both — the verifier handles legacy.
+    if (visitor.identityLevel !== undefined) params.set('identityLevel', visitor.identityLevel)
+    if (visitor.policyVersion !== undefined) params.set('policyVersion', String(visitor.policyVersion))
+    try {
+      const verifyUrl = `${APP_INTERNAL_URL}/api/realtime/verify-visitor-access?${params}`
+      const res = await fetch(verifyUrl, { headers: { 'X-Internal-Secret': SECRET! } })
+      if (!res.ok) {
+        let reason = 'visitor_access_check_failed'
+        try {
+          const body = await res.json()
+          if (body && typeof body.error === 'string' && ALLOWED_VISITOR_REASONS.has(body.error)) {
+            reason = body.error
+          }
+        } catch { /* not JSON — keep default */ }
+        console.log(`[auth] REJECTED visitor — ${reason}`)
+        return next(new Error(reason))
+      }
+    } catch (e) {
+      console.error('[auth] visitor access check error:', e instanceof Error ? e.message : e)
+      return next(new Error('visitor_access_check_failed'))
+    }
+  }
+
   socket.payload = payload
   next()
 })
@@ -214,6 +256,29 @@ io.on('connection', (socket: AuthenticatedSocket) => {
   // CRITICAL: verify conversation belongs to the socket's tenant before joining
   socket.on('conversation:join', async (conversationId: string) => {
     try {
+      // For visitors: revalidate CURRENT policy (may have changed since connect).
+      if (payload.type === 'visitor') {
+        const visitor = payload as VisitorTokenPayload
+        const params = new URLSearchParams({
+          contactId: visitor.contactId,
+          tenantId: visitor.tenantId,
+          slug: visitor.slug,
+        })
+        if (visitor.identityLevel !== undefined) params.set('identityLevel', visitor.identityLevel)
+        if (visitor.policyVersion !== undefined) params.set('policyVersion', String(visitor.policyVersion))
+        try {
+          const verifyUrl = `${APP_INTERNAL_URL}/api/realtime/verify-visitor-access?${params}`
+          const res = await fetch(verifyUrl, { headers: { 'X-Internal-Secret': SECRET! } })
+          if (!res.ok) {
+            console.log(`[join] REJECTED visitor — policy stale (conv=${conversationId})`)
+            return // don't join the room, don't call verify-conversation
+          }
+        } catch (e) {
+          console.error('[join] visitor access revalidation error:', e instanceof Error ? e.message : e)
+          return // don't join
+        }
+      }
+
       const params = new URLSearchParams({
         conversationId,
         tenantId: payload.tenantId,

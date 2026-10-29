@@ -1,5 +1,6 @@
 import { test, expect, type Browser, type Page } from '@playwright/test'
 import { otpSignupPlaywright } from './helpers/otp-signup'
+import { setAccessMode } from './helpers/set-access'
 
 /**
  * Contacts UI identity behavioral spec (PR #13 stability audit — BLOCKER #4).
@@ -86,6 +87,10 @@ async function setupTenant(
     }
   }
   if (!sessionOk) throw new Error(`Auth session not established for ${email}`)
+  // Fresh OTP signups default to accessMode='verified_visitor' (the frozen
+  // DB contract). The /contact flow below requires anonymous visitor tokens,
+  // so explicitly switch the tenant to anonymous before any visitor traffic.
+  await setAccessMode(page, 'anonymous')
   return { page, email, workspaceName, tenantId, slug }
 }
 

@@ -13,6 +13,7 @@ import { Check, Copy, MessageSquareText, Globe, Plus, Trash2, Lock, Code2, Packa
 import { toast } from 'sonner'
 import { PanelHeader } from './members-panel'
 import { cn } from '@/lib/utils'
+import { WidgetAccessIdentity } from './widget-access-identity'
 
 type WidgetConfig = {
   accentColor: string
@@ -65,7 +66,7 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
   const [copiedHtml, setCopiedHtml] = useState(false)
   const [copiedNpm, setCopiedNpm] = useState(false)
   const [copiedKey, setCopiedKey] = useState(false)
-  const [tab, setTab] = useState<'installation' | 'customization'>('installation')
+  const [tab, setTab] = useState<'installation' | 'customization' | 'access'>('installation')
   const [domains, setDomains] = useState<Domain[]>([])
   const [domainLimit, setDomainLimit] = useState(0)
   const [newDomain, setNewDomain] = useState('')
@@ -320,6 +321,13 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
           className={cn('rounded-md px-4 py-1.5 text-sm font-medium transition-colors', tab === 'customization' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground')}
         >
           {fa ? 'سفارشی‌سازی' : 'Customization'}
+        </button>
+        <button
+          onClick={() => setTab('access')}
+          className={cn('rounded-md px-4 py-1.5 text-sm font-medium transition-colors', tab === 'access' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground')}
+          data-testid="access-identity-tab"
+        >
+          {fa ? 'دسترسی و هویت' : 'Access & Identity'}
         </button>
       </div>
 
@@ -661,6 +669,10 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
             </CardContent>
           </Card>
         </div>
+      )}
+
+      {tab === 'access' && (
+        <WidgetAccessIdentity slug={slug} tenantId={tenantId} />
       )}
     </div>
   )

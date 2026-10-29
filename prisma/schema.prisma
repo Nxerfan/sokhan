@@ -46,53 +46,54 @@ datasource db {
 
 /// A workspace/tenant. Root isolation boundary.
 model Tenant {
-  id              String   @id @default(cuid())
-  slug            String   @unique
-  name            String
-  defaultLocale   String   @default("fa")
-  defaultDirection String  @default("rtl")
-  plan            String   @default("free")
+  id                 String   @id @default(cuid())
+  slug               String   @unique
+  name               String
+  defaultLocale      String   @default("fa")
+  defaultDirection   String   @default("rtl")
+  plan               String   @default("free")
   workspaceCreatedAt DateTime @default(now())
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
 
-  memberships     Membership[]
-  departments     Department[]
-  widgetConfig    WidgetConfig?
-  contacts        Contact[]
-  conversations   Conversation[]
-  routingRules    RoutingRule[]
-  subscriptions   Subscription[]
-  invoices        Invoice[]
-  faqPairs        FaqPair[]
-  products        Product[]
-  aiConfig        AiConfig?
-  connectorConfigs ConnectorConfig[]
-  widgetDomains   WidgetDomain[]
-  invitations    Invitation[]
+  memberships       Membership[]
+  departments       Department[]
+  widgetConfig      WidgetConfig?
+  contacts          Contact[]
+  conversations     Conversation[]
+  routingRules      RoutingRule[]
+  subscriptions     Subscription[]
+  invoices          Invoice[]
+  faqPairs          FaqPair[]
+  products          Product[]
+  aiConfig          AiConfig?
+  connectorConfigs  ConnectorConfig[]
+  widgetDomains     WidgetDomain[]
+  invitations       Invitation[]
+  widgetOtpRequests WidgetOtpRequest[]
 }
 
 /// Global identity. A user may belong to multiple tenants via Membership.
 model User {
-  id           String   @id @default(cuid())
-  email        String   @unique
-  name         String?
-  passwordHash String?
-  avatarUrl    String?
-  hasUsedFreeTrial Boolean @default(false)
-  emailVerified    Boolean    @default(false)
+  id               String    @id @default(cuid())
+  email            String    @unique
+  name             String?
+  passwordHash     String?
+  avatarUrl        String?
+  hasUsedFreeTrial Boolean   @default(false)
+  emailVerified    Boolean   @default(false)
   emailVerifiedAt  DateTime?
   passwordResetAt  DateTime?
-  locale       String   @default("fa")
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  locale           String    @default("fa")
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
-  memberships  Membership[]
+  memberships           Membership[]
   assignedConversations Conversation[] @relation("AssignedAgent")
-  sentMessages  Message[]
-  otpRequests  OtpRequest[]
-  participants  Participant[]
-  sentInvitations Invitation[] @relation("InvitationSender")
+  sentMessages          Message[]
+  otpRequests           OtpRequest[]
+  participants          Participant[]
+  sentInvitations       Invitation[]   @relation("InvitationSender")
 }
 
 model Membership {
@@ -104,8 +105,8 @@ model Membership {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@unique([userId, tenantId])
   @@index([tenantId])
@@ -132,21 +133,21 @@ model Membership {
 /// from the old flow are migrated to Invitation(status="pending") by
 /// the migration script, and the old Membership rows are deleted.
 model Invitation {
-  id              String   @id @default(cuid())
+  id              String    @id @default(cuid())
   tenantId        String
-  email           String   // normalized lowercase
-  role            String   // admin/manager/agent/viewer (never owner)
-  status          String   @default("pending") // pending/accepted/revoked
-  tokenHash       String   @unique // SHA-256 hash of the raw token
+  email           String // normalized lowercase
+  role            String // admin/manager/agent/viewer (never owner)
+  status          String    @default("pending") // pending/accepted/revoked
+  tokenHash       String    @unique // SHA-256 hash of the raw token
   expiresAt       DateTime
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
   acceptedAt      DateTime?
-  acceptedUserId  String?  // the User.id who accepted (null until accepted)
-  invitedByUserId String?  // the User.id who created the invitation
+  acceptedUserId  String? // the User.id who accepted (null until accepted)
+  invitedByUserId String? // the User.id who created the invitation
 
-  tenant           Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  invitedBy        User?    @relation("InvitationSender", fields: [invitedByUserId], references: [id], onDelete: SetNull)
+  tenant    Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  invitedBy User?  @relation("InvitationSender", fields: [invitedByUserId], references: [id], onDelete: SetNull)
 
   @@index([tenantId])
   @@index([email])
@@ -160,8 +161,8 @@ model Department {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  members   DepartmentMember[]
+  tenant        Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  members       DepartmentMember[]
   conversations Conversation[]
 
   @@index([tenantId])
@@ -171,74 +172,88 @@ model DepartmentMember {
   departmentId String
   userId       String
 
-  department   Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
 
   @@id([departmentId, userId])
 }
 
 model WidgetConfig {
-  id              String   @id @default(cuid())
-  tenantId        String   @unique
-  accentColor     String   @default("#E09A2B")
-  launcherShape   String   @default("tab")
-  position        String   @default("bottom-end")
-  avatarUrl       String?
-  logoUrl         String?
-  greetingTexts   Json
-  defaultLocale   String   @default("fa")
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  id                         String    @id @default(cuid())
+  tenantId                   String    @unique
+  accentColor                String    @default("#E09A2B")
+  launcherShape              String    @default("tab")
+  position                   String    @default("bottom-end")
+  avatarUrl                  String?
+  logoUrl                    String?
+  greetingTexts              Json
+  defaultLocale              String    @default("fa")
+  // --- Widget Visitor Access Modes / Identity ---
+  // accessMode: anonymous | verified_visitor | site_user_only
+  accessMode                 String    @default("verified_visitor") // DB DEFAULT verified_visitor (frozen contract); existing rows backfilled to anonymous by migration
+  policyVersion              Int       @default(1)
+  integrationSecretHash      String?   @unique
+  integrationSecretRotatedAt DateTime?
+  loginUrl                   String?
+  loginButtonLabel           String?
+  loginReturnUrlParam        String?
+  identityEndpointPath       String?
+  createdAt                  DateTime  @default(now())
+  updatedAt                  DateTime  @updatedAt
 
-  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 }
 
 model Contact {
-  id          String   @id @default(cuid())
-  tenantId    String
-  identifier  String
-  identifierType String @default("visitorId")
-  name        String?
-  email       String?
-  avatarUrl   String?
-  locale      String   @default("fa")
-  metadata    Json
-  lastSeenAt  DateTime @default(now())
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id              String    @id @default(cuid())
+  tenantId        String
+  identifier      String
+  identifierType  String    @default("visitorId")
+  name            String?
+  email           String?
+  avatarUrl       String?
+  locale          String    @default("fa")
+  metadata        Json
+  emailVerifiedAt DateTime?
+  externalUserId  String?
+  lastSeenAt      DateTime  @default(now())
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
-  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  conversations Conversation[]
+  tenant            Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversations     Conversation[]
+  widgetOtpRequests WidgetOtpRequest[]
 
   @@unique([tenantId, identifier])
+  @@unique([tenantId, externalUserId])
   @@index([tenantId])
 }
 
 model Conversation {
-  id             String   @id @default(cuid())
-  tenantId       String
-  contactId      String
-  assignedUserId String?
-  departmentId   String?
-  status         String   @default("open")
-  priority       String   @default("normal")
-  channel        String   @default("widget")
-  tags           Json
-  lastMessageAt  DateTime @default(now())
-  lastMessagePreview String @default("")
-  unreadCount    Int      @default(0)
-  csatRating     Int?
-  csatComment    String?
-  csatAt         DateTime?
-  firstResponseAt DateTime?
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  id                 String    @id @default(cuid())
+  tenantId           String
+  contactId          String
+  assignedUserId     String?
+  departmentId       String?
+  status             String    @default("open")
+  priority           String    @default("normal")
+  channel            String    @default("widget")
+  tags               Json
+  lastMessageAt      DateTime  @default(now())
+  lastMessagePreview String    @default("")
+  unreadCount        Int       @default(0)
+  csatRating         Int?
+  csatComment        String?
+  csatAt             DateTime?
+  firstResponseAt    DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
 
-  tenant         Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  contact        Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
-  assignedUser   User?    @relation("AssignedAgent", fields: [assignedUserId], references: [id], onDelete: SetNull)
-  department     Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
-  messages       Message[]
-  participants   Participant[]
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  contact      Contact       @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  assignedUser User?         @relation("AssignedAgent", fields: [assignedUserId], references: [id], onDelete: SetNull)
+  department   Department?   @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  messages     Message[]
+  participants Participant[]
 
   @@index([tenantId, status])
   @@index([tenantId, assignedUserId])
@@ -246,155 +261,155 @@ model Conversation {
 }
 
 model Message {
-  id              String   @id @default(cuid())
-  conversationId  String
-  tenantId        String
-  senderType      String   @default("contact")
-  senderUserId    String?
-  contentType     String   @default("text")
-  content         Json
-  status          String   @default("sent")
-  createdAt       DateTime @default(now())
+  id             String   @id @default(cuid())
+  conversationId String
+  tenantId       String
+  senderType     String   @default("contact")
+  senderUserId   String?
+  contentType    String   @default("text")
+  content        Json
+  status         String   @default("sent")
+  createdAt      DateTime @default(now())
 
-  conversation    Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  senderUser      User?        @relation(fields: [senderUserId], references: [id], onDelete: SetNull)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  senderUser   User?        @relation(fields: [senderUserId], references: [id], onDelete: SetNull)
 
   @@index([conversationId, createdAt])
   @@index([tenantId, createdAt])
 }
 
 model Participant {
-  id              String   @id @default(cuid())
-  conversationId  String
-  userId          String
-  tenantId        String
-  lastReadAt      DateTime @default(now())
-  muted           Boolean  @default(false)
-  createdAt       DateTime @default(now())
+  id             String   @id @default(cuid())
+  conversationId String
+  userId         String
+  tenantId       String
+  lastReadAt     DateTime @default(now())
+  muted          Boolean  @default(false)
+  createdAt      DateTime @default(now())
 
-  conversation    Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  user            User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([conversationId, userId])
   @@index([tenantId])
 }
 
 model RoutingRule {
-  id          String   @id @default(cuid())
-  tenantId    String
-  name        String
-  enabled     Boolean  @default(true)
-  priority    Int      @default(0)
-  trigger     Json
-  action      Json
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id        String   @id @default(cuid())
+  tenantId  String
+  name      String
+  enabled   Boolean  @default(true)
+  priority  Int      @default(0)
+  trigger   Json
+  action    Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@index([tenantId, enabled])
 }
 
 model Plan {
-  id          String   @id @default(cuid())
-  slug        String   @unique
-  name        String
-  priceToman  Int      @default(0)
-  interval    String   @default("month")
-  limits      Json
-  active      Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id         String   @id @default(cuid())
+  slug       String   @unique
+  name       String
+  priceToman Int      @default(0)
+  interval   String   @default("month")
+  limits     Json
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 
   subscriptions Subscription[]
   invoices      Invoice[]
 }
 
 model Subscription {
-  id          String   @id @default(cuid())
-  tenantId    String
-  planId      String
-  status      String   @default("pending")
-  gateway     String?
+  id                 String    @id @default(cuid())
+  tenantId           String
+  planId             String
+  status             String    @default("pending")
+  gateway            String?
   currentPeriodStart DateTime?
   currentPeriodEnd   DateTime?
-  canceledAt  DateTime?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  canceledAt         DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
 
-  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  plan        Plan     @relation(fields: [planId], references: [id], onDelete: Restrict)
-  invoices    Invoice[]
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  plan     Plan      @relation(fields: [planId], references: [id], onDelete: Restrict)
+  invoices Invoice[]
 
   @@index([tenantId, status])
 }
 
 model Invoice {
-  id              String   @id @default(cuid())
-  tenantId        String
-  subscriptionId  String
-  planId          String
-  amountToman     Int
-  gateway         String
-  authority       String?
-  refId           String?
-  status          String   @default("pending")
-  callbackUrl     String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-  paidAt          DateTime?
+  id             String    @id @default(cuid())
+  tenantId       String
+  subscriptionId String
+  planId         String
+  amountToman    Int
+  gateway        String
+  authority      String?
+  refId          String?
+  status         String    @default("pending")
+  callbackUrl    String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  paidAt         DateTime?
 
-  tenant          Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  subscription    Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
-  plan            Plan         @relation(fields: [planId], references: [id], onDelete: Restrict)
+  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  subscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  plan         Plan         @relation(fields: [planId], references: [id], onDelete: Restrict)
 
   @@index([tenantId, status])
   @@index([subscriptionId])
 }
 
 model AiConfig {
-  id              String   @id @default(cuid())
-  tenantId        String   @unique
-  faqEnabled      Boolean  @default(false)
-  productQaEnabled Boolean @default(false)
-  aiActionCount   Int      @default(0)
-  aiActionResetAt DateTime @default(now())
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  id               String   @id @default(cuid())
+  tenantId         String   @unique
+  faqEnabled       Boolean  @default(false)
+  productQaEnabled Boolean  @default(false)
+  aiActionCount    Int      @default(0)
+  aiActionResetAt  DateTime @default(now())
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
-  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 }
 
 model FaqPair {
-  id          String   @id @default(cuid())
-  tenantId    String
-  question    String
-  answer      String
-  enabled     Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id        String   @id @default(cuid())
+  tenantId  String
+  question  String
+  answer    String
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@index([tenantId, enabled])
 }
 
 model Product {
-  id          String   @id @default(cuid())
-  tenantId    String
-  name        String
-  description String   @default("")
-  price       Int      @default(0)
-  currency    String   @default("IRT")
-  availability String  @default("in_stock")
-  sku         String?
-  externalId  String?
+  id             String   @id @default(cuid())
+  tenantId       String
+  name           String
+  description    String   @default("")
+  price          Int      @default(0)
+  currency       String   @default("IRT")
+  availability   String   @default("in_stock")
+  sku            String?
+  externalId     String?
   externalSource String?
-  metadata    Json
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  metadata       Json
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
-  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@index([tenantId])
   @@index([tenantId, externalSource])
@@ -409,7 +424,7 @@ model ConnectorConfig {
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
 
-  tenant     Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@unique([tenantId, type])
   @@index([tenantId])
@@ -421,7 +436,7 @@ model WidgetDomain {
   domain    String
   createdAt DateTime @default(now())
 
-  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@unique([tenantId, domain])
   @@index([tenantId])
@@ -439,32 +454,59 @@ model SelfHostRequest {
 }
 
 model OtpRequest {
-  id          String   @id @default(cuid())
+  id          String    @id @default(cuid())
   userId      String?
   email       String
   purpose     String
-  requestId   String   @unique
+  requestId   String    @unique
   expiresAt   DateTime
-  attempts    Int      @default(0)
-  resendCount Int      @default(0)
-  verified    Boolean  @default(false)
+  attempts    Int       @default(0)
+  resendCount Int       @default(0)
+  verified    Boolean   @default(false)
   verifiedAt  DateTime?
   ipAddress   String?
-  createdAt   DateTime @default(now())
+  createdAt   DateTime  @default(now())
 
-  user        User?    @relation(fields: [userId], references: [id])
+  user User? @relation(fields: [userId], references: [id])
 
   @@index([email, purpose])
   @@index([requestId])
 }
 
+model WidgetOtpRequest {
+  id                String    @id @default(cuid())
+  tenantId          String
+  contactId         String
+  email             String
+  pendingName       String?
+  purpose           String    @default("widget_verify")
+  providerRequestId String    @unique
+  expiresAt         DateTime
+  attempts          Int       @default(0)
+  resendCount       Int       @default(0)
+  status            String    @default("active")
+  verified          Boolean   @default(false)
+  verifiedAt        DateTime?
+  ipAddress         String?
+  createdAt         DateTime  @default(now())
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([contactId])
+  @@index([email])
+  @@index([tenantId, contactId])
+  @@index([tenantId, purpose, email])
+}
+
 model PendingSignup {
-  id            String   @id @default(cuid())
-  email         String   @unique
+  id              String   @id @default(cuid())
+  email           String   @unique
   nixifyRequestId String?
-  otpVerified   Boolean  @default(false)
-  createdAt     DateTime @default(now())
-  expiresAt     DateTime
+  otpVerified     Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  expiresAt       DateTime
 
   @@index([email])
 }

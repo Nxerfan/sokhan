@@ -64,6 +64,17 @@ export async function POST(req: NextRequest) {
           tenantId: tenant.id, accentColor: '#E09A2B', launcherShape: 'tab', position: 'bottom-end',
           greetingTexts: { fa: 'سلام! چطور می‌تونم کمکتون کنم؟', en: 'Hi there! How can I help?' },
           defaultLocale: 'fa',
+          // Widget Visitor Access Modes (feat/widget-visitor-access-modes):
+          // NEW workspaces default to 'verified_visitor' — the FROZEN contract.
+          // The DB column DEFAULT ('verified_visitor' — see prisma/schema.prisma)
+          // is the single authoritative default for ALL NEW WidgetConfig rows.
+          // Do NOT override it here: removing the explicit accessMode lets the
+          // DB/Prisma default apply. EXISTING (migrated) rows are backfilled to
+          // 'anonymous' by the migration (DEFAULT_ACCESS_MODE_EXISTING) — that
+          // backfill is intentionally separate from the new-row creation path.
+          // policyVersion starts at 1 (the column default); set explicitly for
+          // clarity.
+          policyVersion: 1,
         },
       })
     })

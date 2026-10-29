@@ -1,5 +1,6 @@
 import { test, expect, type Page, type BrowserContext } from '@playwright/test'
 import { otpSignupPlaywright } from './helpers/otp-signup'
+import { setAccessMode } from './helpers/set-access'
 
 /**
  * Anonymous-user tenant isolation — security regression.
@@ -88,6 +89,12 @@ async function setupTenantA(browser: import('@playwright/test').Browser): Promis
     throw new Error(`Tenant A /api/tenants/me failed: status=${meRes.status()}`)
   }
   const slug = meData.tenant.slug
+
+  // Anonymous widget-flow regression requires the tenant to be in the
+  // historical `anonymous` access mode (a fresh OTP signup now defaults
+  // to `verified_visitor`). Switch it before exercising the public
+  // widget contact + messages flow below.
+  await setAccessMode(page, 'anonymous')
 
   // Create a real widget conversation via the public widget API.
   // (Tenant A's authed page can also be the one to drive the widget

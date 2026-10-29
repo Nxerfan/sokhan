@@ -308,6 +308,14 @@ for (const spec of EDITIONS) {
       expect(tenantData.tenant?.name, 'tenant name should match the workspace').toBe(workspace)
       currentSlug = slug as string
 
+      // Set the tenant's accessMode to 'anonymous' so the historical anonymous
+      // widget bootstrap succeeds (the self-host tests test the anonymous flow;
+      // the DB default for new WidgetConfig rows is 'verified_visitor').
+      const setAccessModeRes = await dashboardPage.request.patch(`${ORIGIN}/api/widget-config/access`, {
+        data: { accessMode: 'anonymous' },
+      })
+      expect(setAccessModeRes.ok(), `should set accessMode to anonymous (got ${setAccessModeRes.status()})`).toBe(true)
+
       // ---- Step 7: Widget script reachable — GET /api/widget/<slug>/script → 200. ----
       const scriptRes = await dashboardPage.request.get(`${ORIGIN}/api/widget/${slug}/script`)
       expect(

@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test'
 import { otpSignupPlaywright } from './helpers/otp-signup'
+import { setAccessMode } from './helpers/set-access'
 
 /**
  * Invitation lifecycle + workspace switching behavioral spec (PR #11).
@@ -158,6 +159,11 @@ async function setupTenant(
   }
   const owner = membersData.members?.find((m) => m.role === 'owner')
   if (!owner) throw new Error(`No owner membership for ${email} after signup`)
+
+  // Fresh OTP signups default to accessMode='verified_visitor' (the frozen
+  // DB contract). The /contact flow below requires anonymous visitor tokens,
+  // so explicitly switch the tenant to anonymous before any visitor traffic.
+  await setAccessMode(page, 'anonymous')
 
   return {
     page,
@@ -783,11 +789,20 @@ test.describe('C. Security', () => {
       await page.goto(BASE, { waitUntil: 'domcontentloaded' }).catch(() => {})
       const csrfRes = await page.request.get(`${BASE}/api/auth/csrf`)
       const { csrfToken } = (await csrfRes.json()) as { csrfToken: string }
-      const signinRes = await page.request.post(`${BASE}/api/auth/callback/credentials`, {
+      await page.request.post(`${BASE}/api/auth/callback/credentials`, {
         form: { email: pending, password: PASSWORD, csrfToken, json: 'true' },
         maxRedirects: 0,
       })
-      expect(signinRes.status(), 'pending invitee must not be able to sign in').toBeGreaterThanOrEqual(400)
+      // NextAuth's credentials callback returns 200 even on auth failure (the
+      // error is in the redirect/JSON, not the HTTP status — asserting
+      // >= 400 is unreliable + flaky). Verify the ACTUAL session/auth state:
+      // the pending invitee must NOT get an authenticated session or an
+      // accessible tenant, regardless of the signin HTTP status.
+      const sessionRes = await page.request.get(`${BASE}/api/auth/session`)
+      const session = (await sessionRes.json()) as { user?: unknown }
+      expect(session?.user, 'pending invitee must not get an authenticated session').toBeUndefined()
+      const tenantRes = await page.request.get(`${BASE}/api/tenants/me`)
+      expect(tenantRes.ok(), 'pending invitee must not access /api/tenants/me').toBe(false)
       await page.context().close()
     } finally {
       await a.page.context().close().catch(() => {})

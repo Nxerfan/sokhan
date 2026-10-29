@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test'
 import { otpSignupPlaywright } from './helpers/otp-signup'
+import { setAccessMode } from './helpers/set-access'
 
 /**
  * Inbox reply-echo dedup regression (Scenario C).
@@ -56,6 +57,10 @@ async function signupAndGetSlug(page: Page, email: string, workspace: string): P
   const tenantRes = await page.request.get(`${DASHBOARD}/api/tenants/me`)
   const tenantData = await tenantRes.json()
   const slug = tenantData.tenant?.slug
+  // Fresh OTP signups default to accessMode='verified_visitor' (the frozen
+  // DB contract). The /contact flow below requires anonymous visitor tokens,
+  // so explicitly switch the tenant to anonymous before any visitor traffic.
+  await setAccessMode(page, 'anonymous')
   // Navigate to the dashboard via Caddy (for Socket.IO) - the session cookie
   // is already set on the page's context.
   await page.goto(BASE)

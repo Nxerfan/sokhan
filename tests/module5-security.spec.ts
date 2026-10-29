@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test'
+import { setAccessMode } from './helpers/set-access'
 
 /**
  * Module 5 Part 1 — Public widget API security tests.
@@ -24,6 +25,9 @@ async function signupAndGetSlug(page: Page, email: string, workspace: string): P
   }, { email, workspace })
 
   expect(slug).toBeTruthy()
+  // Fresh signup defaults to verified_visitor; these widget-API security tests
+  // exercise the ANONYMOUS visitor /contact + /messages flow — set anonymous.
+  await setAccessMode(page, 'anonymous')
   return slug
 }
 
@@ -129,6 +133,9 @@ test.describe('Module 5 — Widget API Security', () => {
       return tenant?.slug
     })
     expect(slugA, 'Tenant A should have a slug').toBeTruthy()
+    // Fresh signup defaults to verified_visitor; the cross-tenant visitor
+    // /contact + /messages flow needs anonymous.
+    await setAccessMode(pageA, 'anonymous')
 
     // Step 2: Create a conversation via widget API (separate evaluate, slug passed as arg)
     const convData = await pageA.evaluate(async (slug) => {
@@ -158,6 +165,7 @@ test.describe('Module 5 — Widget API Security', () => {
       return tenant?.slug
     })
     expect(slugB, 'Tenant B should have a slug').toBeTruthy()
+    await setAccessMode(pageB, 'anonymous')
 
     // Step 4: Create a conversation on Tenant B (as a visitor on Tenant B's widget)
     const convBData = await pageB.evaluate(async (slugB) => {

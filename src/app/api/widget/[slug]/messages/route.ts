@@ -7,6 +7,7 @@ import { checkRateLimit, getClientIP } from '@/lib/rate-limit'
 import { withTenant } from '@/lib/db'
 import { checkMessageLimit } from '@/lib/payments/free-plan'
 import { getRequestDomain, isDomainAllowed } from '@/lib/payments/domain-validation'
+import { parseAccessMode, parsePolicyVersion, evaluateSendAuthorization, resolveLegacyTokenIdentity } from '@/lib/widget-access-policy'
 
 const MAX_MESSAGE_LENGTH = 5000
 const MAX_MESSAGES_PER_CONVERSATION = 200
@@ -112,8 +113,9 @@ export async function POST(
   if (tokenSlug !== slug) {
     return widgetHeaders(NextResponse.json({ error: 'token_slug_mismatch' }, { status: 403 }))
   }
-  // Verify the token's tenant corresponds to this slug.
-  const tokenTenant = await db.tenant.findUnique({ where: { slug }, select: { id: true } })
+  // Verify the token's tenant corresponds to this slug + load the CURRENT
+  // WidgetConfig (for current-policy send authorization).
+  const tokenTenant = await db.tenant.findUnique({ where: { slug }, include: { widgetConfig: true } })
   if (!tokenTenant || tokenTenant.id !== tenantId) {
     return widgetHeaders(NextResponse.json({ error: 'token_tenant_mismatch' }, { status: 403 }))
   }
@@ -122,6 +124,19 @@ export async function POST(
   const text = String(body.text ?? '').trim().slice(0, MAX_MESSAGE_LENGTH)
   if (!text) {
     return widgetHeaders(NextResponse.json({ error: 'empty_message' }, { status: 400 }))
+  }
+
+  // === CURRENT-policy resolution (#1, #2). Strict — never coerce. ===
+  if (!tokenTenant.widgetConfig) {
+    return widgetHeaders(NextResponse.json({ error: 'policy_unavailable' }, { status: 503 }))
+  }
+  const accessMode = parseAccessMode(tokenTenant.widgetConfig.accessMode)
+  if (accessMode === null) {
+    return widgetHeaders(NextResponse.json({ error: 'policy_unavailable' }, { status: 503 }))
+  }
+  const currentPolicyVersion = parsePolicyVersion(tokenTenant.widgetConfig.policyVersion)
+  if (currentPolicyVersion === null) {
+    return widgetHeaders(NextResponse.json({ error: 'policy_unavailable' }, { status: 503 }))
   }
 
   // clientMessageId — ephemeral per-send correlation identifier generated
@@ -137,6 +152,58 @@ export async function POST(
   // FaqPair, Product, etc.). Without this, the queries throw
   // `TenantContextRequiredError` and the widget POST breaks.
   const result = await withTenant(tenantId, async () => {
+    // === CURRENT-policy send authorization (#1, #3-9) — BEFORE any persistence. ===
+    // Resolve the token's identityLevel. Legacy (both claims absent) is accepted
+    // ONLY in anonymous mode. Partial/malformed claims -> identity_token_invalid.
+    const isLegacy = payload.identityLevel === undefined && payload.policyVersion === undefined
+    const resolvedIdentity = resolveLegacyTokenIdentity({ currentAccessMode: accessMode, tokenIdentityLevel: payload.identityLevel, tokenPolicyVersion: payload.policyVersion })
+    if (resolvedIdentity === null) {
+      if (isLegacy) {
+        // Both claims absent + non-anonymous mode -> mode-specific deny.
+        const reason = accessMode === 'verified_visitor' ? 'verification_required' : 'website_login_required'
+        return { kind: 'authorization_denied' as const, reason }
+      }
+      // Partial/malformed modern claims -> identity_token_invalid (#7).
+      return { kind: 'authorization_denied' as const, reason: 'identity_token_invalid' }
+    }
+
+    // Revalidate the Contact against the route tenant + identity class (#8, #9).
+    const contact = await db.contact.findUnique({
+      where: { id: contactId },
+      select: { id: true, tenantId: true, identifierType: true, externalUserId: true, emailVerifiedAt: true },
+    })
+    if (!contact || contact.tenantId !== tenantId) {
+      return { kind: 'authorization_denied' as const, reason: 'identity_token_invalid' }
+    }
+    if (resolvedIdentity === 'anonymous' || resolvedIdentity === 'verified_contact') {
+      if (contact.identifierType !== 'visitorId' || contact.externalUserId !== null) {
+        return { kind: 'authorization_denied' as const, reason: 'identity_token_invalid' }
+      }
+      if (resolvedIdentity === 'verified_contact' && contact.emailVerifiedAt === null) {
+        return { kind: 'authorization_denied' as const, reason: 'identity_token_invalid' }
+      }
+    } else if (resolvedIdentity === 'external_user') {
+      if (contact.identifierType !== 'externalUser' || contact.externalUserId === null) {
+        return { kind: 'authorization_denied' as const, reason: 'identity_token_invalid' }
+      }
+    }
+
+    // Evaluate CURRENT send authorization (#3, #5).
+    const decision = evaluateSendAuthorization({
+      accessMode,
+      currentPolicyVersion,
+      identityLevel: resolvedIdentity,
+      presentedPolicyVersion: payload.policyVersion,
+    })
+    if (!decision.allowed) {
+      const reason = decision.reason
+      if (reason === 'policy_unavailable') return { kind: 'authorization_denied' as const, reason: 'policy_unavailable' }
+      if (reason === 'policy_changed') return { kind: 'authorization_denied' as const, reason: 'policy_changed' }
+      if (reason === 'verification_required') return { kind: 'authorization_denied' as const, reason: 'verification_required' }
+      if (reason === 'website_login_required') return { kind: 'authorization_denied' as const, reason: 'website_login_required' }
+      return { kind: 'authorization_denied' as const, reason: 'identity_token_invalid' }
+    }
+
     // Free plan checks: domain validation + message limit + trial expiry.
     // These internally query tenant-scoped models (WidgetDomain, Message)
     // so they MUST run inside the tenant context.
@@ -202,6 +269,10 @@ export async function POST(
     return { kind: 'ok' as const, message, conversation, isNew }
   })
 
+  if (result.kind === 'authorization_denied') {
+    const status = result.reason === 'policy_unavailable' ? 503 : 403
+    return widgetHeaders(NextResponse.json({ error: result.reason }, { status }))
+  }
   if (result.kind === 'domain_not_allowed') {
     return widgetHeaders(NextResponse.json({ error: 'domain_not_allowed' }, { status: 403 }))
   }

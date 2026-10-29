@@ -38,6 +38,8 @@ export interface VisitorTokenPayload {
   contactId: string
   tenantId: string
   slug: string
+  identityLevel?: 'anonymous' | 'verified_contact' | 'external_user'
+  policyVersion?: number
 }
 
 export type RealtimeTokenPayload = AgentTokenPayload | VisitorTokenPayload

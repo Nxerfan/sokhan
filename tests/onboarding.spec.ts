@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test'
 import { otpSignupPlaywright } from './helpers/otp-signup'
+import { setAccessMode } from './helpers/set-access'
 
 /**
  * Widget Installation & Onboarding UX — behavioral browser regression.
@@ -66,6 +67,11 @@ async function signupAndGetSlug(page: Page, email: string, workspace: string): P
   const tenantData = await tenantRes.json()
   const slug = tenantData.tenant?.slug
   expect(slug, `slug should be set (tenant data: ${JSON.stringify(tenantData)})`).toBeTruthy()
+  // Anonymous widget-flow regression requires the tenant to be in the
+  // historical `anonymous` access mode (a fresh OTP signup now defaults
+  // to `verified_visitor`). Switch it before the widget script loads
+  // and the test's main flow begins.
+  await setAccessMode(page, 'anonymous')
   return slug as string
 }
 

@@ -8,6 +8,8 @@ import {
   type RealtimeTokenPayload,
 } from '../src/lib/realtime-token-shared';
 
+import { verifyVisitorAccess } from '../src/lib/realtime-visitor-auth';
+
 /**
  * Vercel-native WebSocket endpoint (official Vercel Socket.IO pattern).
  *
@@ -104,6 +106,21 @@ io.use(async (socket: AuthSocket, next) => {
     }
   }
 
+  // For visitors: enforce CURRENT policy authorization.
+  if (payload.type === 'visitor') {
+    const visitor = payload as VisitorTokenPayload;
+    try {
+      const decision = await verifyVisitorAccess(visitor, prisma);
+      if (!decision.allowed) {
+        console.log(`[rt] REJECTED visitor — ${decision.reason} (contact=${visitor.contactId}, tenant=${visitor.tenantId})`);
+        return next(new Error(decision.reason));
+      }
+    } catch (e) {
+      console.error('[rt] visitor access check error:', e instanceof Error ? e.name : 'unknown');
+      return next(new Error('visitor_access_check_failed'));
+    }
+  }
+
   socket.payload = payload;
   next();
 });
@@ -123,6 +140,16 @@ io.on('connection', (socket: AuthSocket) => {
   // CRITICAL: verify conversation belongs to the socket's tenant before joining
   socket.on('conversation:join', async (conversationId: string) => {
     try {
+      // For visitors: revalidate CURRENT policy (may have changed since connect).
+      if (payload.type === 'visitor') {
+        const visitor = payload as VisitorTokenPayload;
+        const decision = await verifyVisitorAccess(visitor, prisma);
+        if (!decision.allowed) {
+          console.log(`[rt] REJECTED conversation:join — policy stale (conv=${conversationId}, reason=${decision.reason})`);
+          return; // don't join the room
+        }
+      }
+
       const where: { id: string; tenantId: string; contactId?: string } = {
         id: conversationId,
         tenantId: payload.tenantId,

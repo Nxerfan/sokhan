@@ -9,7 +9,7 @@
  * tests/onboarding.spec.ts verifies the real authenticated dashboard UI.
  *
  * Verifies:
- *   - Widget panel renders with Installation + Customization tabs
+ *   - Widget panel renders with Installation + Customization + Access & Identity tabs
  *   - Public widget identifier (Widget Key) is shown, not a secret API key
  *   - HTML snippet points to the Sukhan backend, not the customer page origin
  *   - NPM instructions match the actual package API
@@ -32,14 +32,16 @@ function readSrc(relPath: string): string {
   return readFileSync(resolve(__dirname, '../../', relPath), 'utf-8')
 }
 
-test('widget-panel.tsx has Installation + Customization tabs', () => {
+test('widget-panel.tsx has Installation + Customization + Access & Identity tabs', () => {
   const src = readSrc('src/components/dashboard/views/widget-panel.tsx')
   expect(src).toContain("'installation'")
   expect(src).toContain("'customization'")
+  expect(src).toContain("'access'")
   expect(src).toContain('Installation')
   expect(src).toContain('Customization')
+  expect(src).toContain('Access & Identity')
   // Installation is the default tab.
-  expect(src).toMatch(/useState<'installation' \| 'customization'>\('installation'\)/)
+  expect(src).toMatch(/useState<'installation' \| 'customization' \| 'access'>\('installation'\)/)
 })
 
 test('widget-panel.tsx shows Widget Key (not secret API key)', () => {
