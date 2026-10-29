@@ -666,8 +666,16 @@ STEP 2 — Implement the customer identity endpoint (preferably /api/sukhan-iden
     The mint returns { token }. Respond to the browser exactly:
       { "authenticated": true, "token": "<token>" }
   - NEVER return the integration secret to the browser.
-  - On mint failure (non-2xx), respond { "authenticated": false } (the widget will
-    fail closed to login-required; do NOT fabricate a token).
+  - Mint failure handling — { "authenticated": false } is RESERVED EXCLUSIVELY for
+    a genuinely logged-out host user (the customer's server-side auth says there is
+    no authenticated user). If a server-side authenticated user EXISTS but the Sukhan
+    mint fails (non-2xx, timeout, invalid response, missing/invalid integration
+    secret), return a safe NON-2XX response from /api/sukhan-identity (e.g. 502 or
+    503). Do NOT return { "authenticated": false } for a mint/integration failure —
+    that value would incorrectly tell the widget the user is logged out. Do NOT
+    fabricate a token. Do NOT expose the integration secret or raw upstream error
+    details to the browser. The widget treats a non-2xx response as
+    integration_unavailable (fail closed) — NOT login-required, NOT anonymous.
 
 STEP 3 — Integrate the widget.
   - If the NPM package is available (after public publication), use:
@@ -691,10 +699,17 @@ STEP 3 — Integrate the widget.
     widget disconnects A, clears A's history, and bootstraps B. Do not leak A's
     conversation history to B.
 
-STEP 4 — Fail-closed behavior.
-  - The customer identity endpoint MUST fail closed on timeout / network failure /
-    non-2xx / malformed response. Logged-out ({authenticated:false}) is a valid
-    auth result (→ login-required), NOT an integration failure.
+STEP 4 — Fail-closed behavior (two distinct failure layers).
+  - Layer 1 — customer endpoint consumed by the widget: timeout / network failure /
+    non-2xx / malformed JSON/body → the widget treats this as integration_unavailable
+    → fail closed. Never anonymous fallback. This INCLUDES a NON-2XX response the
+    customer backend returns when the host user IS authenticated but the Sukhan mint
+    failed (see STEP 2) — that is an integration failure, not a logged-out state.
+  - Layer 2 — authenticated state: ONLY a valid 200 { "authenticated": false } from
+    the customer backend means the host user is genuinely logged out → the widget
+    enters login-required. An integration/mint failure is NOT login-required — do NOT
+    describe it as such. { "authenticated": false } is reserved exclusively for a
+    genuinely logged-out user.
   - NEVER downgrade to anonymous.
 
 STEP 5 — Tests (use the repository's test framework).
