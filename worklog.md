@@ -2305,3 +2305,21 @@ CI gate (exact-SHA): ci SUCCESS, docker-regression SUCCESS (Full 151 + Lite 151
 browser incl. 11 dashboard tests × 2 = 22 ✓), self-host-qualification SUCCESS,
 widget-package-qualification SUCCESS. NO backend changes. NO runtime changes.
 PR #14 remains DRAFT / NOT MERGED / NO AUTO-MERGE. Next phase: docs/widget-access-and-identity.md.
+
+## Widget Access & Identity Documentation (PR #14 — feat/widget-visitor-access-modes)
+
+Phase: final implementation documentation. Documentation-only — no production
+source/runtime/test changes. Added docs/widget-access-and-identity.md: the
+source-of-truth technical reference at branch head 1e4bb64. 32 sections
+(purpose/scope, terminology, access modes, defaults/migration, identity levels,
+trust boundaries, anonymous/verified/site_user flows, OTP START/VERIFY/RESEND,
+resume credential, integration secret lifecycle, identity mint, external token,
+customer endpoint contract, NPM + script integration, login-required, login
+URL/SPA, public config, dashboard UI, policyVersion/transitions, REST + realtime
+authorization, legacy token compatibility, credential storage rules, security/
+threat model, errors/troubleshooting, qualification evidence, + the mandatory
+framework-neutral customer-repository coding CLI prompt). All routes, fields,
+error codes, TTLs (resume 30d, external token 5m), limits (MAX_VERIFY_ATTEMPTS=5,
+MAX_RESENDS=3), constants (RAW_LENGTH_BYTES=48, SHA-256) verified against the
+actual production files. NPM publication stated as pending; dashboard 'Coming
+Soon' preserved. PR #14 DRAFT / NOT MERGED / NO AUTO-MERGE.
