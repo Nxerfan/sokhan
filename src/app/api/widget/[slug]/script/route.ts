@@ -1477,7 +1477,9 @@ ${POSITIONING_FN_SOURCE}
 
   // ---- Bootstrap ----
   function fetchConfig(){
-    fetch(CONFIG_URL, { cache: 'no-store' })
+    // Cache-busting timestamp ensures fresh config (V2 positioning changes
+    // propagate immediately — no stale cached response from a previous load).
+    fetch(CONFIG_URL + '?_t=' + Date.now(), { cache: 'no-store' })
       .then(function(r){ return r.json(); })
       .then(function(config){ mount(config); })
       .catch(function(e){ console.error('[sukhan] config fetch failed', e); });

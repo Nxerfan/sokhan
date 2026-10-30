@@ -184,16 +184,15 @@ export function WidgetPositioningPanel({
     })
   }, [canOffset, setCurrentDraft, effectiveAnchor])
 
-  // Reset offsets to 0 (keep the anchor).
+  // Reset offsets to 0 (keep the anchor). Sets offsetX/Y to 0 (not delete)
+  // so the save explicitly persists 0 — the true-patch merge would preserve
+  // the old value if the field is omitted.
   const resetOffsets = useCallback(() => {
     setCurrentDraft((prev) => {
-      if (!prev) return prev
-      const next = { ...prev }
-      delete next.offsetX
-      delete next.offsetY
-      return next
+      const base = prev ?? { anchor: effectiveAnchor }
+      return { ...base, offsetX: 0, offsetY: 0 }
     })
-  }, [setCurrentDraft])
+  }, [setCurrentDraft, effectiveAnchor])
 
   // Drag handler: update offsetX/offsetY based on pointer movement.
   const handleDragStart = useCallback((e: React.PointerEvent) => {

@@ -26,6 +26,10 @@ export async function OPTIONS() {
   return new NextResponse(null, { status: 204, headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type' } })
 }
 
+/** Force dynamic rendering — never cache the config response (V2 positioning
+ * changes must propagate immediately to the widget script). */
+export const dynamic = 'force-dynamic'
+
 /**
  * Public widget configuration, resolved by tenant slug.
  * Free plan: returns LOCKED defaults (Sukhan brand, no customization).
