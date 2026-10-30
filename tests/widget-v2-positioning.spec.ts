@@ -259,7 +259,23 @@ test.describe('Widget V2 Positioning — browser regression', () => {
       const root = document.querySelector('.sk-root') as HTMLElement
       return root && root.style.left !== ''
     }, { timeout: 15_000 })
-    await customerPage.waitForTimeout(500) // extra settle time for async positioning
+    await customerPage.waitForTimeout(1000) // settle for async config fetch + positioning
+
+    // Diagnostic: verify the config the browser receives includes positioning.
+    const browserConfig = await customerPage.evaluate(async (slug: string) => {
+      const r = await fetch(`http://127.0.0.1:81/api/widget/${slug}/config`, { cache: 'no-store' })
+      const c = await r.json()
+      return {
+        hasPositioning: !!c.positioning,
+        desktopAnchor: c.positioning?.desktop?.anchor,
+        desktopOffsetX: c.positioning?.desktop?.offsetX,
+        v1Position: c.position,
+      }
+    }, slug)
+    // The browser-fetched config must have the V2 positioning with offsetX.
+    expect(browserConfig.hasPositioning).toBe(true)
+    expect(browserConfig.desktopOffsetX).toBe(100)
+
     const rootLeft = await customerPage.evaluate(() => {
       const root = document.querySelector('.sk-root') as HTMLElement
       return root ? parseInt(root.style.left || '0', 10) : -1
@@ -663,7 +679,7 @@ test.describe('Widget V2 Positioning — browser regression', () => {
       const root = document.querySelector('.sk-root') as HTMLElement
       return root && root.style.left !== ''
     }, { timeout: 15_000 })
-    await customerPage.waitForTimeout(500)
+    await customerPage.waitForTimeout(1000)
     const info = await customerPage.evaluate(() => {
       const root = document.querySelector('.sk-root') as HTMLElement
       return {
@@ -671,7 +687,8 @@ test.describe('Widget V2 Positioning — browser regression', () => {
         vw: window.innerWidth,
       }
     })
-    // bottom-center → launcher should be roughly centered.
+    // bottom-center → launcher should be roughly centered (30%-70% of viewport).
+    // If V2 positioning is not applied, left would be ~928 (bottom-end default) or ~20.
     expect(info.left).toBeGreaterThan(info.vw * 0.3)
     expect(info.left).toBeLessThan(info.vw * 0.7)
 

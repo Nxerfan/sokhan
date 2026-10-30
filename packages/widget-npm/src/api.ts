@@ -121,6 +121,7 @@ export class ApiClient {
     const res = await fetch(`${this.apiUrl}/api/widget/${this.slug}/config`, {
       method: 'GET',
       headers: { Accept: 'application/json' },
+      cache: 'no-store',
     })
     return ensureOk<WidgetConfig>(res)
   }

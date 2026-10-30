@@ -809,7 +809,7 @@ ${POSITIONING_FN_SOURCE}
 
   // ---- Bootstrap ----
   function fetchConfig(){
-    fetch(CONFIG_URL)
+    fetch(CONFIG_URL, { cache: 'no-store' })
       .then(function(r){ return r.json(); })
       .then(function(config){ mount(config); })
       .catch(function(e){ console.error('[sukhan] config fetch failed', e); });

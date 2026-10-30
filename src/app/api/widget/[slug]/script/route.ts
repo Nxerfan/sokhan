@@ -1472,7 +1472,7 @@ ${POSITIONING_FN_SOURCE}
 
   // ---- Bootstrap ----
   function fetchConfig(){
-    fetch(CONFIG_URL)
+    fetch(CONFIG_URL, { cache: 'no-store' })
       .then(function(r){ return r.json(); })
       .then(function(config){ mount(config); })
       .catch(function(e){ console.error('[sukhan] config fetch failed', e); });
@@ -1520,7 +1520,7 @@ export async function GET(
   return new Response(script, {
     headers: {
       'Content-Type': 'application/javascript; charset=utf-8',
-      'Cache-Control': 'public, max-age=60',
+      'Cache-Control': 'public, max-age=5',
       'Access-Control-Allow-Origin': '*',
     },
   })
