@@ -145,8 +145,8 @@ ${POSITIONING_FN_SOURCE}
   // V2 Positioning helpers (shared geometry from positioning-script.ts).
   // ============================================================
   function resolveDevicePositioning(config) {
-    var isMobile = __skDetectDevice();
-    var device = isMobile ? 'mobile' : 'desktop';
+    // __skDetectDevice returns 'mobile' or 'desktop' (string, not boolean).
+    var device = __skDetectDevice();
     if (config.positioning && config.positioning[device]) {
       return config.positioning[device];
     }
