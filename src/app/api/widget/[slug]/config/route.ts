@@ -17,6 +17,8 @@ function widgetHeaders(res: NextResponse): NextResponse {
   res.headers.set('Access-Control-Allow-Origin', '*')
   res.headers.set('Access-Control-Allow-Methods', 'GET, OPTIONS')
   res.headers.set('Access-Control-Allow-Headers', 'Content-Type')
+  // Prevent browser caching so V2 positioning changes propagate immediately.
+  res.headers.set('Cache-Control', 'no-store')
   return res
 }
 

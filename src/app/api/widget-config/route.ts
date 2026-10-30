@@ -177,10 +177,12 @@ export async function PATCH(req: NextRequest) {
     const hasPositioning = hasPositioningField(body)
     const hasOtherFields = hasOtherCustomizationFields(body)
 
-    // Reject unrecognized top-level fields — never silently accept
-    // unsupported payloads (no prototype pollution, no bypass via
-    // unknown keys).
-    if (hasUnrecognizedFields(body)) {
+    // Reject unrecognized top-level fields ONLY on isolated positioning
+    // requests (when `positioning` is present). This prevents bypass via
+    // unknown keys on the positioning contract without breaking existing
+    // customization PATCHes (which may send the full WidgetConfig object
+    // including non-customization fields like id, tenantId, etc.).
+    if (hasPositioning && hasUnrecognizedFields(body)) {
       return { badRequest: true as const, code: 'unrecognized_field' }
     }
 
