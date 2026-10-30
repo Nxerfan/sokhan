@@ -73,6 +73,13 @@ import {
   fetchIdentity,
   type IdentityResult,
 } from './identity.js'
+import {
+  computeLauncherPosition,
+  DEFAULT_BASE_MARGIN,
+  type EffectivePositioning,
+  type PositioningAnchor,
+  type LauncherPositionOutput,
+} from './positioning.js'
 import type {
   WidgetConfig,
   SukhanOptions,
@@ -290,6 +297,12 @@ interface WidgetInternalState {
   locale: 'fa' | 'en'
   dir: 'rtl' | 'ltr'
   typingTimer?: ReturnType<typeof setTimeout>
+  /** V2 positioning — the effective positioning for the current device. */
+  effectivePositioning: EffectivePositioning | null
+  /** The current panel side (left/right/center) from the geometry function. */
+  panelSide: 'left' | 'right' | 'center'
+  /** Resize listener reference (for cleanup on destroy). */
+  resizeHandler: (() => void) | null
 }
 
 /** Injected dependencies — production leaves undefined (uses real impls). */
@@ -359,6 +372,9 @@ export class SukhanWidget implements SukhanInstance {
     connected: false,
     locale: 'fa',
     dir: 'rtl',
+    effectivePositioning: null,
+    panelSide: 'right',
+    resizeHandler: null,
   }
 
   // DOM refs (created in mount)
@@ -460,16 +476,16 @@ export class SukhanWidget implements SukhanInstance {
     const dir = this.direction || (config.defaultDirection === 'ltr' ? 'ltr' : 'rtl')
     this.state.dir = dir as 'rtl' | 'ltr'
     const accent = config.accentColor || '#E09A2B'
-    const pos = config.position || 'bottom-end'
-    let side: 'left' | 'right' = pos === 'bottom-start' ? 'left' : 'right'
-    if (this.state.dir === 'rtl') side = pos === 'bottom-start' ? 'right' : 'left'
+
+    // V2 positioning: determine the effective positioning for the current
+    // device. Falls back to V1 `position` if no V2 positioning is present.
+    this.state.effectivePositioning = this.resolveDevicePositioning(config)
 
     this.injectStyles(accent)
 
     const root = el('div', 'sk-root') as HTMLElement
     root.setAttribute('dir', this.state.dir)
-    css(root, { position: 'fixed', bottom: '20px', zIndex: '2147483000' })
-    root.style[side] = '20px'
+    css(root, { position: 'fixed', zIndex: '2147483000' })
     this.root = root
     this.rootEl = root
 
@@ -528,8 +544,11 @@ export class SukhanWidget implements SukhanInstance {
       pointerEvents: 'none',
       transition: 'opacity .18s ease, transform .18s ease',
     })
-    panel.style[side] = '0'
     this.panel = panel
+
+    // Apply the initial position + set up the resize listener.
+    this.applyPosition()
+    this.setupResizeListener()
 
     const header = el('div', 'sk-header')
     css(header, {
@@ -1434,9 +1453,9 @@ export class SukhanWidget implements SukhanInstance {
     this.state.open = true
     css(this.panel, {
       opacity: '1',
-      transform: 'translateY(0) scale(1)',
       pointerEvents: 'auto',
     })
+    this.applyPanelTransform()
     this.pulseDot.style.display = 'none'
     setTimeout(() => this.inputEl && this.inputEl.focus(), 200)
   }
@@ -1444,9 +1463,9 @@ export class SukhanWidget implements SukhanInstance {
     this.state.open = false
     css(this.panel, {
       opacity: '0',
-      transform: 'translateY(8px) scale(.98)',
       pointerEvents: 'none',
     })
+    this.applyPanelTransform()
   }
 
   private loadMessages(): void {
@@ -2004,7 +2023,161 @@ export class SukhanWidget implements SukhanInstance {
       })
   }
 
-  // ---------- Styles ----------
+  // ---------- V2 Positioning ----------
+
+  /**
+   * Resolve the effective positioning for the current device from the
+   * config. Uses V2 `config.positioning` if present, falls back to V1
+   * `config.position` (bottom-start/bottom-end only).
+   *
+   * Device detection: `matchMedia('(max-width: 768px)')` → mobile;
+   * otherwise desktop.
+   */
+  private resolveDevicePositioning(config: WidgetConfig): EffectivePositioning {
+    const isMobile = this.detectMobile()
+    const device = isMobile ? 'mobile' : 'desktop'
+
+    // V2 positioning present → use it (already effective from the backend).
+    if (config.positioning && config.positioning[device]) {
+      return config.positioning[device]
+    }
+
+    // Fallback: V1 position (bottom-start/bottom-end only).
+    const v1Pos = config.position || 'bottom-end'
+    const anchor: PositioningAnchor = v1Pos === 'bottom-start' ? 'bottom-start' : 'bottom-end'
+    return { anchor, offsetX: 0, offsetY: 0 }
+  }
+
+  /** Detect mobile via matchMedia (with innerWidth fallback). */
+  private detectMobile(): boolean {
+    try {
+      if (typeof window !== 'undefined' && window.matchMedia) {
+        return window.matchMedia('(max-width: 768px)').matches
+      }
+    } catch {
+      // matchMedia not available
+    }
+    return typeof window !== 'undefined' && window.innerWidth <= 768
+  }
+
+  /** Get launcher dimensions from the shape class. */
+  private getLauncherDimensions(shape: string): { width: number; height: number } {
+    if (shape === 'tab') return { width: 60, height: 52 }
+    if (shape === 'pill') return { width: 64, height: 48 }
+    return { width: 52, height: 52 } // rounded / default
+  }
+
+  /** Get the safe-area-inset-bottom (0 if unsupported). */
+  private getSafeAreaBottom(): number {
+    return 0 // handled via CSS env() in injected styles; JS returns 0
+  }
+
+  /**
+   * Apply the computed position to the root element + panel.
+   * Called on mount + on every resize/orientation change.
+   */
+  private applyPosition(): void {
+    if (!this.state.config || !this.root) return
+    const pos = this.state.effectivePositioning
+    if (!pos) return
+
+    const dims = this.getLauncherDimensions(this.state.config.launcherShape)
+    const result = computeLauncherPosition({
+      anchor: pos.anchor,
+      offsetX: pos.offsetX || 0,
+      offsetY: pos.offsetY || 0,
+      dir: this.state.dir,
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight,
+      launcherWidth: dims.width,
+      launcherHeight: dims.height,
+      safeAreaBottom: this.getSafeAreaBottom(),
+      baseMargin: DEFAULT_BASE_MARGIN,
+    })
+
+    // Apply the root position (always left + bottom).
+    this.root.style.left = result.left + 'px'
+    this.root.style.bottom = result.bottom + 'px'
+    this.root.style.right = ''
+
+    // Store panel side for open/close transform.
+    this.state.panelSide = result.panelSide
+
+    // Apply panel side.
+    this.applyPanelSide(result.panelSide)
+  }
+
+  /** Apply the panel side (left/right/center) to the panel element. */
+  private applyPanelSide(side: 'left' | 'right' | 'center'): void {
+    if (!this.panel) return
+    // Clear previous side styles.
+    this.panel.style.left = ''
+    this.panel.style.right = ''
+    if (side === 'right') {
+      // Panel opens to the right of the launcher.
+      this.panel.style.left = '0'
+    } else if (side === 'left') {
+      // Panel opens to the left of the launcher.
+      this.panel.style.right = '0'
+    } else {
+      // Center: panel centered above the launcher.
+      this.panel.style.left = '50%'
+    }
+    // Re-apply the current open/close transform (incorporating center base).
+    this.applyPanelTransform()
+  }
+
+  /** Get the base transform for the panel (center needs translateX(-50%)). */
+  private getPanelBaseTransform(): string {
+    return this.state.panelSide === 'center' ? 'translateX(-50%)' : ''
+  }
+
+  /** Apply the panel transform (open/close animation + base for center). */
+  private applyPanelTransform(): void {
+    if (!this.panel) return
+    const base = this.getPanelBaseTransform()
+    if (this.state.open) {
+      this.panel.style.transform = (base + ' translateY(0) scale(1)').trim()
+    } else {
+      this.panel.style.transform = (base + ' translateY(8px) scale(.98)').trim()
+    }
+  }
+
+  /** Set up the resize/orientation listener for repositioning. */
+  private setupResizeListener(): void {
+    if (this.state.resizeHandler) return // already set up
+    const handler = () => {
+      if (this.destroyed) return
+      // Re-detect device (desktop/mobile switch on resize).
+      const newPos = this.resolveDevicePositioning(this.state.config!)
+      const oldPos = this.state.effectivePositioning
+      if (newPos.anchor !== oldPos?.anchor || newPos.offsetX !== oldPos.offsetX || newPos.offsetY !== oldPos.offsetY) {
+        this.state.effectivePositioning = newPos
+      }
+      this.applyPosition()
+    }
+    this.state.resizeHandler = handler
+    try {
+      window.addEventListener('resize', handler)
+      window.addEventListener('orientationchange', handler)
+    } catch {
+      // ignore
+    }
+  }
+
+  /** Remove the resize/orientation listener (called on destroy). */
+  private teardownResizeListener(): void {
+    const handler = this.state.resizeHandler
+    if (!handler) return
+    try {
+      window.removeEventListener('resize', handler)
+      window.removeEventListener('orientationchange', handler)
+    } catch {
+      // ignore
+    }
+    this.state.resizeHandler = null
+  }
+
   private injectStyles(accent: string): void {
     const style = el('style')
     style.textContent =
@@ -2043,6 +2216,8 @@ export class SukhanWidget implements SukhanInstance {
     if (this.destroyed) return // idempotent: calling twice is a no-op
     this.destroyed = true
     this.clearIdentityState()
+    // 0. Remove resize/orientation listener
+    this.teardownResizeListener()
     // 1. Clear polling interval
     this.stopPolling()
     // 2. Clear typing timer

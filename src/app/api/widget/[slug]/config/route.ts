@@ -5,6 +5,12 @@ import { checkMessageLimit } from '@/lib/payments/free-plan'
 import { getRequestDomain, isDomainAllowed } from '@/lib/payments/domain-validation'
 import { resolveRealtimeConfig } from '@/lib/realtime-config'
 import { publicAccessConfig } from '@/lib/widget-access-policy'
+import { getEntitlements } from '@/lib/payments/widget-entitlements'
+import {
+  resolveAllEffectivePositioning,
+  deriveLegacyPosition,
+  type StoredPositioningInput,
+} from '@/lib/widget/effective-positioning'
 
 /** CORS headers for widget API responses. */
 function widgetHeaders(res: NextResponse): NextResponse {
@@ -30,7 +36,7 @@ export async function GET(
   const { slug } = await params
   const tenant = await db.tenant.findUnique({
     where: { slug },
-    select: { id: true, name: true, defaultLocale: true, defaultDirection: true },
+    select: { id: true, name: true, defaultLocale: true, defaultDirection: true, plan: true },
   })
   if (!tenant) {
     return widgetHeaders(NextResponse.json({ error: 'not_found' }, { status: 404 }))
@@ -63,9 +69,19 @@ export async function GET(
   // from getEffectiveWidgetConfig — that returns visual-only fields). The
   // public route runs without a tenant session, so use globalDb (unscoped) for
   // the tenant-scoped WidgetConfig read (the lookup is by the unique tenantId).
+  // Also select the stored appearanceV2 + position for V2 positioning resolution.
   const widgetConfig = await globalDb.widgetConfig.findUnique({
     where: { tenantId: tenant.id },
-    select: { accessMode: true, policyVersion: true, loginUrl: true, loginButtonLabel: true, loginReturnUrlParam: true, identityEndpointPath: true },
+    select: {
+      accessMode: true,
+      policyVersion: true,
+      loginUrl: true,
+      loginButtonLabel: true,
+      loginReturnUrlParam: true,
+      identityEndpointPath: true,
+      position: true,
+      appearanceV2: true,
+    },
   })
   if (!widgetConfig) {
     return widgetHeaders(NextResponse.json({ error: 'policy_unavailable' }, { status: 503 }))
@@ -83,6 +99,24 @@ export async function GET(
   // not need to know deployment topology. Older clients ignore the field.
   const realtime = resolveRealtimeConfig()
 
+  // V2 positioning: resolve the EFFECTIVE positioning for desktop + mobile
+  // from the stored V2/V1 + the server-authoritative plan entitlements.
+  // The public config exposes ONLY validated effective positioning —
+  // offsets are included only for plans entitled to precise positioning.
+  // Stored paid offsets are NEVER exposed to Free visitors.
+  const entitlements = getEntitlements(tenant.plan)
+  const storedPosInput: StoredPositioningInput = {
+    position: widgetConfig.position ?? null,
+    appearanceV2: widgetConfig.appearanceV2,
+  }
+  const effectivePos = resolveAllEffectivePositioning(storedPosInput, entitlements)
+
+  // Derive the V1 `position` for legacy consumers from the effective desktop
+  // positioning. V1 only supports bottom-start/bottom-end; bottom-center
+  // maps to bottom-end (the canonical product default).
+  const legacyPosition = deriveLegacyPosition(effectivePos.desktop)
+  const configWithPosition = { ...config, position: legacyPosition }
+
   // Additive: the safe public access-policy fields. Existing clients continue
   // working (additive top-level fields). NEVER expose the raw integration
   // secret, integrationSecretHash, or any server-only credential — only the
@@ -90,8 +124,13 @@ export async function GET(
   return widgetHeaders(NextResponse.json({
     slug,
     name: tenant.name,
-    ...config,
+    ...configWithPosition,
     ...publicPolicy,
     realtime,
+    // V2 positioning (additive — older clients ignore this field).
+    positioning: {
+      desktop: effectivePos.desktop,
+      mobile: effectivePos.mobile,
+    },
   }))
 }
