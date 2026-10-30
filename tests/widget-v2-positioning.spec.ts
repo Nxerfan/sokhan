@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test'
 import { createServer, type Server } from 'node:http'
 import { execSync } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { otpSignupPlaywright } from './helpers/otp-signup'
 
@@ -850,20 +850,17 @@ test.describe('Widget V2 Positioning — browser regression', () => {
       data: `email=${email}&password=password123&csrfToken=${csrfToken}&json=true`,
     })
 
-    // Set positioning: bottom-start + offsetX=80.
+    // Set positioning: bottom-center + offsetX=80 (direction-agnostic).
     await page.request.patch(`${BASE}/api/widget-config`, {
-      data: { positioning: { desktop: { anchor: 'bottom-start', offsetX: 80 } } },
+      data: { positioning: { desktop: { anchor: 'bottom-center', offsetX: 80 } } },
       headers: { 'Content-Type': 'application/json' },
     })
 
-    // Build the NPM bundle.
+    // Build the NPM bundle (clean build to ensure latest source).
     const PKG_DIR = resolve(process.cwd(), 'packages/widget-npm')
     const WIDGET_BUNDLE = join(PKG_DIR, 'dist', 'index.js')
-    try {
-      execSync('bun run build', { cwd: PKG_DIR, stdio: 'pipe' })
-    } catch {
-      // If build fails, skip — but the test should fail, not skip.
-    }
+    rmSync(join(PKG_DIR, 'dist'), { recursive: true, force: true })
+    execSync('bun run build', { cwd: PKG_DIR, stdio: 'pipe' })
     expect(existsSync(WIDGET_BUNDLE), 'NPM widget bundle must be built').toBe(true)
 
     // Customer server that serves the NPM bundle + barebones HTML.
@@ -927,12 +924,13 @@ test.describe('Widget V2 Positioning — browser regression', () => {
         }
       })
       // The NPM widget must have applied V2 positioning.
-      expect(geom.anchor).toBe('bottom-start')
+      expect(geom.anchor).toBe('bottom-center')
       expect(geom.offsetX).toBe('80')
-      // bottom-start LTR: left = baseMargin(20) + offsetX(80) = 100.
-      // Verify within ±15px tolerance (getBoundingClientRect may differ
-      // slightly from style.left due to subpixel rendering).
-      expect(Math.abs(geom.left - 100)).toBeLessThanOrEqual(15)
+      // bottom-center: left = (viewportWidth - launcherWidth) / 2 + offsetX.
+      // launcherWidth = 52 (rounded shape default), offsetX = 80.
+      const expectedLeft = (geom.vw - 52) / 2 + 80
+      // Verify within ±15px tolerance (subpixel rendering differences).
+      expect(Math.abs(geom.left - expectedLeft)).toBeLessThanOrEqual(15)
     } finally {
       await new Promise<void>((r) => npmServer.close(() => r()))
     }
