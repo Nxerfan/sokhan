@@ -295,19 +295,27 @@ test.describe('Widget V2 Positioning — browser regression', () => {
     // Verify the widget received + applied V2 positioning via diagnostic
     // data attributes on the root element. This proves the widget script
     // resolved the positioning from the config and applied it.
-    const widgetPos = await customerPage.evaluate(() => {
+    const widgetDiag = await customerPage.evaluate(() => {
       const root = document.querySelector('.sk-root') as HTMLElement
+      const cfg = (window as any).__sukhan_config
       return {
         anchor: root?.getAttribute('data-sk-anchor'),
         offsetX: root?.getAttribute('data-sk-offset-x'),
         offsetY: root?.getAttribute('data-sk-offset-y'),
         left: root ? parseInt(root.style.left || '0', 10) : -1,
+        cfgHasPositioning: !!(cfg && cfg.positioning),
+        cfgDesktopAnchor: cfg?.positioning?.desktop?.anchor,
+        cfgDesktopOffsetX: cfg?.positioning?.desktop?.offsetX,
+        cfgKeys: cfg ? Object.keys(cfg).join(',') : 'none',
       }
     })
-    expect(widgetPos.anchor).toBe('bottom-start')
-    expect(widgetPos.offsetX).toBe('100')
-    // The rendered left must reflect the offset: baseMargin(20) + offsetX(100) = 120.
-    expect(widgetPos.left).toBeGreaterThan(100)
+    // The widget's fetched config must have positioning.
+    expect(widgetDiag.cfgHasPositioning).toBe(true)
+    expect(widgetDiag.cfgDesktopOffsetX).toBe(100)
+    // The widget must have applied the V2 positioning.
+    expect(widgetDiag.anchor).toBe('bottom-start')
+    expect(widgetDiag.offsetX).toBe('100')
+    expect(widgetDiag.left).toBeGreaterThan(100)
 
     await ctx.close()
   })

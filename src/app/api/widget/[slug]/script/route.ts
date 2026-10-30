@@ -1481,7 +1481,11 @@ ${POSITIONING_FN_SOURCE}
     // propagate immediately — no stale cached response from a previous load).
     fetch(CONFIG_URL + '?_t=' + Date.now(), { cache: 'no-store' })
       .then(function(r){ return r.json(); })
-      .then(function(config){ mount(config); })
+      .then(function(config){
+        // Store for diagnostic — tests can verify the widget received V2.
+        try { window.__sukhan_config = config; } catch (e) {}
+        mount(config);
+      })
       .catch(function(e){ console.error('[sukhan] config fetch failed', e); });
   }
 
