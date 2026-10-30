@@ -2325,3 +2325,5 @@ actual production files. NPM publication stated as pending; dashboard 'Coming
 Soon' preserved. PR #14 DRAFT / NOT MERGED / NO AUTO-MERGE.
 
 ## Docs-phase retrigger (74d5226 had 2 pre-existing timing flakes on Lite: realtime-authz:613 connectAndWait + workspace-switcher:331 switch — not caused by docs; Full suite green. Retriggering for a deterministic green SHA.)
+
+## Phase 1 correction retrigger (277c9f1 had 1 pre-existing Lite-only realtime-authz timing flake — connectAndWait timeout at 15s; Full suite green. Not caused by the 3-file parser/tests/docs correction.)
