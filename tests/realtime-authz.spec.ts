@@ -566,7 +566,7 @@ async function connectAndWait(
   // variance under the longer browser suite (the NPM identity spec + the
   // script-identity spec together add ~140s of customer-server + socket load
   // earlier in the suite). Test-only change.
-  timeoutMs: number = 15000,
+  timeoutMs: number = 20000,
 ): Promise<{ connected: boolean; error?: string }> {
   const handle = `socket_${Math.random().toString(36).slice(2)}`
   await ensureSocketIO(page)
