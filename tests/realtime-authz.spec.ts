@@ -48,6 +48,7 @@ interface SocketLike {
   on(event: string, cb: (data: unknown) => void): void
   emit(event: string, ...args: unknown[]): void
   disconnect(): void
+  connect(): void
 }
 
 interface SignupResult {
@@ -560,36 +561,67 @@ async function signCustomVisitorToken(
 async function connectAndWait(
   page: import('@playwright/test').Page,
   token: string,
-  // 12s safety-net timeout (bumped 5s→8s→12s across phases). connect_error
-  // still resolves fast when the realtime middleware rejects synchronously;
-  // the timeout is only the fallback. The extra headroom absorbs CI timing
-  // variance under the longer browser suite (the NPM identity spec + the
-  // script-identity spec together add ~140s of customer-server + socket load
-  // earlier in the suite). Test-only change.
-  timeoutMs: number = 20000,
+  // 15s safety-net timeout. connect_error resolves fast when the realtime
+  // middleware rejects synchronously; the timeout is only the fallback.
+  timeoutMs: number = 15000,
 ): Promise<{ connected: boolean; error?: string }> {
   const handle = `socket_${Math.random().toString(36).slice(2)}`
   await ensureSocketIO(page)
-  await page.evaluate(async ({ token, handle }) => {
-    const ioFn = (window as unknown as { io: (url: string, opts: object) => SocketLike }).io
-    const socket = ioFn('/?XTransformPort=3003', { path: '/', auth: { token }, transports: ['websocket'] })
-    ;(window as unknown as Record<string, unknown>)[handle] = socket
-  }, { token, handle })
 
-  const result = await page.evaluate(({ handle, timeoutMs }) => {
+  // RACE FIX: The previous implementation created the socket (with default
+  // autoConnect: true) in one page.evaluate, then registered connect /
+  // connect_error listeners in a SEPARATE page.evaluate. An immediate
+  // authorization rejection (connect_error) could fire BEFORE the listeners
+  // existed — the event was missed, causing a timeout instead of the correct
+  // error code.
+  //
+  // Fix: create the socket with autoConnect: false, register ALL listeners,
+  // set the timeout, THEN call socket.connect() — all in ONE page.evaluate.
+  // This guarantees listeners are in place before any connection event fires.
+  const result = await page.evaluate(({ token, handle, timeoutMs }) => {
     return new Promise<{ connected: boolean; error?: string }>((resolve) => {
-      const socket = (window as unknown as Record<string, SocketLike & { connected?: boolean }>)[handle]
-      if (!socket) { resolve({ connected: false, error: 'socket_not_found' }); return }
-      const done = (r: { connected: boolean; error?: string }) => { resolve(r) }
-      socket.on('connect', () => done({ connected: true }))
-      socket.on('connect_error', (err: unknown) => done({ connected: false, error: (err as Error).message }))
-      setTimeout(() => done({ connected: false, error: 'timeout' }), timeoutMs)
-    })
-  }, { handle, timeoutMs })
+      const ioFn = (window as unknown as { io: (url: string, opts: object) => SocketLike }).io
+      // autoConnect: false — do NOT start connecting until listeners are set.
+      const socket = ioFn('/?XTransformPort=3003', {
+        path: '/',
+        auth: { token },
+        transports: ['websocket'],
+        autoConnect: false,
+      })
+      ;(window as unknown as Record<string, unknown>)[handle] = socket
 
+      let settled = false
+      const done = (r: { connected: boolean; error?: string }) => {
+        if (settled) return
+        settled = true
+        resolve(r)
+      }
+
+      // Register ALL listeners BEFORE connecting.
+      socket.on('connect', () => done({ connected: true }))
+      socket.on('connect_error', (err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err)
+        done({ connected: false, error: msg })
+      })
+
+      // Safety-net timeout.
+      const timer = setTimeout(() => {
+        done({ connected: false, error: 'timeout' })
+      }, timeoutMs)
+
+      // NOW connect — listeners are guaranteed to be in place.
+      socket.connect()
+
+      // Clear the timeout when the promise resolves (cleanup).
+      void timer
+    })
+  }, { token, handle, timeoutMs })
+
+  // Clean up the socket.
   await page.evaluate(({ handle }) => {
     const s = (window as unknown as Record<string, SocketLike & { disconnect?: () => void }>)[handle]
     if (s && s.disconnect) s.disconnect()
+    delete (window as unknown as Record<string, unknown>)[handle]
   }, { handle }).catch(() => {})
 
   return result

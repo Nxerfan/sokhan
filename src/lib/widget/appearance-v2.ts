@@ -104,15 +104,35 @@ function isPlainObject(value: unknown): boolean {
 }
 
 /**
- * Safely get own enumerable string keys of a plain object. Wraps Object.keys
- * in try/catch to handle getter-based exceptions (a getter on a prototype
- * could throw). Returns null if the operation fails.
+ * Safely get ALL own property keys (enumerable + non-enumerable, string +
+ * Symbol) of a plain object. Uses Reflect.ownKeys which catches properties
+ * that Object.keys misses (non-enumerable own properties, Symbol keys).
+ * Wraps in try/catch to handle getter-based exceptions. Returns null if
+ * the operation fails.
  */
-function safeOwnKeys(obj: object): string[] | null {
+function safeOwnKeys(obj: object): (string | symbol)[] | null {
   try {
-    return Object.keys(obj)
+    return Reflect.ownKeys(obj)
   } catch {
-    return null // getter threw → fail closed
+    return null // reflection threw → fail closed
+  }
+}
+
+/**
+ * Check if a property is an own DATA property (not an accessor/getter).
+ * Returns true if the property exists as a data descriptor (has `value`,
+ * not `get`/`set`). Returns false for accessor properties, inherited
+ * properties, or missing properties. Wraps in try/catch for safety.
+ */
+function isOwnDataProperty(obj: object, key: string): boolean {
+  try {
+    const desc = Object.getOwnPropertyDescriptor(obj, key)
+    if (!desc) return false // not an own property
+    // Must be a data descriptor (has 'value' or 'writable'), not an accessor
+    // (has 'get' or 'set'). This rejects getter/setter properties.
+    return 'value' in desc
+  } catch {
+    return false // reflection threw → treat as not a data property
   }
 }
 
@@ -121,41 +141,42 @@ export function parseAppearanceV2(value: unknown): AppearanceV2 | null {
   // Must be a plain object — reject Date, Map, Set, class instances, etc.
   if (!isPlainObject(value)) return null
 
-  // Safely get own keys (getter-safe).
+  // Safely get ALL own keys (enumerable + non-enumerable, string + Symbol).
   const keys = safeOwnKeys(value)
-  if (keys === null) return null // getter threw → fail closed
+  if (keys === null) return null // reflection threw → fail closed
 
-  // Reject unexpected top-level keys — only version, desktop, mobile are allowed.
+  // Reject unexpected top-level keys — only version, desktop, mobile are
+  // allowed. This includes Symbol keys + non-enumerable own properties.
+  // Reflect.ownKeys returns (string | symbol)[] — Symbols are always
+  // unexpected (our schema uses only string keys).
   for (const key of keys) {
-    if (!ALLOWED_TOP_LEVEL_KEYS.has(key)) return null
+    if (typeof key !== 'string' || !ALLOWED_TOP_LEVEL_KEYS.has(key)) return null
   }
 
-  // version must be an OWN property (not inherited) + exactly 1.
-  // hasOwnProperty is safe (doesn't trigger getters). But accessing the
-  // value CAN trigger a getter that throws — wrap in try/catch.
-  if (!Object.prototype.hasOwnProperty.call(value, 'version')) return null
-  let versionValue: unknown
-  try {
-    versionValue = (value as Record<string, unknown>).version
-  } catch {
-    return null // getter threw → fail closed
-  }
+  // version must be an OWN DATA property (not an accessor/getter) + exactly 1.
+  // isOwnDataProperty uses Object.getOwnPropertyDescriptor to verify it's
+  // a data descriptor (has 'value', not 'get'/'set'). This rejects accessor
+  // properties that could throw or return arbitrary values without actually
+  // holding a real value.
+  if (!isOwnDataProperty(value, 'version')) return null
+  // Safe to read the value — it's a data property, not a getter.
+  const versionValue = (value as Record<string, unknown>).version
   if (typeof versionValue !== 'number' || !Number.isInteger(versionValue) || versionValue !== APPEARANCE_V2_VERSION) {
     return null
   }
 
-  // desktop / mobile: if present, must be plain objects with NO unexpected keys.
-  // Property access can trigger getters — wrap in try/catch.
-  let desktopValue: unknown, mobileValue: unknown
-  try {
+  // desktop / mobile: if present, must be plain objects with NO unexpected
+  // keys (including Symbol + non-enumerable). Also verify they're data
+  // properties (not accessors) before reading.
+  let desktopValue: unknown = undefined
+  let mobileValue: unknown = undefined
+  if (ALLOWED_TOP_LEVEL_KEYS.has('desktop') && Object.prototype.hasOwnProperty.call(value, 'desktop')) {
+    if (!isOwnDataProperty(value, 'desktop')) return null // accessor → reject
     desktopValue = (value as Record<string, unknown>).desktop
-  } catch {
-    return null // getter threw → fail closed
   }
-  try {
+  if (ALLOWED_TOP_LEVEL_KEYS.has('mobile') && Object.prototype.hasOwnProperty.call(value, 'mobile')) {
+    if (!isOwnDataProperty(value, 'mobile')) return null // accessor → reject
     mobileValue = (value as Record<string, unknown>).mobile
-  } catch {
-    return null // getter threw → fail closed
   }
   const desktop = parseDeviceAppearance(desktopValue)
   if (desktop === undefined) return null // malformed → fail closed
@@ -187,12 +208,12 @@ function parseDeviceAppearance(value: unknown): DeviceAppearance | null | undefi
   if (value === null || value === undefined) return null
   // Must be a plain object — reject Date, Map, Set, class instances, etc.
   if (!isPlainObject(value)) return undefined // malformed
-  // Safely get own keys (getter-safe).
+  // Safely get ALL own keys (enumerable + non-enumerable, string + Symbol).
   const keys = safeOwnKeys(value)
-  if (keys === null) return undefined // getter threw → fail closed
-  // Phase 1: DeviceAppearance has no fields. Reject ANY keys — only an
-  // empty object (or absent) is valid. Future phases will add + validate
-  // specific device fields here.
+  if (keys === null) return undefined // reflection threw → fail closed
+  // Phase 1: DeviceAppearance has no fields. Reject ANY keys (including
+  // non-enumerable + Symbol) — only an empty object (or absent) is valid.
+  // Future phases will add + validate specific device fields here.
   if (keys.length > 0) return undefined // unexpected keys → fail closed
   // Return a canonical empty object (not the raw input reference).
   return {}

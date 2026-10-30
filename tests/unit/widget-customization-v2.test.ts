@@ -216,23 +216,89 @@ describe('Appearance V2 — strict parsing (canonical, no unknown keys)', () => 
   })
 
   // ── Strict parser: getter that throws does NOT escape ────────────────
-  test('getter that throws → null (caught, does not escape)', () => {
+  test('getter that throws on version → null (accessor rejected, does not escape)', () => {
     const obj = {}
     Object.defineProperty(obj, 'version', {
       get() { throw new Error('boom') },
       enumerable: true,
     })
-    // The parser must catch this + return null, not throw.
+    // The parser must reject accessor properties + never throw.
     expect(() => parseAppearanceV2(obj)).not.toThrow()
     expect(parseAppearanceV2(obj)).toBeNull()
   })
-  test('getter that throws on desktop keys → null (caught)', () => {
+  test('getter that returns a valid value on version → null (accessor rejected)', () => {
+    const obj = {}
+    Object.defineProperty(obj, 'version', {
+      get() { return 1 },
+      enumerable: true,
+    })
+    // Even though the getter returns a valid value, accessor properties
+    // must be rejected — only data properties are accepted.
+    expect(parseAppearanceV2(obj)).toBeNull()
+  })
+  test('getter on desktop → null (accessor rejected)', () => {
     const obj = { version: 1 }
     Object.defineProperty(obj, 'desktop', {
       get() { throw new Error('boom') },
       enumerable: true,
     })
     expect(() => parseAppearanceV2(obj)).not.toThrow()
+    expect(parseAppearanceV2(obj)).toBeNull()
+  })
+
+  // ── Strict parser: reject non-enumerable own properties ─────────────
+  test('non-enumerable own property at top-level → null', () => {
+    const obj = { version: 1 }
+    Object.defineProperty(obj, 'hidden', {
+      value: 'secret',
+      enumerable: false,
+    })
+    // Reflect.ownKeys catches non-enumerable properties → 'hidden' is
+    // unexpected → reject.
+    expect(parseAppearanceV2(obj)).toBeNull()
+  })
+  test('non-enumerable own property in desktop → null', () => {
+    const obj = { version: 1, desktop: {} }
+    Object.defineProperty(obj.desktop, 'hidden', {
+      value: 'secret',
+      enumerable: false,
+    })
+    expect(parseAppearanceV2(obj)).toBeNull()
+  })
+
+  // ── Strict parser: reject Symbol own properties ─────────────────────
+  test('Symbol own property at top-level → null', () => {
+    const obj = { version: 1 }
+    const sym = Symbol('test')
+    ;(obj as Record<string | symbol, unknown>)[sym] = 'value'
+    // Reflect.ownKeys catches Symbol keys → unexpected → reject.
+    expect(parseAppearanceV2(obj)).toBeNull()
+  })
+  test('Symbol own property in desktop → null', () => {
+    const desktop = {}
+    const sym = Symbol('test')
+    ;(desktop as Record<string | symbol, unknown>)[sym] = 'value'
+    const obj = { version: 1, desktop }
+    expect(parseAppearanceV2(obj)).toBeNull()
+  })
+
+  // ── Strict parser: accessor for desktop/mobile → null ───────────────
+  test('accessor property for desktop (getter returns valid object) → null', () => {
+    const obj = { version: 1 }
+    Object.defineProperty(obj, 'desktop', {
+      get() { return {} },
+      enumerable: true,
+    })
+    // Even though the getter returns a valid empty object, accessor
+    // properties must be rejected — only data properties accepted.
+    expect(parseAppearanceV2(obj)).toBeNull()
+  })
+  test('accessor property for mobile → null', () => {
+    const obj = { version: 1 }
+    Object.defineProperty(obj, 'mobile', {
+      get() { return {} },
+      enumerable: true,
+    })
     expect(parseAppearanceV2(obj)).toBeNull()
   })
 })
