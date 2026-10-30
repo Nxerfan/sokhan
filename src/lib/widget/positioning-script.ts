@@ -109,7 +109,7 @@ function __skGetSafeAreaBottom() {
 function __skComputePanelVertical(rootBottom, launcherHeight, viewportHeight, panelGap, panelPreferredHeight, safeAreaBottom) {
   var spaceAbove = Math.max(0, viewportHeight - rootBottom - launcherHeight - safeAreaBottom);
   var spaceBelow = Math.max(0, rootBottom - safeAreaBottom);
-  var viewportClampedHeight = Math.max(120, Math.min(panelPreferredHeight, viewportHeight - safeAreaBottom * 2 - panelGap * 2));
+  var viewportClampedHeight = Math.min(panelPreferredHeight, viewportHeight - safeAreaBottom * 2 - panelGap * 2);
 
   if (spaceAbove >= viewportClampedHeight + panelGap) {
     return { bottom: launcherHeight + panelGap, maxHeight: viewportClampedHeight, opensBelow: false };
@@ -118,12 +118,30 @@ function __skComputePanelVertical(rootBottom, launcherHeight, viewportHeight, pa
     return { bottom: -(viewportClampedHeight + panelGap), maxHeight: viewportClampedHeight, opensBelow: true };
   }
   if (spaceAbove >= spaceBelow) {
-    var ch = Math.max(120, spaceAbove - panelGap);
+    var ch = Math.max(0, spaceAbove - panelGap);
     return { bottom: launcherHeight + panelGap, maxHeight: ch, opensBelow: false };
   } else {
-    var ch2 = Math.max(120, spaceBelow - panelGap);
+    var ch2 = Math.max(0, spaceBelow - panelGap);
     return { bottom: -(ch2 + panelGap), maxHeight: ch2, opensBelow: true };
   }
+}
+
+function __skComputePanelHorizontal(launcherLeft, launcherWidth, panelPreferredWidth, viewportWidth, panelSide, viewportMargin) {
+  var maxPanelWidth = Math.max(0, viewportWidth - viewportMargin * 2);
+  var clampedWidth = Math.min(panelPreferredWidth, maxPanelWidth);
+  var panelLeft;
+  if (panelSide === 'right') {
+    panelLeft = 0;
+  } else if (panelSide === 'left') {
+    panelLeft = launcherWidth - clampedWidth;
+  } else {
+    panelLeft = (launcherWidth - clampedWidth) / 2;
+  }
+  var absLeft = launcherLeft + panelLeft;
+  var minAbsLeft = viewportMargin;
+  var maxAbsLeft = Math.max(minAbsLeft, viewportWidth - viewportMargin - clampedWidth);
+  var clampedAbsLeft = Math.max(minAbsLeft, Math.min(absLeft, maxAbsLeft));
+  return { left: clampedAbsLeft - launcherLeft, width: clampedWidth };
 }
 
 function __skDetectDevice() {

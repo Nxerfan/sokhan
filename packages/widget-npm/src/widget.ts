@@ -76,6 +76,7 @@ import {
 import {
   computeLauncherPosition,
   computePanelVerticalPosition,
+  computePanelHorizontalPosition,
   DEFAULT_BASE_MARGIN,
   type EffectivePositioning,
   type PositioningAnchor,
@@ -2146,32 +2147,44 @@ export class SukhanWidget implements SukhanInstance {
     }
   }
 
-  /** Apply the panel side (left/right/center) to the panel element. */
+  /** Apply the panel horizontal position (clamped to viewport). */
   private applyPanelSide(side: 'left' | 'right' | 'center'): void {
-    if (!this.panel) return
-    // Clear previous side styles.
-    this.panel.style.left = ''
+    if (!this.panel || !this.state.config || !this.state.effectivePositioning) return
+    const pos = this.state.effectivePositioning
+    const dims = this.getLauncherDimensions(this.state.config.launcherShape)
+    const launcherResult = computeLauncherPosition({
+      anchor: pos.anchor,
+      offsetX: pos.offsetX || 0,
+      offsetY: pos.offsetY || 0,
+      dir: this.state.dir,
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight,
+      launcherWidth: dims.width,
+      launcherHeight: dims.height,
+      safeAreaBottom: this.getSafeAreaBottom(),
+      baseMargin: DEFAULT_BASE_MARGIN,
+    })
+    const ph = computePanelHorizontalPosition({
+      launcherLeft: launcherResult.left,
+      launcherWidth: dims.width,
+      panelPreferredWidth: 360,
+      viewportWidth: window.innerWidth,
+      panelSide: side,
+      viewportMargin: DEFAULT_BASE_MARGIN,
+    })
+    // Set clamped left + width (no right, no translateX).
+    this.panel.style.left = ph.left + 'px'
     this.panel.style.right = ''
-    if (side === 'right') {
-      // Panel opens to the right of the launcher.
-      this.panel.style.left = '0'
-    } else if (side === 'left') {
-      // Panel opens to the left of the launcher.
-      this.panel.style.right = '0'
-    } else {
-      // Center: panel centered above the launcher.
-      this.panel.style.left = '50%'
-    }
-    // Re-apply the current open/close transform (incorporating center base).
+    this.panel.style.width = ph.width + 'px'
     this.applyPanelTransform()
   }
 
-  /** Get the base transform for the panel (center needs translateX(-50%)). */
+  /** Get the base transform for the panel (no longer needs translateX). */
   private getPanelBaseTransform(): string {
-    return this.state.panelSide === 'center' ? 'translateX(-50%)' : ''
+    return ''
   }
 
-  /** Apply the panel transform (open/close animation + base for center). */
+  /** Apply the panel transform (open/close animation). */
   private applyPanelTransform(): void {
     if (!this.panel) return
     const base = this.getPanelBaseTransform()

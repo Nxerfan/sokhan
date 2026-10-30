@@ -1,5 +1,8 @@
 import { test, expect, type Page } from '@playwright/test'
 import { createServer, type Server } from 'node:http'
+import { execSync } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 import { otpSignupPlaywright } from './helpers/otp-signup'
 
 /**
@@ -153,12 +156,12 @@ test.describe('Widget V2 Positioning — browser regression', () => {
       }
     })
     // Desktop: bottom-center. Mobile: bottom-start.
-    // On desktop (default in CI), anchor should be bottom-center.
     expect(['bottom-center', 'bottom-start']).toContain(widgetPos.anchor)
-    // For bottom-center: left should be roughly centered.
+    // For bottom-center: verify precise pixel position within ±10px tolerance.
+    // Expected left = (viewportWidth - launcherWidth) / 2 where launcherWidth=52.
     if (widgetPos.anchor === 'bottom-center') {
-      expect(widgetPos.left).toBeGreaterThan(widgetPos.vw * 0.3)
-      expect(widgetPos.left).toBeLessThan(widgetPos.vw * 0.7)
+      const expectedLeft = (widgetPos.vw - 52) / 2
+      expect(Math.abs(widgetPos.left - expectedLeft)).toBeLessThanOrEqual(10)
     }
 
     await ctx.close()
@@ -277,41 +280,17 @@ test.describe('Widget V2 Positioning — browser regression', () => {
     }, { timeout: 15_000 })
     await customerPage.waitForTimeout(1000) // settle for async config fetch + positioning
 
-    // Diagnostic: verify the config the browser receives includes positioning.
-    const browserConfig = await customerPage.evaluate(async (slug: string) => {
-      const r = await fetch(`http://127.0.0.1:81/api/widget/${slug}/config`, { cache: 'no-store' })
-      const c = await r.json()
-      return {
-        hasPositioning: !!c.positioning,
-        desktopAnchor: c.positioning?.desktop?.anchor,
-        desktopOffsetX: c.positioning?.desktop?.offsetX,
-        v1Position: c.position,
-      }
-    }, slug)
-    // The browser-fetched config must have the V2 positioning with offsetX.
-    expect(browserConfig.hasPositioning).toBe(true)
-    expect(browserConfig.desktopOffsetX).toBe(100)
-
     // Verify the widget received + applied V2 positioning via diagnostic
-    // data attributes on the root element. This proves the widget script
-    // resolved the positioning from the config and applied it.
+    // data attributes on the root element + actual DOM geometry.
     const widgetDiag = await customerPage.evaluate(() => {
       const root = document.querySelector('.sk-root') as HTMLElement
-      const cfg = (window as any).__sukhan_config
       return {
         anchor: root?.getAttribute('data-sk-anchor'),
         offsetX: root?.getAttribute('data-sk-offset-x'),
         offsetY: root?.getAttribute('data-sk-offset-y'),
         left: root ? parseInt(root.style.left || '0', 10) : -1,
-        cfgHasPositioning: !!(cfg && cfg.positioning),
-        cfgDesktopAnchor: cfg?.positioning?.desktop?.anchor,
-        cfgDesktopOffsetX: cfg?.positioning?.desktop?.offsetX,
-        cfgKeys: cfg ? Object.keys(cfg).join(',') : 'none',
       }
     })
-    // The widget's fetched config must have positioning.
-    expect(widgetDiag.cfgHasPositioning).toBe(true)
-    expect(widgetDiag.cfgDesktopOffsetX).toBe(100)
     // The widget must have applied the V2 positioning.
     expect(widgetDiag.anchor).toBe('bottom-start')
     expect(widgetDiag.offsetX).toBe('100')
@@ -504,7 +483,7 @@ test.describe('Widget V2 Positioning — browser regression', () => {
     await ctx.close()
   })
 
-  test('BLOCKER 1: Unknown plan positioning write rejected (403)', async ({ browser }) => {
+  test('FREE plan: offset positioning write rejected (403)', async ({ browser }) => {
     test.setTimeout(120_000)
     const { email, workspace } = creds('unknown-plan')
     const ctx = await browser.newContext()
@@ -727,9 +706,10 @@ test.describe('Widget V2 Positioning — browser regression', () => {
     })
     // bottom-center anchor must be applied.
     expect(widgetPos.anchor).toBe('bottom-center')
-    // Rendered left must be roughly centered (30%-70% of viewport width).
-    expect(widgetPos.left).toBeGreaterThan(widgetPos.vw * 0.3)
-    expect(widgetPos.left).toBeLessThan(widgetPos.vw * 0.7)
+    // Verify precise pixel position within ±10px tolerance.
+    // Expected left = (viewportWidth - launcherWidth) / 2 where launcherWidth=52.
+    const expectedLeft = (widgetPos.vw - 52) / 2
+    expect(Math.abs(widgetPos.left - expectedLeft)).toBeLessThanOrEqual(10)
 
     await ctx.close()
   })
@@ -845,6 +825,293 @@ test.describe('Widget V2 Positioning — browser regression', () => {
     const configRes = await page.request.get(`${SUKHAN_ORIGIN}/api/widget/${slug}/config`)
     const config = await configRes.json()
     expect(config.positioning.desktop.offsetX).toBe(0)
+
+    await ctx.close()
+  })
+
+  // ─── Item 1: Real NPM widget browser positioning test ────────────────────
+
+  test('NPM widget surface: real rendered V2 positioning with nonzero offset', async ({ browser }) => {
+    test.setTimeout(180_000)
+    const { email, workspace } = creds('npm-pos')
+    const ctx = await browser.newContext()
+    const page = await ctx.newPage()
+    const slug = await signupAndGetSlug(page, email, workspace)
+    currentSlug = slug
+
+    await devSetPlan(page, 'pro')
+    await page.goto(BASE)
+    await page.waitForLoadState('networkidle')
+
+    const csrfRes = await page.request.get(`${DASHBOARD}/api/auth/csrf`)
+    const { csrfToken } = await csrfRes.json()
+    await page.request.post(`${DASHBOARD}/api/auth/callback/credentials`, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      data: `email=${email}&password=password123&csrfToken=${csrfToken}&json=true`,
+    })
+
+    // Set positioning: bottom-start + offsetX=80.
+    await page.request.patch(`${BASE}/api/widget-config`, {
+      data: { positioning: { desktop: { anchor: 'bottom-start', offsetX: 80 } } },
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+    // Build the NPM bundle.
+    const PKG_DIR = resolve(process.cwd(), 'packages/widget-npm')
+    const WIDGET_BUNDLE = join(PKG_DIR, 'dist', 'index.js')
+    try {
+      execSync('bun run build', { cwd: PKG_DIR, stdio: 'pipe' })
+    } catch {
+      // If build fails, skip — but the test should fail, not skip.
+    }
+    expect(existsSync(WIDGET_BUNDLE), 'NPM widget bundle must be built').toBe(true)
+
+    // Customer server that serves the NPM bundle + barebones HTML.
+    const NPM_PORT = 8096
+    const npmServer = createServer((req, res) => {
+      if (req.url === '/' || req.url === '/customer.html') {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+        res.end('<!DOCTYPE html><html><head><meta charset="UTF-8"><title>NPM Customer</title></head><body><h1>NPM Customer</h1></body></html>')
+        return
+      }
+      // Serve dist files by basename (the bundle imports sibling .js files).
+      const fileMatch = req.url?.match(/^\/([A-Za-z0-9_.-]+\.js)$/)
+      if (fileMatch) {
+        const filePath = join(PKG_DIR, 'dist', fileMatch[1])
+        if (existsSync(filePath)) {
+          res.writeHead(200, { 'Content-Type': 'application/javascript' })
+          // Use Bun.file for reading — but createServer doesn't have Bun.
+          // Read synchronously.
+          const { readFileSync } = require('node:fs')
+          res.end(readFileSync(filePath))
+          return
+        }
+      }
+      // Alias /sukhan-widget.js → dist/index.js
+      if (req.url === '/sukhan-widget.js') {
+        const { readFileSync } = require('node:fs')
+        res.writeHead(200, { 'Content-Type': 'application/javascript' })
+        res.end(readFileSync(WIDGET_BUNDLE))
+        return
+      }
+      res.writeHead(404)
+      res.end('not found')
+    })
+    await new Promise<void>((r) => npmServer.listen(NPM_PORT, '127.0.0.1', r))
+
+    try {
+      const customerPage = await ctx.newPage()
+      await customerPage.goto(`http://127.0.0.1:${NPM_PORT}/customer.html`)
+      await customerPage.waitForLoadState('networkidle')
+
+      // Initialize the NPM widget via dynamic import.
+      await customerPage.evaluate(async (args: { slug: string, origin: string }) => {
+        const mod = await import(`${window.location.origin}/sukhan-widget.js`)
+        mod.initSukhan({ apiKey: args.slug, apiUrl: args.origin })
+      }, { slug, origin: SUKHAN_ORIGIN })
+
+      // Wait for the widget to mount + apply positioning.
+      await customerPage.waitForSelector('.sk-root', { timeout: 15_000 })
+      await customerPage.waitForFunction(() => {
+        const root = document.querySelector('.sk-root') as HTMLElement
+        return root && root.getAttribute('data-sk-anchor') !== null
+      }, { timeout: 15_000 })
+      await customerPage.waitForTimeout(1000)
+
+      // Verify actual DOM geometry — not just diagnostic attrs.
+      const geom = await customerPage.evaluate(() => {
+        const root = document.querySelector('.sk-root') as HTMLElement
+        const rect = root.getBoundingClientRect()
+        return {
+          anchor: root?.getAttribute('data-sk-anchor'),
+          offsetX: root?.getAttribute('data-sk-offset-x'),
+          left: rect.left,
+          bottom: rect.bottom,
+          vw: window.innerWidth,
+        }
+      })
+      // The NPM widget must have applied V2 positioning.
+      expect(geom.anchor).toBe('bottom-start')
+      expect(geom.offsetX).toBe('80')
+      // bottom-start LTR: left = baseMargin(20) + offsetX(80) = 100.
+      // Verify within ±15px tolerance (getBoundingClientRect may differ
+      // slightly from style.left due to subpixel rendering).
+      expect(Math.abs(geom.left - 100)).toBeLessThanOrEqual(15)
+    } finally {
+      await new Promise<void>((r) => npmServer.close(() => r()))
+    }
+
+    await ctx.close()
+  })
+
+  // ─── Item 2b: Panel bounding-box containment tests ──────────────────────
+
+  test('Panel bounding box stays inside viewport at extreme offsets', async ({ browser }) => {
+    test.setTimeout(120_000)
+    const { email, workspace } = creds('panel-bbox')
+    const ctx = await browser.newContext()
+    const page = await ctx.newPage()
+    const slug = await signupAndGetSlug(page, email, workspace)
+    currentSlug = slug
+
+    await devSetPlan(page, 'pro')
+    await page.goto(BASE)
+    await page.waitForLoadState('networkidle')
+
+    const csrfRes = await page.request.get(`${DASHBOARD}/api/auth/csrf`)
+    const { csrfToken } = await csrfRes.json()
+    await page.request.post(`${DASHBOARD}/api/auth/callback/credentials`, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      data: `email=${email}&password=password123&csrfToken=${csrfToken}&json=true`,
+    })
+
+    // Set extreme offsetY (launcher near top).
+    await page.request.patch(`${BASE}/api/widget-config`, {
+      data: { positioning: { desktop: { anchor: 'bottom-end', offsetY: 600 } } },
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+    const customerPage = await ctx.newPage()
+    await customerPage.goto(CUSTOMER_ORIGIN)
+    await customerPage.waitForLoadState('networkidle')
+    await customerPage.waitForSelector('.sk-root', { timeout: 15_000 })
+    await customerPage.waitForFunction(() => {
+      const root = document.querySelector('.sk-root') as HTMLElement
+      return root && root.getAttribute('data-sk-anchor') !== null
+    }, { timeout: 15_000 })
+    await customerPage.waitForTimeout(500)
+
+    // Open the panel.
+    await customerPage.click('.sk-launcher')
+    await customerPage.waitForTimeout(500)
+
+    // Verify panel bounding box stays within viewport (both H and V).
+    const panelBox = await customerPage.evaluate(() => {
+      const panel = document.querySelector('.sk-panel') as HTMLElement
+      if (!panel) return null
+      const r = panel.getBoundingClientRect()
+      return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, vh: window.innerHeight, vw: window.innerWidth }
+    })
+    expect(panelBox).not.toBeNull()
+    // Horizontal: both edges inside viewport.
+    expect(panelBox!.left).toBeGreaterThanOrEqual(0)
+    expect(panelBox!.right).toBeLessThanOrEqual(panelBox!.vw)
+    // Vertical: both edges inside viewport.
+    expect(panelBox!.top).toBeGreaterThanOrEqual(0)
+    expect(panelBox!.bottom).toBeLessThanOrEqual(panelBox!.vh)
+
+    await ctx.close()
+  })
+
+  test('Panel bounding box stays inside narrow 320px viewport', async ({ browser }) => {
+    test.setTimeout(120_000)
+    const { email, workspace } = creds('panel-narrow')
+    const ctx = await browser.newContext({ viewport: { width: 320, height: 600 } })
+    const page = await ctx.newPage()
+    const slug = await signupAndGetSlug(page, email, workspace)
+    currentSlug = slug
+
+    await devSetPlan(page, 'pro')
+    await page.goto(BASE)
+    await page.waitForLoadState('networkidle')
+
+    const csrfRes = await page.request.get(`${DASHBOARD}/api/auth/csrf`)
+    const { csrfToken } = await csrfRes.json()
+    await page.request.post(`${DASHBOARD}/api/auth/callback/credentials`, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      data: `email=${email}&password=password123&csrfToken=${csrfToken}&json=true`,
+    })
+
+    // Set bottom-center (panel would overflow on narrow viewport without clamping).
+    await page.request.patch(`${BASE}/api/widget-config`, {
+      data: { positioning: { mobile: { anchor: 'bottom-center' } } },
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+    const customerPage = await ctx.newPage()
+    await customerPage.goto(CUSTOMER_ORIGIN)
+    await customerPage.waitForLoadState('networkidle')
+    await customerPage.waitForSelector('.sk-root', { timeout: 15_000 })
+    await customerPage.waitForFunction(() => {
+      const root = document.querySelector('.sk-root') as HTMLElement
+      return root && root.getAttribute('data-sk-anchor') !== null
+    }, { timeout: 15_000 })
+    await customerPage.waitForTimeout(500)
+
+    // Open the panel.
+    await customerPage.click('.sk-launcher')
+    await customerPage.waitForTimeout(500)
+
+    const panelBox = await customerPage.evaluate(() => {
+      const panel = document.querySelector('.sk-panel') as HTMLElement
+      if (!panel) return null
+      const r = panel.getBoundingClientRect()
+      return { left: r.left, right: r.right, vw: window.innerWidth }
+    })
+    expect(panelBox).not.toBeNull()
+    // Panel must not overflow horizontally on narrow viewport.
+    expect(panelBox!.left).toBeGreaterThanOrEqual(0)
+    expect(panelBox!.right).toBeLessThanOrEqual(panelBox!.vw)
+
+    await ctx.close()
+  })
+
+  // ─── Item 3: Actual unknown-plan HTTP authorization test ────────────────
+
+  test('UNKNOWN PLAN: anchor-only positioning PATCH rejected with positioning_not_authorized (403)', async ({ browser }) => {
+    test.setTimeout(120_000)
+    const { email, workspace } = creds('unknown-plan-real')
+    const ctx = await browser.newContext()
+    const page = await ctx.newPage()
+    const slug = await signupAndGetSlug(page, email, workspace)
+    currentSlug = slug
+
+    // Sign up creates a 'free' tenant. Use dev/set-plan to set to 'pro'
+    // first (so the tenant has a valid plan), then directly update the
+    // tenant's plan to an unrecognized value via the DB.
+    await devSetPlan(page, 'pro')
+    await page.goto(BASE)
+    await page.waitForLoadState('networkidle')
+
+    const csrfRes = await page.request.get(`${DASHBOARD}/api/auth/csrf`)
+    const { csrfToken } = await csrfRes.json()
+    await page.request.post(`${DASHBOARD}/api/auth/callback/credentials`, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      data: `email=${email}&password=password123&csrfToken=${csrfToken}&json=true`,
+    })
+
+    // Get the tenant ID.
+    const tenantRes = await page.request.get(`${DASHBOARD}/api/tenants/me`)
+    const tenantData = await tenantRes.json()
+    const tenantId = tenantData.tenant?.id
+    expect(tenantId).toBeTruthy()
+
+    // Directly update the tenant's plan to an unrecognized value via the DB.
+    // This uses the same test-harness DB connection as the DB-boundary tests.
+    const { globalDb } = await import('../src/lib/db')
+    await globalDb.tenant.update({
+      where: { id: tenantId },
+      data: { plan: 'unknown-plan-xyz' },
+    })
+
+    try {
+      // Attempt an anchor-only positioning PATCH — must be rejected.
+      const res = await page.request.patch(`${BASE}/api/widget-config`, {
+        data: { positioning: { desktop: { anchor: 'bottom-center' } } },
+        headers: { 'Content-Type': 'application/json' },
+      })
+      expect(res.status()).toBe(403)
+      const body = await res.json()
+      expect(body.error).toBe('positioning_not_authorized')
+    } finally {
+      // Clean up: restore the plan to 'free' so the tenant can be deleted
+      // by normal test cleanup. Also delete directly as safety net.
+      await globalDb.tenant.update({
+        where: { id: tenantId },
+        data: { plan: 'free' },
+      }).catch(() => {})
+      await globalDb.tenant.delete({ where: { id: tenantId } }).catch(() => {})
+    }
 
     await ctx.close()
   })

@@ -1289,14 +1289,134 @@ describe('BLOCKER 6 — safe-area in geometry computation', () => {
     expect(r.maxHeight).toBe(500)
   })
 
-  test('Panel clamped when safeAreaBottom consumes viewport', () => {
+  test('Panel clamped when safeAreaBottom consumes viewport — no 120px minimum', () => {
     const { computePanelVerticalPosition } = require('../../src/lib/widget/positioning-geometry')
     // viewportHeight=200, safeAreaBottom=80 → usable = 200 - 160 = 40.
-    // panelPreferredHeight=500 → clamped to max(120, min(500, 40-24)) = max(120, 16) = 120.
+    // panelPreferredHeight=500 → clamped to min(500, 40-24) = 16.
+    // No minimum enforced — the panel stays within the viewport even if tiny.
     const r = computePanelVerticalPosition({
       rootBottom: 20, launcherHeight: 52, viewportHeight: 200,
       panelGap: 12, panelPreferredHeight: 500, safeAreaBottom: 80,
     })
-    expect(r.maxHeight).toBeGreaterThanOrEqual(120) // minimum
+    // maxHeight must be <= available space (no overflow), no minimum.
+    expect(r.maxHeight).toBeLessThanOrEqual(40)
+    expect(r.maxHeight).toBeGreaterThanOrEqual(0)
+  })
+})
+
+// ─── Panel horizontal containment ─────────────────────────────────────────
+
+describe('Panel horizontal containment — computePanelHorizontalPosition', () => {
+  const { computePanelHorizontalPosition } = require('../../src/lib/widget/positioning-geometry')
+
+  test('right-opening: panel left aligns with launcher left', () => {
+    const r = computePanelHorizontalPosition({
+      launcherLeft: 20, launcherWidth: 52, panelPreferredWidth: 360,
+      viewportWidth: 1000, panelSide: 'right', viewportMargin: 20,
+    })
+    expect(r.left).toBe(0) // relative to root
+    expect(r.width).toBe(360) // fits in viewport
+  })
+
+  test('left-opening: panel right aligns with launcher right', () => {
+    const r = computePanelHorizontalPosition({
+      launcherLeft: 928, launcherWidth: 52, panelPreferredWidth: 360,
+      viewportWidth: 1000, panelSide: 'left', viewportMargin: 20,
+    })
+    // panel left = launcherWidth - panelWidth = 52 - 360 = -308
+    expect(r.left).toBe(52 - 360)
+    expect(r.width).toBe(360)
+  })
+
+  test('center: panel centered on launcher', () => {
+    const r = computePanelHorizontalPosition({
+      launcherLeft: 474, launcherWidth: 52, panelPreferredWidth: 360,
+      viewportWidth: 1000, panelSide: 'center', viewportMargin: 20,
+    })
+    // panel left = (52 - 360) / 2 = -154
+    expect(r.left).toBe((52 - 360) / 2)
+    expect(r.width).toBe(360)
+  })
+
+  test('Narrow viewport (320px): panel width clamped', () => {
+    const r = computePanelHorizontalPosition({
+      launcherLeft: 20, launcherWidth: 52, panelPreferredWidth: 360,
+      viewportWidth: 320, panelSide: 'right', viewportMargin: 20,
+    })
+    // maxPanelWidth = 320 - 40 = 280
+    expect(r.width).toBe(280) // clamped
+  })
+
+  test('Narrow viewport: panel left edge clamped to viewport margin', () => {
+    // Launcher near right edge, left-opening panel would overflow left.
+    const r = computePanelHorizontalPosition({
+      launcherLeft: 280, launcherWidth: 52, panelPreferredWidth: 360,
+      viewportWidth: 320, panelSide: 'left', viewportMargin: 20,
+    })
+    // Panel width clamped to 280. Panel left relative to root = 52 - 280 = -228.
+    // Absolute left = 280 + (-228) = 52. But min abs left = 20 (viewportMargin).
+    // Clamped abs left = 20. Relative = 20 - 280 = -260.
+    // The panel must NOT overflow the left viewport edge.
+    const absLeft = 280 + r.left
+    expect(absLeft).toBeGreaterThanOrEqual(20) // left edge inside viewport
+    expect(absLeft + r.width).toBeLessThanOrEqual(320 - 20) // right edge inside
+  })
+
+  test('Extreme right offset: panel right edge clamped to viewport', () => {
+    // Launcher at far right, right-opening panel would overflow right.
+    const r = computePanelHorizontalPosition({
+      launcherLeft: 990, launcherWidth: 52, panelPreferredWidth: 360,
+      viewportWidth: 1000, panelSide: 'right', viewportMargin: 20,
+    })
+    const absLeft = 990 + r.left
+    expect(absLeft + r.width).toBeLessThanOrEqual(1000 - 20) // right edge inside
+  })
+
+  test('Extreme left offset: panel left edge clamped to viewport margin', () => {
+    // Launcher at far left, left-opening panel would overflow left.
+    const r = computePanelHorizontalPosition({
+      launcherLeft: 0, launcherWidth: 52, panelPreferredWidth: 360,
+      viewportWidth: 1000, panelSide: 'left', viewportMargin: 20,
+    })
+    const absLeft = 0 + r.left
+    expect(absLeft).toBeGreaterThanOrEqual(20) // left edge inside
+  })
+
+  test('Never overflows horizontally for any launcher position', () => {
+    // Test many launcher positions across the viewport.
+    for (let launcherLeft = 0; launcherLeft <= 1000; launcherLeft += 50) {
+      for (const side of ['right', 'left', 'center'] as const) {
+        const r = computePanelHorizontalPosition({
+          launcherLeft, launcherWidth: 52, panelPreferredWidth: 360,
+          viewportWidth: 1000, panelSide: side, viewportMargin: 20,
+        })
+        const absLeft = launcherLeft + r.left
+        expect(absLeft).toBeGreaterThanOrEqual(20)
+        expect(absLeft + r.width).toBeLessThanOrEqual(1000 - 20)
+      }
+    }
+  })
+
+  test('Never overflows on narrow 320px viewport', () => {
+    for (let launcherLeft = 0; launcherLeft <= 320; launcherLeft += 20) {
+      for (const side of ['right', 'left', 'center'] as const) {
+        const r = computePanelHorizontalPosition({
+          launcherLeft, launcherWidth: 52, panelPreferredWidth: 360,
+          viewportWidth: 320, panelSide: side, viewportMargin: 20,
+        })
+        const absLeft = launcherLeft + r.left
+        expect(absLeft).toBeGreaterThanOrEqual(20)
+        expect(absLeft + r.width).toBeLessThanOrEqual(320 - 20)
+      }
+    }
+  })
+
+  test('NPM parity: same result', () => {
+    const { computePanelHorizontalPosition: npmCHP } = require('../../packages/widget-npm/src/positioning')
+    const opts = { launcherLeft: 500, launcherWidth: 52, panelPreferredWidth: 360, viewportWidth: 1000, panelSide: 'center' as const, viewportMargin: 20 }
+    const server = computePanelHorizontalPosition(opts)
+    const npm = npmCHP(opts)
+    expect(npm.left).toBe(server.left)
+    expect(npm.width).toBe(server.width)
   })
 })

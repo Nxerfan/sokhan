@@ -198,26 +198,28 @@ ${POSITIONING_FN_SOURCE}
   }
 
   function applyPanelSide(side) {
-    if (!panel) return;
-    panel.style.left = '';
+    if (!panel || !state.config || !state.effectivePos) return;
+    var pos = state.effectivePos;
+    var dims = getLauncherDims(state.config.launcherShape);
+    var lr = __skComputePosition({
+      anchor: pos.anchor, offsetX: pos.offsetX || 0, offsetY: pos.offsetY || 0,
+      dir: state.dir, viewportWidth: window.innerWidth, viewportHeight: window.innerHeight,
+      launcherWidth: dims.w, launcherHeight: dims.h,
+      safeAreaBottom: __skGetSafeAreaBottom(), baseMargin: 20
+    });
+    var ph = __skComputePanelHorizontal(lr.left, dims.w, 360, window.innerWidth, side, 20);
+    panel.style.left = ph.left + 'px';
     panel.style.right = '';
-    if (side === 'right') {
-      panel.style.left = '0';
-    } else if (side === 'left') {
-      panel.style.right = '0';
-    } else {
-      panel.style.left = '50%';
-    }
+    panel.style.width = ph.width + 'px';
     applyPanelTransform();
   }
 
   function applyPanelTransform() {
     if (!panel) return;
-    var base = state.panelSide === 'center' ? 'translateX(-50%)' : '';
     if (state.open) {
-      panel.style.transform = (base + ' translateY(0) scale(1)').trim();
+      panel.style.transform = 'translateY(0) scale(1)';
     } else {
-      panel.style.transform = (base + ' translateY(8px) scale(.98)').trim();
+      panel.style.transform = 'translateY(8px) scale(.98)';
     }
   }
 
@@ -1481,11 +1483,7 @@ ${POSITIONING_FN_SOURCE}
     // propagate immediately — no stale cached response from a previous load).
     fetch(CONFIG_URL + '?_t=' + Date.now(), { cache: 'no-store' })
       .then(function(r){ return r.json(); })
-      .then(function(config){
-        // Store for diagnostic — tests can verify the widget received V2.
-        try { window.__sukhan_config = config; } catch (e) {}
-        mount(config);
-      })
+      .then(function(config){ mount(config); })
       .catch(function(e){ console.error('[sukhan] config fetch failed', e); });
   }
 

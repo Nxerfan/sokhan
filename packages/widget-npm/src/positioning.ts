@@ -96,12 +96,50 @@ export function computePanelVerticalPosition(opts: PanelVerticalInput): PanelVer
   }
 
   if (spaceAbove >= spaceBelow) {
-    const clampedHeight = Math.max(120, spaceAbove - panelGap)
+    const clampedHeight = Math.max(0, spaceAbove - panelGap)
     return { bottom: launcherHeight + panelGap, maxHeight: clampedHeight, opensBelow: false }
   } else {
-    const clampedHeight = Math.max(120, spaceBelow - panelGap)
+    const clampedHeight = Math.max(0, spaceBelow - panelGap)
     return { bottom: -(clampedHeight + panelGap), maxHeight: clampedHeight, opensBelow: true }
   }
+}
+
+export interface PanelHorizontalInput {
+  launcherLeft: number
+  launcherWidth: number
+  panelPreferredWidth: number
+  viewportWidth: number
+  panelSide: 'left' | 'right' | 'center'
+  viewportMargin: number
+}
+
+export interface PanelHorizontalOutput {
+  left: number
+  width: number
+}
+
+export function computePanelHorizontalPosition(opts: PanelHorizontalInput): PanelHorizontalOutput {
+  const { launcherLeft, launcherWidth, panelPreferredWidth, viewportWidth, panelSide, viewportMargin } = opts
+
+  const maxPanelWidth = Math.max(0, viewportWidth - viewportMargin * 2)
+  const clampedWidth = Math.min(panelPreferredWidth, maxPanelWidth)
+
+  let panelLeft: number
+  if (panelSide === 'right') {
+    panelLeft = 0
+  } else if (panelSide === 'left') {
+    panelLeft = launcherWidth - clampedWidth
+  } else {
+    panelLeft = (launcherWidth - clampedWidth) / 2
+  }
+
+  const absLeft = launcherLeft + panelLeft
+  const minAbsLeft = viewportMargin
+  const maxAbsLeft = Math.max(minAbsLeft, viewportWidth - viewportMargin - clampedWidth)
+  const clampedAbsLeft = Math.max(minAbsLeft, Math.min(absLeft, maxAbsLeft))
+  const clampedPanelLeft = clampedAbsLeft - launcherLeft
+
+  return { left: clampedPanelLeft, width: clampedWidth }
 }
 
 export function computeLauncherPosition(opts: LauncherPositionInput): LauncherPositionOutput {

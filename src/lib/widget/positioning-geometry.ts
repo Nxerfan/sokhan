@@ -143,7 +143,8 @@ export interface PanelVerticalOutput {
  *      (panelHeight + gap ≤ spaceAbove), open above.
  *   2. If above doesn't fit, try opening BELOW. If it fits, open below.
  *   3. If neither fits fully, pick the side with more space and clamp
- *      the panel height (minimum 120px so the panel remains usable).
+ *      the panel height to the available space (no minimum — the panel
+ *      stays within the viewport even if the available space is very small).
  *
  * Never throws. Returns clamped values for any finite input.
  */
@@ -155,11 +156,13 @@ export function computePanelVerticalPosition(opts: PanelVerticalInput): PanelVer
   // Space below the launcher (from root bottom to viewport bottom, minus safe area).
   const spaceBelow = Math.max(0, rootBottom - safeAreaBottom)
 
-  // Preferred panel height clamped to viewport.
-  const viewportClampedHeight = Math.max(120, Math.min(
+  // Preferred panel height clamped to viewport. No minimum — if the
+  // viewport is very short, the panel is clamped to whatever space is
+  // physically available (the panel may be tiny but must NOT overflow).
+  const viewportClampedHeight = Math.min(
     panelPreferredHeight,
     viewportHeight - safeAreaBottom * 2 - panelGap * 2,
-  ))
+  )
 
   // Try above first (default behavior).
   if (spaceAbove >= viewportClampedHeight + panelGap) {
@@ -171,14 +174,89 @@ export function computePanelVerticalPosition(opts: PanelVerticalInput): PanelVer
     return { bottom: -(viewportClampedHeight + panelGap), maxHeight: viewportClampedHeight, opensBelow: true }
   }
 
-  // Neither fits fully — pick the side with more space + clamp height.
+  // Neither fits fully — pick the side with more space + clamp height
+  // to available space (no minimum — the panel stays within the viewport
+  // even if the available space is very small).
   if (spaceAbove >= spaceBelow) {
-    const clampedHeight = Math.max(120, spaceAbove - panelGap)
+    const clampedHeight = Math.max(0, spaceAbove - panelGap)
     return { bottom: launcherHeight + panelGap, maxHeight: clampedHeight, opensBelow: false }
   } else {
-    const clampedHeight = Math.max(120, spaceBelow - panelGap)
+    const clampedHeight = Math.max(0, spaceBelow - panelGap)
     return { bottom: -(clampedHeight + panelGap), maxHeight: clampedHeight, opensBelow: true }
   }
+}
+
+/**
+ * Input for computing the chat panel's horizontal position.
+ * The panel must stay within the usable viewport — its left position
+ * is clamped so neither edge overflows.
+ */
+export interface PanelHorizontalInput {
+  /** The root element's left position in viewport px (from computeLauncherPosition). */
+  launcherLeft: number
+  /** Launcher width in px. */
+  launcherWidth: number
+  /** Preferred panel width before clamping (default 360). */
+  panelPreferredWidth: number
+  /** Viewport width in px. */
+  viewportWidth: number
+  /** The side the panel should open toward (from computeLauncherPosition.panelSide). */
+  panelSide: 'left' | 'right' | 'center'
+  /** Horizontal margin from the viewport edge (default 20, same as baseMargin). */
+  viewportMargin: number
+}
+
+/**
+ * Output: the panel's horizontal CSS values relative to the root element.
+ */
+export interface PanelHorizontalOutput {
+  /** CSS `left` value for the panel (px, relative to root element). */
+  left: number
+  /** Clamped panel width (px). */
+  width: number
+}
+
+/**
+ * Compute the chat panel's horizontal position so it stays within the
+ * usable viewport. The panel's left position is clamped so neither the
+ * left nor right edge overflows the viewport.
+ *
+ * The panel is positioned relative to the root element (which contains
+ * the launcher). The `left` value is relative to the root's left edge.
+ *
+ * Never throws. Returns clamped values for any finite input.
+ */
+export function computePanelHorizontalPosition(opts: PanelHorizontalInput): PanelHorizontalOutput {
+  const { launcherLeft, launcherWidth, panelPreferredWidth, viewportWidth, panelSide, viewportMargin } = opts
+
+  // Clamp panel width to usable viewport (leave margin on both sides).
+  const maxPanelWidth = Math.max(0, viewportWidth - viewportMargin * 2)
+  const clampedWidth = Math.min(panelPreferredWidth, maxPanelWidth)
+
+  // Compute the panel's desired left position relative to the root element.
+  let panelLeft: number
+  if (panelSide === 'right') {
+    // Panel opens to the right: left edge aligns with root's left edge.
+    panelLeft = 0
+  } else if (panelSide === 'left') {
+    // Panel opens to the left: right edge aligns with root's right edge.
+    panelLeft = launcherWidth - clampedWidth
+  } else {
+    // Center: panel centered on the launcher.
+    panelLeft = (launcherWidth - clampedWidth) / 2
+  }
+
+  // The panel's absolute left in viewport = launcherLeft + panelLeft.
+  // Clamp so the panel stays within [viewportMargin, viewportWidth - viewportMargin - clampedWidth].
+  const absLeft = launcherLeft + panelLeft
+  const minAbsLeft = viewportMargin
+  const maxAbsLeft = Math.max(minAbsLeft, viewportWidth - viewportMargin - clampedWidth)
+  const clampedAbsLeft = Math.max(minAbsLeft, Math.min(absLeft, maxAbsLeft))
+
+  // Convert back to relative-to-root.
+  const clampedPanelLeft = clampedAbsLeft - launcherLeft
+
+  return { left: clampedPanelLeft, width: clampedWidth }
 }
 
 /**
