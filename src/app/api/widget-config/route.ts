@@ -15,6 +15,7 @@ import {
   mergePositioningPatch,
   hasOtherCustomizationFields,
   hasPositioningField,
+  hasUnrecognizedFields,
   type PositioningPatchData,
 } from '@/lib/widget/positioning-patch'
 
@@ -114,6 +115,7 @@ function parseImageSetting(value: unknown): { ok: true; value: string | null } |
 
 /** Positioning-specific error codes → HTTP status mapping. */
 const POSITIONING_ERROR_STATUS: Record<string, number> = {
+  positioning_not_authorized: 403,     // unknown plan / no preset positioning capability
   positioning_not_object: 400,
   positioning_device_not_object: 400,
   positioning_anchor_missing: 400,
@@ -174,6 +176,13 @@ export async function PATCH(req: NextRequest) {
     // ---- Determine the request type ----
     const hasPositioning = hasPositioningField(body)
     const hasOtherFields = hasOtherCustomizationFields(body)
+
+    // Reject unrecognized top-level fields — never silently accept
+    // unsupported payloads (no prototype pollution, no bypass via
+    // unknown keys).
+    if (hasUnrecognizedFields(body)) {
+      return { badRequest: true as const, code: 'unrecognized_field' }
+    }
 
     // If Free sends non-positioning customization (with or without
     // positioning), reject with 402 — no bypass by mixing.
@@ -255,13 +264,18 @@ export async function PATCH(req: NextRequest) {
 
     // ---- Apply positioning patch (if validated) ----
     if (positioningPatch) {
-      // Read existing appearanceV2 (for merge — preserves the other device
-      // + paid offsets when Free edits only the anchor).
+      // Read existing appearanceV2 + V1 position (for merge — preserves
+      // the other device, paid offsets, AND the historical V1 anchor when
+      // the first V2 edit is offset-only).
       const existing = await db.widgetConfig.findUnique({
         where: { tenantId: tid },
-        select: { appearanceV2: true },
+        select: { appearanceV2: true, position: true },
       })
-      const merged = mergePositioningPatch(existing?.appearanceV2, positioningPatch)
+      const merged = mergePositioningPatch(
+        existing?.appearanceV2,
+        positioningPatch,
+        existing?.position ?? null,
+      )
       data.appearanceV2 = merged as unknown as string // Prisma Json field
     }
 

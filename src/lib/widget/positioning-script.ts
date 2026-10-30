@@ -70,32 +70,59 @@ function __skComputePosition(opts) {
 }
 
 function __skOffsetXFromLeft(anchor, absoluteLeft, dir, vw, lw, bm) {
+  // Compute the same baseLeft as __skComputePosition.
+  var baseLeft;
   if (anchor === 'bottom-center') {
-    var baseLeft = (vw - lw) / 2;
-    return absoluteLeft - baseLeft;
-  }
-  var isStart = anchor === 'bottom-start';
-  var startIsLeft = dir === 'ltr' ? isStart : !isStart;
-  if (startIsLeft) {
-    return absoluteLeft - bm;
+    baseLeft = (vw - lw) / 2;
   } else {
-    return (vw - lw - bm) - absoluteLeft;
+    var isStart = anchor === 'bottom-start';
+    var startIsLeft = dir === 'ltr' ? isStart : !isStart;
+    if (startIsLeft) {
+      baseLeft = bm;
+    } else {
+      baseLeft = vw - lw - bm;
+    }
   }
+  // Inverse: offsetX = absoluteLeft - baseLeft (same for all anchors).
+  return absoluteLeft - baseLeft;
 }
 
 function __skGetSafeAreaBottom() {
+  // Measure the actual safe-area-inset-bottom by creating a hidden
+  // element with padding-bottom: env(safe-area-inset-bottom) and
+  // reading its computed padding. This works on iOS Safari + Chrome
+  // mobile (which support env() in computed styles). Returns 0 on
+  // browsers without safe-area support or desktop.
   try {
-    var style = getComputedStyle(document.documentElement);
-    var sab = style.getPropertyValue('env') || '';
-    // env(safe-area-inset-bottom) is not directly readable via
-    // getComputedStyle in all browsers. Use a CSS variable fallback
-    // approach: we inject a custom property --sk-sab via a media query.
-    // For now, use a conservative 0 — the widget still works; the
-    // launcher just sits at the base margin. Real safe-area handling
-    // is done via CSS env() in the injected styles.
-    return 0;
+    var div = document.createElement('div');
+    div.style.cssText = 'position:fixed;bottom:0;left:0;width:0;height:0;padding-bottom:env(safe-area-inset-bottom);visibility:hidden;pointer-events:none;';
+    document.body.appendChild(div);
+    var val = getComputedStyle(div).paddingBottom;
+    document.body.removeChild(div);
+    var px = parseInt(val, 10);
+    return isNaN(px) ? 0 : px;
   } catch (e) {
     return 0;
+  }
+}
+
+function __skComputePanelVertical(rootBottom, launcherHeight, viewportHeight, panelGap, panelPreferredHeight, safeAreaBottom) {
+  var spaceAbove = Math.max(0, viewportHeight - rootBottom - launcherHeight - safeAreaBottom);
+  var spaceBelow = Math.max(0, rootBottom - safeAreaBottom);
+  var viewportClampedHeight = Math.max(120, Math.min(panelPreferredHeight, viewportHeight - safeAreaBottom * 2 - panelGap * 2));
+
+  if (spaceAbove >= viewportClampedHeight + panelGap) {
+    return { bottom: launcherHeight + panelGap, maxHeight: viewportClampedHeight, opensBelow: false };
+  }
+  if (spaceBelow >= viewportClampedHeight + panelGap) {
+    return { bottom: -(viewportClampedHeight + panelGap), maxHeight: viewportClampedHeight, opensBelow: true };
+  }
+  if (spaceAbove >= spaceBelow) {
+    var ch = Math.max(120, spaceAbove - panelGap);
+    return { bottom: launcherHeight + panelGap, maxHeight: ch, opensBelow: false };
+  } else {
+    var ch2 = Math.max(120, spaceBelow - panelGap);
+    return { bottom: -(ch2 + panelGap), maxHeight: ch2, opensBelow: true };
   }
 }
 

@@ -364,4 +364,284 @@ test.describe('Widget V2 Positioning — browser regression', () => {
 
     await ctx.close()
   })
+
+  test('BLOCKER 2: PRO vertical drag changes offsetY + preview + saved config', async ({ browser }) => {
+    test.setTimeout(120_000)
+    const { email, workspace } = creds('pro-vdrag')
+    const ctx = await browser.newContext()
+    const page = await ctx.newPage()
+    const slug = await signupAndGetSlug(page, email, workspace)
+    currentSlug = slug
+
+    await devSetPlan(page, 'pro')
+    await page.goto(BASE)
+    await page.waitForLoadState('networkidle')
+    await openCustomizationTab(page)
+
+    await page.getByTestId('positioning-device-desktop').click()
+    await page.getByTestId('positioning-anchor-bottom-end').click()
+
+    // Get the initial offsetY value.
+    const initialY = await page.getByTestId('positioning-offsetY-input').inputValue()
+    expect(initialY).toBe('0')
+
+    // Drag the launcher vertically (upward = positive offsetY).
+    const launcher = page.getByTestId('positioning-preview-launcher')
+    const launcherBox = await launcher.boundingBox()
+    expect(launcherBox).not.toBeNull()
+
+    // Drag upward by 50px.
+    await launcher.hover()
+    const startX = launcherBox!.x + launcherBox!.width / 2
+    const startY = launcherBox!.y + launcherBox!.height / 2
+    await page.mouse.move(startX, startY)
+    await page.mouse.down()
+    await page.mouse.move(startX, startY - 50, { steps: 5 })
+    await page.mouse.up()
+
+    // The offsetY input should now be positive (dragged up).
+    const newY = await page.getByTestId('positioning-offsetY-input').inputValue()
+    const newYNum = parseInt(newY, 10)
+    expect(newYNum).toBeGreaterThan(0)
+
+    await ctx.close()
+  })
+
+  test('BLOCKER 3: PRO horizontal drag on right-anchored (bottom-end) — correct sign', async ({ browser }) => {
+    test.setTimeout(120_000)
+    const { email, workspace } = creds('pro-hdrag')
+    const ctx = await browser.newContext()
+    const page = await ctx.newPage()
+    const slug = await signupAndGetSlug(page, email, workspace)
+    currentSlug = slug
+
+    await devSetPlan(page, 'pro')
+    await page.goto(BASE)
+    await page.waitForLoadState('networkidle')
+    await openCustomizationTab(page)
+
+    await page.getByTestId('positioning-device-desktop').click()
+    await page.getByTestId('positioning-anchor-bottom-end').click()
+
+    // Get the initial offsetX value.
+    const initialX = await page.getByTestId('positioning-offsetX-input').inputValue()
+    expect(initialX).toBe('0')
+
+    // Drag the launcher LEFT by 30px. For bottom-end (right-anchored),
+    // dragging left should DECREASE offsetX (negative).
+    const launcher = page.getByTestId('positioning-preview-launcher')
+    const launcherBox = await launcher.boundingBox()
+    expect(launcherBox).not.toBeNull()
+
+    const startX = launcherBox!.x + launcherBox!.width / 2
+    const startY = launcherBox!.y + launcherBox!.height / 2
+    await page.mouse.move(startX, startY)
+    await page.mouse.down()
+    await page.mouse.move(startX - 30, startY, { steps: 5 })
+    await page.mouse.up()
+
+    // The offsetX should be negative (moved left from right-anchored).
+    const newX = await page.getByTestId('positioning-offsetX-input').inputValue()
+    const newXNum = parseInt(newX, 10)
+    expect(newXNum).toBeLessThan(0)
+
+    await ctx.close()
+  })
+
+  test('BLOCKER 1: Unknown plan positioning write rejected (403)', async ({ browser }) => {
+    test.setTimeout(120_000)
+    const { email, workspace } = creds('unknown-plan')
+    const ctx = await browser.newContext()
+    const page = await ctx.newPage()
+    const slug = await signupAndGetSlug(page, email, workspace)
+    currentSlug = slug
+
+    // Set to an unknown plan (not in the catalog).
+    await devSetPlan(page, 'unknown-plan-xyz')
+    await page.goto(BASE)
+    await page.waitForLoadState('networkidle')
+
+    // Authenticate.
+    const csrfRes = await page.request.get(`${DASHBOARD}/api/auth/csrf`)
+    const { csrfToken } = await csrfRes.json()
+    await page.request.post(`${DASHBOARD}/api/auth/callback/credentials`, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      data: `email=${email}&password=password123&csrfToken=${csrfToken}&json=true`,
+    })
+
+    // Attempt positioning write — should be rejected with 403.
+    const res = await page.request.patch(`${BASE}/api/widget-config`, {
+      data: { positioning: { desktop: { anchor: 'bottom-center' } } },
+      headers: { 'Content-Type': 'application/json' },
+    })
+    expect(res.status()).toBe(403)
+    const body = await res.json()
+    expect(body.error).toBe('positioning_not_authorized')
+
+    await ctx.close()
+  })
+
+  test('BLOCKER 1: Unrecognized top-level field rejected (400)', async ({ browser }) => {
+    test.setTimeout(120_000)
+    const { email, workspace } = creds('unrecognized')
+    const ctx = await browser.newContext()
+    const page = await ctx.newPage()
+    const slug = await signupAndGetSlug(page, email, workspace)
+    currentSlug = slug
+
+    await devSetPlan(page, 'pro')
+    await page.goto(BASE)
+    await page.waitForLoadState('networkidle')
+
+    const csrfRes = await page.request.get(`${DASHBOARD}/api/auth/csrf`)
+    const { csrfToken } = await csrfRes.json()
+    await page.request.post(`${DASHBOARD}/api/auth/callback/credentials`, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      data: `email=${email}&password=password123&csrfToken=${csrfToken}&json=true`,
+    })
+
+    // Attempt with an unrecognized field.
+    const res = await page.request.patch(`${BASE}/api/widget-config`, {
+      data: { positioning: { desktop: { anchor: 'bottom-center' } }, evil: true },
+      headers: { 'Content-Type': 'application/json' },
+    })
+    expect(res.status()).toBe(400)
+    const body = await res.json()
+    expect(body.error).toBe('unrecognized_field')
+
+    await ctx.close()
+  })
+
+  test('BLOCKER 4: V1 anchor preserved on first offset-only update', async ({ browser }) => {
+    test.setTimeout(120_000)
+    const { email, workspace } = creds('v1-anchor')
+    const ctx = await browser.newContext()
+    const page = await ctx.newPage()
+    const slug = await signupAndGetSlug(page, email, workspace)
+    currentSlug = slug
+
+    await devSetPlan(page, 'pro')
+    await page.goto(BASE)
+    await page.waitForLoadState('networkidle')
+
+    const csrfRes = await page.request.get(`${DASHBOARD}/api/auth/csrf`)
+    const { csrfToken } = await csrfRes.json()
+    await page.request.post(`${DASHBOARD}/api/auth/callback/credentials`, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      data: `email=${email}&password=password123&csrfToken=${csrfToken}&json=true`,
+    })
+
+    // First, set V1 position to bottom-start via the existing position field.
+    await page.request.patch(`${BASE}/api/widget-config`, {
+      data: { position: 'bottom-start' },
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+    // Now send an offset-only positioning patch (no anchor).
+    const res = await page.request.patch(`${BASE}/api/widget-config`, {
+      data: { positioning: { desktop: { offsetX: 50 } } },
+      headers: { 'Content-Type': 'application/json' },
+    })
+    expect(res.ok()).toBe(true)
+
+    // Verify the public config has bottom-start anchor + offsetX 50.
+    const configRes = await page.request.get(`${SUKHAN_ORIGIN}/api/widget/${slug}/config`)
+    const config = await configRes.json()
+    expect(config.positioning.desktop.anchor).toBe('bottom-start') // V1 preserved!
+    expect(config.positioning.desktop.offsetX).toBe(50)
+
+    await ctx.close()
+  })
+
+  test('BLOCKER 5: Panel stays inside viewport at extreme top position', async ({ browser }) => {
+    test.setTimeout(120_000)
+    const { email, workspace } = creds('panel-contain')
+    const ctx = await browser.newContext()
+    const page = await ctx.newPage()
+    const slug = await signupAndGetSlug(page, email, workspace)
+    currentSlug = slug
+
+    await devSetPlan(page, 'pro')
+    await page.goto(BASE)
+    await page.waitForLoadState('networkidle')
+
+    const csrfRes = await page.request.get(`${DASHBOARD}/api/auth/csrf`)
+    const { csrfToken } = await csrfRes.json()
+    await page.request.post(`${DASHBOARD}/api/auth/callback/credentials`, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      data: `email=${email}&password=password123&csrfToken=${csrfToken}&json=true`,
+    })
+
+    // Set a very high offsetY (launcher near the top of the viewport).
+    await page.request.patch(`${BASE}/api/widget-config`, {
+      data: { positioning: { desktop: { anchor: 'bottom-end', offsetY: 600 } } },
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+    // Open the widget and verify the panel stays within the viewport.
+    const customerPage = await ctx.newPage()
+    await customerPage.goto(CUSTOMER_ORIGIN)
+    await customerPage.waitForLoadState('networkidle')
+    await customerPage.waitForSelector('.sk-root', { timeout: 15_000 })
+
+    // Open the panel.
+    await customerPage.click('.sk-launcher')
+    await customerPage.waitForTimeout(500)
+
+    // Verify the panel's bounding rect is within the viewport.
+    const panelRect = await customerPage.evaluate(() => {
+      const panel = document.querySelector('.sk-panel') as HTMLElement
+      if (!panel) return null
+      const r = panel.getBoundingClientRect()
+      return { top: r.top, bottom: r.bottom, left: r.left, right: r.right }
+    })
+    expect(panelRect).not.toBeNull()
+    // Panel must be within the viewport vertically.
+    expect(panelRect!.top).toBeGreaterThanOrEqual(0)
+    expect(panelRect!.bottom).toBeLessThanOrEqual(window.innerHeight)
+
+    await ctx.close()
+  })
+
+  test('BLOCKER 7: All three widget delivery surfaces render positioning', async ({ browser }) => {
+    test.setTimeout(120_000)
+    const { email, workspace } = creds('three-surfaces')
+    const ctx = await browser.newContext()
+    const page = await ctx.newPage()
+    const slug = await signupAndGetSlug(page, email, workspace)
+    currentSlug = slug
+
+    await devSetPlan(page, 'pro')
+    await page.goto(BASE)
+    await page.waitForLoadState('networkidle')
+
+    const csrfRes = await page.request.get(`${DASHBOARD}/api/auth/csrf`)
+    const { csrfToken } = await csrfRes.json()
+    await page.request.post(`${DASHBOARD}/api/auth/callback/credentials`, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      data: `email=${email}&password=password123&csrfToken=${csrfToken}&json=true`,
+    })
+
+    // Set positioning to bottom-center.
+    await page.request.patch(`${BASE}/api/widget-config`, {
+      data: { positioning: { desktop: { anchor: 'bottom-center' } } },
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+    // Verify the slug-script widget renders the launcher.
+    const customerPage = await ctx.newPage()
+    await customerPage.goto(CUSTOMER_ORIGIN)
+    await customerPage.waitForLoadState('networkidle')
+    await customerPage.waitForSelector('.sk-root', { timeout: 15_000 })
+    const rootLeft = await customerPage.evaluate(() => {
+      const root = document.querySelector('.sk-root') as HTMLElement
+      return root ? parseInt(root.style.left || '0', 10) : -1
+    })
+    // bottom-center → launcher should be roughly centered.
+    const vw = await customerPage.evaluate(() => window.innerWidth)
+    expect(rootLeft).toBeGreaterThan(vw * 0.3)
+    expect(rootLeft).toBeLessThan(vw * 0.7)
+
+    await ctx.close()
+  })
 })

@@ -102,6 +102,86 @@ export interface LauncherPositionOutput {
 }
 
 /**
+ * Input for computing the chat panel's vertical position.
+ * The panel must stay within the usable viewport — if there isn't
+ * enough space above the launcher, it opens below; if neither fits
+ * fully, the height is clamped.
+ */
+export interface PanelVerticalInput {
+  /** The root element's `bottom` CSS value (distance from viewport bottom). */
+  rootBottom: number
+  /** Launcher height in px (depends on shape: tab=52, pill=48, rounded=52). */
+  launcherHeight: number
+  /** Viewport height in px. */
+  viewportHeight: number
+  /** Gap between panel edge and launcher edge (default 12). */
+  panelGap: number
+  /** Preferred panel height before clamping (default 500). */
+  panelPreferredHeight: number
+  /** Safe-area inset bottom (env(safe-area-inset-bottom) or 0). */
+  safeAreaBottom: number
+}
+
+/**
+ * Output: the panel's vertical CSS values relative to the root element.
+ */
+export interface PanelVerticalOutput {
+  /** CSS `bottom` value for the panel (px, relative to root). Positive = above launcher. */
+  bottom: number
+  /** Clamped maxHeight for the panel (px). */
+  maxHeight: number
+  /** Whether the panel opens below the launcher (true) or above (false). */
+  opensBelow: boolean
+}
+
+/**
+ * Compute the chat panel's vertical position so it stays within the
+ * usable viewport.
+ *
+ * Decision logic:
+ *   1. Try opening ABOVE the launcher (default). If the panel fits
+ *      (panelHeight + gap ≤ spaceAbove), open above.
+ *   2. If above doesn't fit, try opening BELOW. If it fits, open below.
+ *   3. If neither fits fully, pick the side with more space and clamp
+ *      the panel height (minimum 120px so the panel remains usable).
+ *
+ * Never throws. Returns clamped values for any finite input.
+ */
+export function computePanelVerticalPosition(opts: PanelVerticalInput): PanelVerticalOutput {
+  const { rootBottom, launcherHeight, viewportHeight, panelGap, panelPreferredHeight, safeAreaBottom } = opts
+
+  // Space above the launcher (from launcher top to viewport top, minus safe area).
+  const spaceAbove = Math.max(0, viewportHeight - rootBottom - launcherHeight - safeAreaBottom)
+  // Space below the launcher (from root bottom to viewport bottom, minus safe area).
+  const spaceBelow = Math.max(0, rootBottom - safeAreaBottom)
+
+  // Preferred panel height clamped to viewport.
+  const viewportClampedHeight = Math.max(120, Math.min(
+    panelPreferredHeight,
+    viewportHeight - safeAreaBottom * 2 - panelGap * 2,
+  ))
+
+  // Try above first (default behavior).
+  if (spaceAbove >= viewportClampedHeight + panelGap) {
+    return { bottom: launcherHeight + panelGap, maxHeight: viewportClampedHeight, opensBelow: false }
+  }
+
+  // Try below.
+  if (spaceBelow >= viewportClampedHeight + panelGap) {
+    return { bottom: -(viewportClampedHeight + panelGap), maxHeight: viewportClampedHeight, opensBelow: true }
+  }
+
+  // Neither fits fully — pick the side with more space + clamp height.
+  if (spaceAbove >= spaceBelow) {
+    const clampedHeight = Math.max(120, spaceAbove - panelGap)
+    return { bottom: launcherHeight + panelGap, maxHeight: clampedHeight, opensBelow: false }
+  } else {
+    const clampedHeight = Math.max(120, spaceBelow - panelGap)
+    return { bottom: -(clampedHeight + panelGap), maxHeight: clampedHeight, opensBelow: true }
+  }
+}
+
+/**
  * Compute the launcher position from anchor + offsets + viewport.
  *
  * This is the CANONICAL geometry function. The NPM widget has its own
@@ -187,6 +267,13 @@ export function computeLauncherPosition(opts: LauncherPositionInput): LauncherPo
  *
  * This ensures drag, slider, and numeric input all manipulate the SAME
  * `offsetX` state, and the CSS is always computed by the same function.
+ *
+ * The inverse is mathematically consistent with the forward geometry:
+ *   forward: left = baseLeft + offsetX
+ *   inverse: offsetX = absoluteLeft - baseLeft
+ *
+ * This is correct for ALL anchors (start/end/center) + RTL/LTR because
+ * the forward function always uses `left = baseLeft + offsetX`.
  */
 export function offsetXFromAbsoluteLeft(
   anchor: PositioningAnchor,
@@ -196,17 +283,21 @@ export function offsetXFromAbsoluteLeft(
   launcherWidth: number,
   baseMargin: number,
 ): number {
+  // Compute the same baseLeft as computeLauncherPosition.
+  let baseLeft: number
   if (anchor === 'bottom-center') {
-    const baseLeft = (viewportWidth - launcherWidth) / 2
-    return absoluteLeft - baseLeft
-  }
-  const isStart = anchor === 'bottom-start'
-  const startIsLeft = dir === 'ltr' ? isStart : !isStart
-  if (startIsLeft) {
-    return absoluteLeft - baseMargin
+    baseLeft = (viewportWidth - launcherWidth) / 2
   } else {
-    return (viewportWidth - launcherWidth - baseMargin) - absoluteLeft
+    const isStart = anchor === 'bottom-start'
+    const startIsLeft = dir === 'ltr' ? isStart : !isStart
+    if (startIsLeft) {
+      baseLeft = baseMargin
+    } else {
+      baseLeft = viewportWidth - launcherWidth - baseMargin
+    }
   }
+  // Inverse: offsetX = absoluteLeft - baseLeft (same for all anchors).
+  return absoluteLeft - baseLeft
 }
 
 /**

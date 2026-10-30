@@ -75,6 +75,7 @@ import {
 } from './identity.js'
 import {
   computeLauncherPosition,
+  computePanelVerticalPosition,
   DEFAULT_BASE_MARGIN,
   type EffectivePositioning,
   type PositioningAnchor,
@@ -2072,9 +2073,19 @@ export class SukhanWidget implements SukhanInstance {
     return { width: 52, height: 52 } // rounded / default
   }
 
-  /** Get the safe-area-inset-bottom (0 if unsupported). */
+  /** Get the safe-area-inset-bottom via measured env() value (0 if unsupported). */
   private getSafeAreaBottom(): number {
-    return 0 // handled via CSS env() in injected styles; JS returns 0
+    try {
+      const div = document.createElement('div')
+      div.style.cssText = 'position:fixed;bottom:0;left:0;width:0;height:0;padding-bottom:env(safe-area-inset-bottom);visibility:hidden;pointer-events:none;'
+      document.body.appendChild(div)
+      const val = getComputedStyle(div).paddingBottom
+      document.body.removeChild(div)
+      const px = parseInt(val, 10)
+      return isNaN(px) ? 0 : px
+    } catch {
+      return 0
+    }
   }
 
   /**
@@ -2087,6 +2098,7 @@ export class SukhanWidget implements SukhanInstance {
     if (!pos) return
 
     const dims = this.getLauncherDimensions(this.state.config.launcherShape)
+    const safeAreaBottom = this.getSafeAreaBottom()
     const result = computeLauncherPosition({
       anchor: pos.anchor,
       offsetX: pos.offsetX || 0,
@@ -2096,7 +2108,7 @@ export class SukhanWidget implements SukhanInstance {
       viewportHeight: window.innerHeight,
       launcherWidth: dims.width,
       launcherHeight: dims.height,
-      safeAreaBottom: this.getSafeAreaBottom(),
+      safeAreaBottom,
       baseMargin: DEFAULT_BASE_MARGIN,
     })
 
@@ -2108,8 +2120,23 @@ export class SukhanWidget implements SukhanInstance {
     // Store panel side for open/close transform.
     this.state.panelSide = result.panelSide
 
-    // Apply panel side.
+    // Apply panel side (horizontal).
     this.applyPanelSide(result.panelSide)
+
+    // Apply panel vertical containment — keep the panel inside the
+    // viewport even when the launcher is near the top edge.
+    if (this.panel) {
+      const panelPos = computePanelVerticalPosition({
+        rootBottom: result.bottom,
+        launcherHeight: dims.height,
+        viewportHeight: window.innerHeight,
+        panelGap: 12,
+        panelPreferredHeight: 500,
+        safeAreaBottom,
+      })
+      this.panel.style.bottom = panelPos.bottom + 'px'
+      this.panel.style.maxHeight = panelPos.maxHeight + 'px'
+    }
   }
 
   /** Apply the panel side (left/right/center) to the panel element. */

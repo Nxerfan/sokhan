@@ -165,6 +165,7 @@ ${POSITIONING_FN_SOURCE}
     if (!state.config || !state.rootEl || !state.effectivePos) return;
     var pos = state.effectivePos;
     var dims = getLauncherDims(state.config.launcherShape);
+    var sab = __skGetSafeAreaBottom();
     var result = __skComputePosition({
       anchor: pos.anchor,
       offsetX: pos.offsetX || 0,
@@ -174,7 +175,7 @@ ${POSITIONING_FN_SOURCE}
       viewportHeight: window.innerHeight,
       launcherWidth: dims.w,
       launcherHeight: dims.h,
-      safeAreaBottom: __skGetSafeAreaBottom(),
+      safeAreaBottom: sab,
       baseMargin: 20
     });
     state.rootEl.style.left = result.left + 'px';
@@ -182,6 +183,13 @@ ${POSITIONING_FN_SOURCE}
     state.rootEl.style.right = '';
     state.panelSide = result.panelSide;
     applyPanelSide(result.panelSide);
+    // Apply panel vertical containment — keep the panel inside the
+    // viewport even when the launcher is near the top edge.
+    if (panel) {
+      var pv = __skComputePanelVertical(result.bottom, dims.h, window.innerHeight, 12, 500, sab);
+      panel.style.bottom = pv.bottom + 'px';
+      panel.style.maxHeight = pv.maxHeight + 'px';
+    }
   }
 
   function applyPanelSide(side) {

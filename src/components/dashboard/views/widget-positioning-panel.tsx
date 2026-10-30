@@ -161,23 +161,28 @@ export function WidgetPositioningPanel({
     return false
   })()
 
+  // The effective anchor for the current device — used as the default
+  // when creating a new draft (preserves the V1 fallback rather than
+  // silently introducing bottom-end).
+  const effectiveAnchor = effective.anchor
+
   // Update the anchor for the current device.
   const setAnchor = useCallback((anchor: PositioningAnchor) => {
     setCurrentDraft((prev) => {
-      const base = prev ?? { anchor: 'bottom-end' as PositioningAnchor }
+      const base = prev ?? { anchor: effectiveAnchor }
       return { ...base, anchor }
     })
-  }, [setCurrentDraft])
+  }, [setCurrentDraft, effectiveAnchor])
 
   // Update an offset for the current device (paid only).
   const setOffset = useCallback((key: 'offsetX' | 'offsetY', value: number) => {
     if (!canOffset) return
     if (!Number.isInteger(value) || value < OFFSET_MIN || value > OFFSET_MAX) return
     setCurrentDraft((prev) => {
-      const base = prev ?? { anchor: 'bottom-end' as PositioningAnchor }
+      const base = prev ?? { anchor: effectiveAnchor }
       return { ...base, [key]: value }
     })
-  }, [canOffset, setCurrentDraft])
+  }, [canOffset, setCurrentDraft, effectiveAnchor])
 
   // Reset offsets to 0 (keep the anchor).
   const resetOffsets = useCallback(() => {
@@ -208,15 +213,33 @@ export function WidgetPositioningPanel({
 
   const handleDragMove = useCallback((e: React.PointerEvent) => {
     if (!dragging || !dragStartRef.current || !previewRef.current) return
-    const deltaX = e.clientX - dragStartRef.current.startX
-    const deltaY = dragStartRef.current.startY - dragStartRef.current.startY // inverted: up = positive
+    // The preview container is rendered at a responsive size that may
+    // differ from the logical preview dimensions. Scale the screen-pixel
+    // delta to logical-pixel delta so drag movement matches the preview.
+    const rect = previewRef.current.getBoundingClientRect()
+    const scaleX = rect.width > 0 ? previewDims.width / rect.width : 1
+    const scaleY = rect.height > 0 ? previewDims.height / rect.height : 1
 
-    // Compute the new desired left position.
-    const newLeft = dragStartRef.current.startLeft + deltaX
+    // Screen-pixel deltas.
+    const screenDeltaX = e.clientX - dragStartRef.current.startX
+    // Vertical: screen Y increases downward. offsetY positive = up.
+    // So dragging UP (screenDeltaY < 0) → offsetY increases (positive).
+    // deltaY = -(screenDeltaY) = startY - currentY.
+    const screenDeltaY = e.clientY - dragStartRef.current.startY
+    const deltaY = -screenDeltaY // up = positive
+
+    // Scale to logical preview pixels.
+    const logicalDeltaX = screenDeltaX * scaleX
+    const logicalDeltaY = deltaY * scaleY
+
+    // Compute the new desired left position (in logical preview pixels).
+    const newLeft = dragStartRef.current.startLeft + logicalDeltaX
     // Clamp to preview bounds.
     const clampedLeft = Math.max(0, Math.min(newLeft, previewDims.width - LAUNCHER_DIMS.width))
 
-    // Back-compute offsetX from the desired left.
+    // Back-compute offsetX from the desired left (using the corrected
+    // inverse function — mathematically consistent with the forward
+    // geometry for ALL anchors + RTL/LTR).
     const newOffsetX = offsetXFromAbsoluteLeft(
       previewAnchor,
       clampedLeft,
@@ -227,16 +250,16 @@ export function WidgetPositioningPanel({
     )
 
     // offsetY: positive = up. Dragging up increases offsetY.
-    const baseBottom = DEFAULT_BASE_MARGIN + (currentDraft?.offsetY ?? 0)
-    const newBottom = dragStartRef.current.startBottom + deltaY
+    // bottom = baseMargin + offsetY, so newBottom = startBottom + logicalDeltaY.
+    const newBottom = dragStartRef.current.startBottom + logicalDeltaY
     const clampedBottom = Math.max(0, Math.min(newBottom, previewDims.height - LAUNCHER_DIMS.height))
     // newOffsetY = clampedBottom - baseMargin (since bottom = baseMargin + offsetY)
     const newOffsetY = clampedBottom - DEFAULT_BASE_MARGIN
 
-    // Apply (clamp to bounds).
+    // Apply (clamp to bounds, round to integer).
     setOffset('offsetX', Math.max(OFFSET_MIN, Math.min(OFFSET_MAX, Math.round(newOffsetX))))
     setOffset('offsetY', Math.max(OFFSET_MIN, Math.min(OFFSET_MAX, Math.round(newOffsetY))))
-  }, [dragging, dragStartRef, previewDims, previewAnchor, dir, currentDraft, setOffset])
+  }, [dragging, dragStartRef, previewDims, previewAnchor, dir, setOffset])
 
   const handleDragEnd = useCallback((e: React.PointerEvent) => {
     setDragging(false)

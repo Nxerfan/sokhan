@@ -47,6 +47,7 @@ import {
   mergePositioningPatch,
   hasOtherCustomizationFields,
   hasPositioningField,
+  hasUnrecognizedFields,
 } from '../../src/lib/widget/positioning-patch'
 
 // ─── Geometry computation ─────────────────────────────────────────────────
@@ -794,19 +795,46 @@ describe('Positioning PATCH validation', () => {
     if (!result.ok) expect(result.code).toBe('positioning_device_not_object')
   })
 
-  test('null entitlements (unknown plan) → offsets rejected', () => {
-    const result = validatePositioningPatch({
-      positioning: { desktop: { anchor: 'bottom-end', offsetX: 100 } },
-    }, null)
-    expect(result.ok).toBe(false)
-    if (!result.ok) expect(result.code).toBe('positioning_offset_not_allowed')
-  })
-
-  test('null entitlements: anchor-only → ok (presets allowed even for unknown plans)', () => {
-    const result = validatePositioningPatch({
+  test('null entitlements (unknown plan) → ALL positioning writes rejected (fail closed)', () => {
+    // BLOCKER 1: unknown plans must fail closed on positioning writes.
+    // anchor-only, offset, and mixed are ALL rejected with positioning_not_authorized.
+    const anchorResult = validatePositioningPatch({
       positioning: { desktop: { anchor: 'bottom-center' } },
     }, null)
-    expect(result.ok).toBe(true)
+    expect(anchorResult.ok).toBe(false)
+    if (!anchorResult.ok) expect(anchorResult.code).toBe('positioning_not_authorized')
+
+    const offsetResult = validatePositioningPatch({
+      positioning: { desktop: { anchor: 'bottom-end', offsetX: 100 } },
+    }, null)
+    expect(offsetResult.ok).toBe(false)
+    if (!offsetResult.ok) expect(offsetResult.code).toBe('positioning_not_authorized')
+  })
+
+  test('presetPositioning=false → ALL positioning writes rejected', () => {
+    // A plan that has no preset positioning capability cannot write positioning.
+    const fakeEnt = { presetPositioning: false, precisePositioning: false } as any
+    const result = validatePositioningPatch({
+      positioning: { desktop: { anchor: 'bottom-center' } },
+    }, fakeEnt)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.code).toBe('positioning_not_authorized')
+  })
+
+  test('inherited-prototype plan name (constructor, __proto__) → fail closed via getEntitlements', () => {
+    // getEntitlements uses a Map (prototype-free) so inherited names return null.
+    // The PATCH route uses getEntitlements(planSlug) — these names must NOT
+    // resolve to any entitlement set.
+    expect(getEntitlements('constructor')).toBeNull()
+    expect(getEntitlements('__proto__')).toBeNull()
+    expect(getEntitlements('toString')).toBeNull()
+    expect(getEntitlements('hasOwnProperty')).toBeNull()
+    // Via the validation path, null entitlements → positioning_not_authorized.
+    const result = validatePositioningPatch({
+      positioning: { desktop: { anchor: 'bottom-center' } },
+    }, getEntitlements('constructor'))
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.code).toBe('positioning_not_authorized')
   })
 })
 
@@ -939,5 +967,336 @@ describe('Field detection — hasOtherCustomizationFields + hasPositioningField'
   })
   test('hasOtherCustomizationFields: true when both positioning + color', () => {
     expect(hasOtherCustomizationFields({ positioning: {}, accentColor: '#fff' })).toBe(true)
+  })
+})
+
+// ─── BLOCKER 1: Unrecognized top-level fields ─────────────────────────────
+
+describe('Unrecognized top-level fields — hasUnrecognizedFields', () => {
+  test('false for empty body', () => {
+    expect(hasUnrecognizedFields({})).toBe(false)
+  })
+  test('false for recognized customization fields', () => {
+    expect(hasUnrecognizedFields({ accentColor: '#fff', position: 'bottom-end' })).toBe(false)
+  })
+  test('false for positioning field', () => {
+    expect(hasUnrecognizedFields({ positioning: { desktop: {} } })).toBe(false)
+  })
+  test('false for recognized + positioning mix', () => {
+    expect(hasUnrecognizedFields({ positioning: {}, accentColor: '#fff' })).toBe(false)
+  })
+  test('true for unrecognized field', () => {
+    expect(hasUnrecognizedFields({ evil: true })).toBe(true)
+  })
+  test('true for unrecognized field mixed with recognized', () => {
+    expect(hasUnrecognizedFields({ accentColor: '#fff', evil: true })).toBe(true)
+  })
+  test('true for __proto__ field (as own key)', () => {
+    // Object.keys does not include __proto__ set via literal (it sets the
+    // prototype, not an own property). Use Object.assign to create an
+    // actual own property named __proto__.
+    const obj = Object.assign({}, { __proto__: {} })
+    // __proto__ via assign is still tricky — use a created object instead.
+    const o = Object.create(null)
+    ;(o as Record<string, unknown>)['__proto__'] = {}
+    expect(hasUnrecognizedFields(o)).toBe(true)
+  })
+  test('true for constructor field', () => {
+    const o: Record<string, unknown> = {}
+    o['constructor'] = {}
+    expect(hasUnrecognizedFields(o)).toBe(true)
+  })
+})
+
+// ─── BLOCKER 3: Inverse geometry round-trip with correct expected values ──
+
+describe('BLOCKER 3 — offsetXFromAbsoluteLeft round-trip correctness', () => {
+  const vp = 1000, lw = 52, bm = 20
+
+  // Explicit expected-value tests (not just parity) — verifies the
+  // CORRECT result, not merely equality between copies sharing a bug.
+
+  test('bottom-end LTR: baseLeft=928, desired left=868 (dragged 60 left) → offsetX=-60', () => {
+    // The reviewer's example: viewport 1000, launcher 52, margin 20.
+    // bottom-end LTR → baseLeft = 1000 - 52 - 20 = 928.
+    // Drag 60px left → desired left = 868.
+    // Forward: left = 928 + offsetX → 868 = 928 + offsetX → offsetX = -60.
+    const result = offsetXFromAbsoluteLeft('bottom-end', 868, 'ltr', vp, lw, bm)
+    expect(result).toBe(-60) // CORRECT: negative (moved left)
+  })
+
+  test('bottom-end LTR: baseLeft=928, desired left=988 (dragged 60 right) → offsetX=+60', () => {
+    const result = offsetXFromAbsoluteLeft('bottom-end', 988, 'ltr', vp, lw, bm)
+    expect(result).toBe(60) // CORRECT: positive (moved right)
+  })
+
+  test('bottom-start LTR: baseLeft=20, desired left=80 (dragged 60 right) → offsetX=+60', () => {
+    const result = offsetXFromAbsoluteLeft('bottom-start', 80, 'ltr', vp, lw, bm)
+    expect(result).toBe(60)
+  })
+
+  test('bottom-start LTR: desired left=-40 (dragged 60 left from 20) → offsetX=-60', () => {
+    const result = offsetXFromAbsoluteLeft('bottom-start', -40, 'ltr', vp, lw, bm)
+    expect(result).toBe(-60)
+  })
+
+  test('bottom-center: baseLeft=474, desired left=534 (dragged 60 right) → offsetX=+60', () => {
+    const baseLeft = (1000 - 52) / 2 // = 474
+    const result = offsetXFromAbsoluteLeft('bottom-center', baseLeft + 60, 'ltr', vp, lw, bm)
+    expect(result).toBe(60)
+  })
+
+  test('RTL: bottom-start → baseLeft=928 (right side), desired left=868 → offsetX=-60', () => {
+    // RTL: bottom-start maps to the right side. baseLeft = 928.
+    const result = offsetXFromAbsoluteLeft('bottom-start', 868, 'rtl', vp, lw, bm)
+    expect(result).toBe(-60)
+  })
+
+  test('RTL: bottom-end → baseLeft=20 (left side), desired left=80 → offsetX=+60', () => {
+    // RTL: bottom-end maps to the left side. baseLeft = 20.
+    const result = offsetXFromAbsoluteLeft('bottom-end', 80, 'rtl', vp, lw, bm)
+    expect(result).toBe(60)
+  })
+
+  // Round-trip: forward → inverse → original offsetX (all anchors + dirs).
+  // Uses offset values within the non-clamping range so the round-trip is
+  // exact. (Clamping is tested separately — it prevents the launcher from
+  // going off-screen, which intentionally breaks the round-trip.)
+  const cases: { anchor: PositioningAnchor; dir: 'rtl' | 'ltr'; offsetX: number }[] = [
+    { anchor: 'bottom-start', dir: 'ltr', offsetX: 0 },
+    { anchor: 'bottom-start', dir: 'ltr', offsetX: 100 },
+    { anchor: 'bottom-start', dir: 'ltr', offsetX: -15 }, // within [-20, 928]
+    { anchor: 'bottom-end', dir: 'ltr', offsetX: 0 },
+    { anchor: 'bottom-end', dir: 'ltr', offsetX: 15 }, // within [-928, 20]
+    { anchor: 'bottom-end', dir: 'ltr', offsetX: -60 }, // the reviewer's example
+    { anchor: 'bottom-center', dir: 'ltr', offsetX: 0 },
+    { anchor: 'bottom-center', dir: 'ltr', offsetX: 200 },
+    { anchor: 'bottom-center', dir: 'ltr', offsetX: -200 },
+    { anchor: 'bottom-start', dir: 'rtl', offsetX: 0 },
+    { anchor: 'bottom-start', dir: 'rtl', offsetX: 15 }, // within [-928, 20]
+    { anchor: 'bottom-start', dir: 'rtl', offsetX: -75 },
+    { anchor: 'bottom-end', dir: 'rtl', offsetX: 0 },
+    { anchor: 'bottom-end', dir: 'rtl', offsetX: 100 },
+    { anchor: 'bottom-end', dir: 'rtl', offsetX: -15 }, // within [-20, 928]
+  ]
+
+  for (const c of cases) {
+    test(`round-trip: ${c.anchor} ${c.dir} offsetX=${c.offsetX} → left → back to offsetX`, () => {
+      const pos = computeLauncherPosition({
+        anchor: c.anchor, offsetX: c.offsetX, offsetY: 0, dir: c.dir,
+        viewportWidth: vp, viewportHeight: 800, launcherWidth: lw, launcherHeight: 52,
+        safeAreaBottom: 0, baseMargin: bm,
+      })
+      const backX = offsetXFromAbsoluteLeft(c.anchor, pos.left, c.dir, vp, lw, bm)
+      expect(backX).toBe(c.offsetX)
+    })
+  }
+
+  // NPM parity with correct expected values
+  test('NPM parity: bottom-end LTR offsetX=-60 → correct result', () => {
+    expect(npmOffsetXFromLeft('bottom-end', 868, 'ltr', vp, lw, bm)).toBe(-60)
+    expect(npmOffsetXFromLeft('bottom-end', 868, 'ltr', vp, lw, bm))
+      .toBe(offsetXFromAbsoluteLeft('bottom-end', 868, 'ltr', vp, lw, bm))
+  })
+})
+
+// ─── BLOCKER 4: V1 anchor preservation on first offset-only edit ──────────
+
+describe('BLOCKER 4 — V1 anchor preserved on first offset-only edit', () => {
+  test('V1 position bottom-start + offset-only patch → anchor=bottom-start (NOT bottom-end)', () => {
+    const merged = mergePositioningPatch(null, {
+      hasAny: true,
+      desktop: { offsetX: 100, hasFields: true },
+    }, 'bottom-start')
+    expect(merged.desktop?.positioning?.anchor).toBe('bottom-start') // V1 preserved!
+    expect(merged.desktop?.positioning?.offsetX).toBe(100)
+  })
+
+  test('V1 position bottom-end + offset-only patch → anchor=bottom-end', () => {
+    const merged = mergePositioningPatch(null, {
+      hasAny: true,
+      desktop: { offsetY: 50, hasFields: true },
+    }, 'bottom-end')
+    expect(merged.desktop?.positioning?.anchor).toBe('bottom-end')
+    expect(merged.desktop?.positioning?.offsetY).toBe(50)
+  })
+
+  test('No V1 position + offset-only patch → anchor=bottom-end (canonical default)', () => {
+    const merged = mergePositioningPatch(null, {
+      hasAny: true,
+      desktop: { offsetX: 100, hasFields: true },
+    }, null)
+    expect(merged.desktop?.positioning?.anchor).toBe('bottom-end')
+  })
+
+  test('V1 position bottom-start + anchor patch → anchor updated (explicit change)', () => {
+    const merged = mergePositioningPatch(null, {
+      hasAny: true,
+      desktop: { anchor: 'bottom-center', hasFields: true },
+    }, 'bottom-start')
+    expect(merged.desktop?.positioning?.anchor).toBe('bottom-center') // explicit change
+  })
+
+  test('Existing V2 + offset-only patch → existing anchor preserved', () => {
+    const existing = {
+      version: 1,
+      desktop: { positioning: { anchor: 'bottom-center', offsetX: 50 } },
+    }
+    const merged = mergePositioningPatch(existing, {
+      hasAny: true,
+      desktop: { offsetY: 100, hasFields: true },
+    }, 'bottom-start') // V1 is bottom-start but existing V2 is bottom-center
+    expect(merged.desktop?.positioning?.anchor).toBe('bottom-center') // V2 preserved, not V1
+    expect(merged.desktop?.positioning?.offsetX).toBe(50) // preserved
+    expect(merged.desktop?.positioning?.offsetY).toBe(100) // updated
+  })
+
+  test('Mobile independence: V1 bottom-start + desktop offset-only → mobile unaffected', () => {
+    const merged = mergePositioningPatch(null, {
+      hasAny: true,
+      desktop: { offsetX: 100, hasFields: true },
+    }, 'bottom-start')
+    expect(merged.desktop?.positioning?.anchor).toBe('bottom-start')
+    expect(merged.mobile).toEqual({}) // no mobile positioning created
+  })
+})
+
+// ─── BLOCKER 5: Panel vertical containment ────────────────────────────────
+
+describe('BLOCKER 5 — computePanelVerticalPosition', () => {
+  const { computePanelVerticalPosition } = require('../../src/lib/widget/positioning-geometry')
+
+  test('Launcher near bottom (rootBottom=20): panel opens above (default)', () => {
+    const r = computePanelVerticalPosition({
+      rootBottom: 20, launcherHeight: 52, viewportHeight: 800,
+      panelGap: 12, panelPreferredHeight: 500, safeAreaBottom: 0,
+    })
+    expect(r.opensBelow).toBe(false)
+    expect(r.bottom).toBe(64) // launcherHeight + gap = 52 + 12
+    expect(r.maxHeight).toBe(500) // fits
+  })
+
+  test('Launcher near top (rootBottom=700): panel opens BELOW', () => {
+    // rootBottom=700 → launcher is 700px from the bottom, near the top.
+    // spaceAbove = 800 - 700 - 52 = 48px (too small for 500px panel).
+    // spaceBelow = 700px (plenty of room below).
+    const r = computePanelVerticalPosition({
+      rootBottom: 700, launcherHeight: 52, viewportHeight: 800,
+      panelGap: 12, panelPreferredHeight: 500, safeAreaBottom: 0,
+    })
+    expect(r.opensBelow).toBe(true)
+    expect(r.bottom).toBeLessThan(0) // negative = below launcher
+    expect(r.maxHeight).toBe(500)
+  })
+
+  test('Launcher in middle: opens above if more space above', () => {
+    // rootBottom=400 → spaceAbove = 800-400-52 = 348, spaceBelow = 400.
+    // 348 >= 500+12? No. 400 >= 500+12? No. Neither fits fully.
+    // spaceAbove (348) < spaceBelow (400) → opens below, clamped.
+    const r = computePanelVerticalPosition({
+      rootBottom: 400, launcherHeight: 52, viewportHeight: 800,
+      panelGap: 12, panelPreferredHeight: 500, safeAreaBottom: 0,
+    })
+    expect(r.opensBelow).toBe(true)
+    expect(r.maxHeight).toBeLessThanOrEqual(400) // clamped to spaceBelow
+  })
+
+  test('Narrow viewport: panel height clamped to viewport', () => {
+    const r = computePanelVerticalPosition({
+      rootBottom: 20, launcherHeight: 52, viewportHeight: 300,
+      panelGap: 12, panelPreferredHeight: 500, safeAreaBottom: 0,
+    })
+    expect(r.maxHeight).toBeLessThan(500) // clamped
+    expect(r.maxHeight).toBeGreaterThanOrEqual(120) // minimum
+  })
+
+  test('Safe-area respected: reduces available space', () => {
+    const r = computePanelVerticalPosition({
+      rootBottom: 20, launcherHeight: 52, viewportHeight: 800,
+      panelGap: 12, panelPreferredHeight: 500, safeAreaBottom: 34,
+    })
+    // spaceAbove = 800 - 20 - 52 - 34 = 694 → fits 500+12.
+    expect(r.opensBelow).toBe(false)
+    expect(r.bottom).toBe(64)
+  })
+
+  test('Never throws for extreme values', () => {
+    expect(() => computePanelVerticalPosition({
+      rootBottom: -100, launcherHeight: 1000, viewportHeight: 1,
+      panelGap: 0, panelPreferredHeight: 9999, safeAreaBottom: 999,
+    })).not.toThrow()
+  })
+
+  test('NPM parity: same result for launcher near top', () => {
+    const { computePanelVerticalPosition: npmCVP } = require('../../packages/widget-npm/src/positioning')
+    const opts = { rootBottom: 700, launcherHeight: 52, viewportHeight: 800, panelGap: 12, panelPreferredHeight: 500, safeAreaBottom: 0 }
+    const server = computePanelVerticalPosition(opts)
+    const npm = npmCVP(opts)
+    expect(npm.bottom).toBe(server.bottom)
+    expect(npm.maxHeight).toBe(server.maxHeight)
+    expect(npm.opensBelow).toBe(server.opensBelow)
+  })
+})
+
+// ─── BLOCKER 6: Safe-area handling ────────────────────────────────────────
+
+describe('BLOCKER 6 — safe-area in geometry computation', () => {
+  test('Launcher bottom includes safeAreaBottom', () => {
+    const r = computeLauncherPosition({
+      anchor: 'bottom-end', offsetX: 0, offsetY: 0, dir: 'ltr',
+      viewportWidth: 1000, viewportHeight: 800, launcherWidth: 52, launcherHeight: 52,
+      safeAreaBottom: 34, baseMargin: 20,
+    })
+    expect(r.bottom).toBe(54) // baseMargin + safeAreaBottom = 20 + 34
+  })
+
+  test('Launcher bottom with offsetY + safeAreaBottom', () => {
+    const r = computeLauncherPosition({
+      anchor: 'bottom-end', offsetX: 0, offsetY: 100, dir: 'ltr',
+      viewportWidth: 1000, viewportHeight: 800, launcherWidth: 52, launcherHeight: 52,
+      safeAreaBottom: 34, baseMargin: 20,
+    })
+    expect(r.bottom).toBe(154) // baseMargin + offsetY + safeAreaBottom = 20 + 100 + 34
+  })
+
+  test('Launcher clamped above safeAreaBottom when offsetY is very negative', () => {
+    const r = computeLauncherPosition({
+      anchor: 'bottom-end', offsetX: 0, offsetY: -1000, dir: 'ltr',
+      viewportWidth: 1000, viewportHeight: 800, launcherWidth: 52, launcherHeight: 52,
+      safeAreaBottom: 34, baseMargin: 20,
+    })
+    expect(r.bottom).toBe(34) // clamped to safeAreaBottom (minBottom)
+  })
+
+  test('safeAreaBottom=0 → same as no safe-area (desktop)', () => {
+    const r0 = computeLauncherPosition({
+      anchor: 'bottom-end', offsetX: 0, offsetY: 0, dir: 'ltr',
+      viewportWidth: 1000, viewportHeight: 800, launcherWidth: 52, launcherHeight: 52,
+      safeAreaBottom: 0, baseMargin: 20,
+    })
+    expect(r0.bottom).toBe(20) // just baseMargin
+  })
+
+  test('Panel vertical position respects safeAreaBottom', () => {
+    const { computePanelVerticalPosition } = require('../../src/lib/widget/positioning-geometry')
+    // With safeAreaBottom=34, the available space is reduced.
+    const r = computePanelVerticalPosition({
+      rootBottom: 20, launcherHeight: 52, viewportHeight: 800,
+      panelGap: 12, panelPreferredHeight: 500, safeAreaBottom: 34,
+    })
+    // spaceAbove = 800 - 20 - 52 - 34 = 694 → fits 500+12=512.
+    expect(r.opensBelow).toBe(false)
+    expect(r.maxHeight).toBe(500)
+  })
+
+  test('Panel clamped when safeAreaBottom consumes viewport', () => {
+    const { computePanelVerticalPosition } = require('../../src/lib/widget/positioning-geometry')
+    // viewportHeight=200, safeAreaBottom=80 → usable = 200 - 160 = 40.
+    // panelPreferredHeight=500 → clamped to max(120, min(500, 40-24)) = max(120, 16) = 120.
+    const r = computePanelVerticalPosition({
+      rootBottom: 20, launcherHeight: 52, viewportHeight: 200,
+      panelGap: 12, panelPreferredHeight: 500, safeAreaBottom: 80,
+    })
+    expect(r.maxHeight).toBeGreaterThanOrEqual(120) // minimum
   })
 })

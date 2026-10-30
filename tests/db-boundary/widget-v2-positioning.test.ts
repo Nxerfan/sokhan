@@ -361,4 +361,48 @@ describe('Widget V2 Positioning — DB storage + effective resolution', () => {
 
     await globalDb.widgetConfig.delete({ where: { id: wc.id } })
   })
+
+  test('BLOCKER 4: V1 anchor preserved on first offset-only V2 edit', async () => {
+    // Store a WidgetConfig with V1 position = bottom-start, no V2.
+    const wc = await globalDb.widgetConfig.create({
+      data: {
+        tenantId,
+        accentColor: '#E09A2B',
+        launcherShape: 'tab',
+        position: 'bottom-start', // V1 anchor
+        greetingTexts: { fa: 'سلام', en: 'Hi' },
+        accessMode: 'verified_visitor',
+        policyVersion: 1,
+        // appearanceV2 = null (no V2 yet)
+      },
+      select: { id: true, appearanceV2: true, position: true },
+    })
+
+    // First V2 edit is offset-only (no anchor in the patch).
+    const patch: PositioningPatchData = {
+      hasAny: true,
+      desktop: { offsetX: 100, hasFields: true },
+    }
+    // Pass the V1 position so the merge preserves it.
+    const merged = mergePositioningPatch(wc.appearanceV2, patch, wc.position)
+
+    await globalDb.widgetConfig.update({
+      where: { id: wc.id },
+      data: { appearanceV2: merged as unknown as Prisma.InputJsonValue },
+    })
+
+    const updated = await globalDb.widgetConfig.findUnique({
+      where: { id: wc.id },
+      select: { appearanceV2: true, position: true },
+    })
+
+    const parsed = parseAppearanceV2(updated!.appearanceV2)
+    // The anchor must be bottom-start (from V1), NOT bottom-end.
+    expect(parsed!.desktop?.positioning?.anchor).toBe('bottom-start')
+    expect(parsed!.desktop?.positioning?.offsetX).toBe(100)
+    // V1 position field unchanged.
+    expect(updated!.position).toBe('bottom-start')
+
+    await globalDb.widgetConfig.delete({ where: { id: wc.id } })
+  })
 })

@@ -34,6 +34,7 @@ export type PositioningValidationResult =
 
 /** Error codes for positioning PATCH validation. */
 export type PositioningErrorCode =
+  | 'positioning_not_authorized'     // null entitlements or presetPositioning false
   | 'positioning_not_object'
   | 'positioning_device_not_object'
   | 'positioning_anchor_missing'
@@ -86,6 +87,13 @@ export function validatePositioningPatch(
   body: PositioningPatchBody,
   entitlements: Readonly<WidgetEntitlements> | null,
 ): PositioningValidationResult {
+  // FAIL CLOSED: unknown plans (null entitlements) or plans without
+  // preset positioning capability cannot write positioning at all.
+  // This is the server-authoritative gate — no client-supplied plan info.
+  if (!entitlements || !entitlements.presetPositioning) {
+    return { ok: false, code: 'positioning_not_authorized' }
+  }
+
   if (body.positioning === undefined || body.positioning === null) {
     return { ok: false, code: 'positioning_no_fields' }
   }
@@ -195,15 +203,26 @@ export function validatePositioningPatch(
  *   - Editing desktop does NOT reset mobile (or vice versa).
  *   - Editing anchor does NOT reset offsets (or vice versa).
  *   - Paid offsets are preserved when Free edits only the anchor.
+ *   - When creating V2 positioning for the first time (no existing V2 for
+ *     the device), the anchor defaults to the stored V1 `position` — NOT
+ *     a hardcoded `bottom-end`. This preserves the historical V1 anchor
+ *     when the first V2 edit is offset-only.
  *
  * The merge reads the existing V2 (parsed strictly), applies the patch
  * to the specified device/fields, and returns the new canonical V2 object.
+ *
+ * `v1Position` is the stored V1 `position` field ('bottom-start' | 'bottom-end'
+ * | other). It is used as the default anchor when creating new V2 positioning
+ * for a device that has no existing V2 positioning. This ensures the first
+ * offset-only V2 edit preserves the V1 anchor rather than silently
+ * introducing `bottom-end`.
  *
  * Returns the new appearanceV2 object (always valid, always canonical).
  */
 export function mergePositioningPatch(
   existingAppearanceV2: unknown,
   patch: PositioningPatchData,
+  v1Position?: string | null,
 ): AppearanceV2 {
   // Parse existing V2 (null if absent/malformed → start fresh).
   const existing = parseAppearanceV2(existingAppearanceV2)
@@ -214,6 +233,11 @@ export function mergePositioningPatch(
     mobile: {},
   }
 
+  // Derive the V1 anchor fallback (preserves historical V1 position).
+  const v1Anchor: PositioningAnchor = v1Position === 'bottom-start'
+    ? 'bottom-start'
+    : 'bottom-end' // bottom-end + unknown → bottom-end (canonical default)
+
   // Ensure desktop/mobile objects exist.
   const desktop = { ...(base.desktop ?? {}) }
   const mobile = { ...(base.mobile ?? {}) }
@@ -221,9 +245,12 @@ export function mergePositioningPatch(
   // Apply desktop patch.
   if (patch.desktop) {
     const existingPos = desktop.positioning
+    // If no existing positioning, default the anchor to the V1 position
+    // (NOT a hardcoded bottom-end). This preserves the historical V1
+    // anchor when the first V2 edit is offset-only.
     const newPos: DevicePositioning = existingPos
       ? { ...existingPos }
-      : { anchor: 'bottom-end' } // default anchor if none exists
+      : { anchor: v1Anchor }
 
     if (patch.desktop.anchor !== undefined) newPos.anchor = patch.desktop.anchor
     if (patch.desktop.offsetX !== undefined) newPos.offsetX = patch.desktop.offsetX
@@ -237,7 +264,7 @@ export function mergePositioningPatch(
     const existingPos = mobile.positioning
     const newPos: DevicePositioning = existingPos
       ? { ...existingPos }
-      : { anchor: 'bottom-end' }
+      : { anchor: v1Anchor }
 
     if (patch.mobile.anchor !== undefined) newPos.anchor = patch.mobile.anchor
     if (patch.mobile.offsetX !== undefined) newPos.offsetX = patch.mobile.offsetX
@@ -279,6 +306,9 @@ const OTHER_CUSTOMIZATION_KEYS = new Set([
   'defaultLocale',
 ])
 
+/** All recognized top-level PATCH fields (customization + positioning). */
+const ALL_RECOGNIZED_KEYS = new Set([...OTHER_CUSTOMIZATION_KEYS, 'positioning'])
+
 /**
  * Check if the PATCH body contains any non-positioning customization fields.
  */
@@ -294,4 +324,16 @@ export function hasOtherCustomizationFields(body: Record<string, unknown>): bool
  */
 export function hasPositioningField(body: Record<string, unknown>): boolean {
   return body.positioning !== undefined
+}
+
+/**
+ * Check if the PATCH body contains any UNRECOGNIZED top-level fields
+ * (not in the customization set + not `positioning`). Unrecognized fields
+ * are rejected to prevent silent acceptance of unsupported payloads.
+ */
+export function hasUnrecognizedFields(body: Record<string, unknown>): boolean {
+  for (const key of Object.keys(body)) {
+    if (!ALL_RECOGNIZED_KEYS.has(key)) return true
+  }
+  return false
 }

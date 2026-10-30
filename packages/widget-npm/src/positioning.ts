@@ -61,6 +61,49 @@ export interface LauncherPositionOutput {
   panelSide: 'left' | 'right' | 'center'
 }
 
+export interface PanelVerticalInput {
+  rootBottom: number
+  launcherHeight: number
+  viewportHeight: number
+  panelGap: number
+  panelPreferredHeight: number
+  safeAreaBottom: number
+}
+
+export interface PanelVerticalOutput {
+  bottom: number
+  maxHeight: number
+  opensBelow: boolean
+}
+
+export function computePanelVerticalPosition(opts: PanelVerticalInput): PanelVerticalOutput {
+  const { rootBottom, launcherHeight, viewportHeight, panelGap, panelPreferredHeight, safeAreaBottom } = opts
+
+  const spaceAbove = Math.max(0, viewportHeight - rootBottom - launcherHeight - safeAreaBottom)
+  const spaceBelow = Math.max(0, rootBottom - safeAreaBottom)
+
+  const viewportClampedHeight = Math.max(120, Math.min(
+    panelPreferredHeight,
+    viewportHeight - safeAreaBottom * 2 - panelGap * 2,
+  ))
+
+  if (spaceAbove >= viewportClampedHeight + panelGap) {
+    return { bottom: launcherHeight + panelGap, maxHeight: viewportClampedHeight, opensBelow: false }
+  }
+
+  if (spaceBelow >= viewportClampedHeight + panelGap) {
+    return { bottom: -(viewportClampedHeight + panelGap), maxHeight: viewportClampedHeight, opensBelow: true }
+  }
+
+  if (spaceAbove >= spaceBelow) {
+    const clampedHeight = Math.max(120, spaceAbove - panelGap)
+    return { bottom: launcherHeight + panelGap, maxHeight: clampedHeight, opensBelow: false }
+  } else {
+    const clampedHeight = Math.max(120, spaceBelow - panelGap)
+    return { bottom: -(clampedHeight + panelGap), maxHeight: clampedHeight, opensBelow: true }
+  }
+}
+
 export function computeLauncherPosition(opts: LauncherPositionInput): LauncherPositionOutput {
   const {
     anchor,
@@ -117,17 +160,21 @@ export function offsetXFromAbsoluteLeft(
   launcherWidth: number,
   baseMargin: number,
 ): number {
+  // Compute the same baseLeft as computeLauncherPosition.
+  let baseLeft: number
   if (anchor === 'bottom-center') {
-    const baseLeft = (viewportWidth - launcherWidth) / 2
-    return absoluteLeft - baseLeft
-  }
-  const isStart = anchor === 'bottom-start'
-  const startIsLeft = dir === 'ltr' ? isStart : !isStart
-  if (startIsLeft) {
-    return absoluteLeft - baseMargin
+    baseLeft = (viewportWidth - launcherWidth) / 2
   } else {
-    return (viewportWidth - launcherWidth - baseMargin) - absoluteLeft
+    const isStart = anchor === 'bottom-start'
+    const startIsLeft = dir === 'ltr' ? isStart : !isStart
+    if (startIsLeft) {
+      baseLeft = baseMargin
+    } else {
+      baseLeft = viewportWidth - launcherWidth - baseMargin
+    }
   }
+  // Inverse: offsetX = absoluteLeft - baseLeft (same for all anchors).
+  return absoluteLeft - baseLeft
 }
 
 export function isValidOffset(value: unknown): value is number {
