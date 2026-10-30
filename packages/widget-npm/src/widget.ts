@@ -2117,6 +2117,13 @@ export class SukhanWidget implements SukhanInstance {
     this.root.style.bottom = result.bottom + 'px'
     this.root.style.right = ''
 
+    // Diagnostic data attributes — prove the widget received + applied
+    // V2 positioning (verifiable by browser tests without timing-sensitive
+    // CSS checks on root.style.left).
+    this.root.setAttribute('data-sk-anchor', pos.anchor)
+    this.root.setAttribute('data-sk-offset-x', String(pos.offsetX || 0))
+    this.root.setAttribute('data-sk-offset-y', String(pos.offsetY || 0))
+
     // Store panel side for open/close transform.
     this.state.panelSide = result.panelSide
 

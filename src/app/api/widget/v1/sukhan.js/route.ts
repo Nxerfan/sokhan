@@ -169,6 +169,11 @@ ${POSITIONING_FN_SOURCE}
     state.rootEl.style.left = result.left + 'px';
     state.rootEl.style.bottom = result.bottom + 'px';
     state.rootEl.style.right = '';
+    // Diagnostic data attributes — prove the widget received + applied
+    // V2 positioning (verifiable by browser tests).
+    state.rootEl.setAttribute('data-sk-anchor', pos.anchor);
+    state.rootEl.setAttribute('data-sk-offset-x', String(pos.offsetX || 0));
+    state.rootEl.setAttribute('data-sk-offset-y', String(pos.offsetY || 0));
     state.panelSide = result.panelSide;
     applyPanelSide(result.panelSide);
     // Apply panel vertical containment — keep the panel inside the

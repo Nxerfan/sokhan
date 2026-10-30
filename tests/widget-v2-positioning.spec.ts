@@ -137,13 +137,29 @@ test.describe('Widget V2 Positioning — browser regression', () => {
     await customerPage.goto(CUSTOMER_ORIGIN)
     await customerPage.waitForLoadState('networkidle')
     await customerPage.waitForSelector('.sk-root', { timeout: 15_000 })
-    // The root element should be positioned (not at the default bottom-end).
-    const rootLeft = await customerPage.evaluate(() => {
+    // Wait for positioning to be applied (data-sk-anchor attribute set).
+    await customerPage.waitForFunction(() => {
       const root = document.querySelector('.sk-root') as HTMLElement
-      return root ? parseInt(root.style.left || '0', 10) : -1
+      return root && root.getAttribute('data-sk-anchor') !== null
+    }, { timeout: 15_000 })
+    // Verify the widget received + applied the V2 positioning.
+    const widgetPos = await customerPage.evaluate(() => {
+      const root = document.querySelector('.sk-root') as HTMLElement
+      return {
+        anchor: root?.getAttribute('data-sk-anchor'),
+        offsetX: root?.getAttribute('data-sk-offset-x'),
+        left: root ? parseInt(root.style.left || '0', 10) : -1,
+        vw: window.innerWidth,
+      }
     })
-    // bottom-center in a ~viewport width → left should be near center.
-    expect(rootLeft).toBeGreaterThan(0)
+    // Desktop: bottom-center. Mobile: bottom-start.
+    // On desktop (default in CI), anchor should be bottom-center.
+    expect(['bottom-center', 'bottom-start']).toContain(widgetPos.anchor)
+    // For bottom-center: left should be roughly centered.
+    if (widgetPos.anchor === 'bottom-center') {
+      expect(widgetPos.left).toBeGreaterThan(widgetPos.vw * 0.3)
+      expect(widgetPos.left).toBeLessThan(widgetPos.vw * 0.7)
+    }
 
     await ctx.close()
   })
@@ -276,16 +292,22 @@ test.describe('Widget V2 Positioning — browser regression', () => {
     expect(browserConfig.hasPositioning).toBe(true)
     expect(browserConfig.desktopOffsetX).toBe(100)
 
-    // Verify the widget rendered (root element exists with positioning applied).
-    // The public config + browser config checks above prove the positioning
-    // data is correctly stored and served. The rendered offset value is
-    // additionally verified by the drag tests (BLOCKER 2/3) which directly
-    // manipulate the offset and verify the preview/input synchronization.
-    const rootLeft = await customerPage.evaluate(() => {
+    // Verify the widget received + applied V2 positioning via diagnostic
+    // data attributes on the root element. This proves the widget script
+    // resolved the positioning from the config and applied it.
+    const widgetPos = await customerPage.evaluate(() => {
       const root = document.querySelector('.sk-root') as HTMLElement
-      return root ? parseInt(root.style.left || '0', 10) : -1
+      return {
+        anchor: root?.getAttribute('data-sk-anchor'),
+        offsetX: root?.getAttribute('data-sk-offset-x'),
+        offsetY: root?.getAttribute('data-sk-offset-y'),
+        left: root ? parseInt(root.style.left || '0', 10) : -1,
+      }
     })
-    expect(rootLeft).toBeGreaterThanOrEqual(0) // widget rendered with positioning
+    expect(widgetPos.anchor).toBe('bottom-start')
+    expect(widgetPos.offsetX).toBe('100')
+    // The rendered left must reflect the offset: baseMargin(20) + offsetX(100) = 120.
+    expect(widgetPos.left).toBeGreaterThan(100)
 
     await ctx.close()
   })
@@ -678,34 +700,143 @@ test.describe('Widget V2 Positioning — browser regression', () => {
     await customerPage.goto(CUSTOMER_ORIGIN)
     await customerPage.waitForLoadState('networkidle')
     await customerPage.waitForSelector('.sk-root', { timeout: 15_000 })
-    // Wait for positioning to be applied.
+    // Wait for positioning to be applied (data-sk-anchor attribute set).
     await customerPage.waitForFunction(() => {
       const root = document.querySelector('.sk-root') as HTMLElement
-      return root && root.style.left !== ''
+      return root && root.getAttribute('data-sk-anchor') !== null
     }, { timeout: 15_000 })
-    await customerPage.waitForTimeout(1000)
+    await customerPage.waitForTimeout(500)
 
-    // Verify the browser-fetched config has V2 positioning (bottom-center).
-    const browserConfig = await customerPage.evaluate(async (slug: string) => {
-      const r = await fetch(`http://127.0.0.1:81/api/widget/${slug}/config`, { cache: 'no-store' })
-      const c = await r.json()
-      return {
-        hasPositioning: !!c.positioning,
-        desktopAnchor: c.positioning?.desktop?.anchor,
-      }
-    }, slug)
-    expect(browserConfig.hasPositioning).toBe(true)
-    expect(browserConfig.desktopAnchor).toBe('bottom-center')
-
-    // Verify the widget rendered with positioning applied.
-    const info = await customerPage.evaluate(() => {
+    // Verify the widget received + applied V2 positioning via diagnostic attrs.
+    const widgetPos = await customerPage.evaluate(() => {
       const root = document.querySelector('.sk-root') as HTMLElement
       return {
+        anchor: root?.getAttribute('data-sk-anchor'),
+        offsetX: root?.getAttribute('data-sk-offset-x'),
         left: root ? parseInt(root.style.left || '0', 10) : -1,
         vw: window.innerWidth,
       }
     })
-    expect(info.left).toBeGreaterThanOrEqual(0) // widget rendered with positioning
+    // bottom-center anchor must be applied.
+    expect(widgetPos.anchor).toBe('bottom-center')
+    // Rendered left must be roughly centered (30%-70% of viewport width).
+    expect(widgetPos.left).toBeGreaterThan(widgetPos.vw * 0.3)
+    expect(widgetPos.left).toBeLessThan(widgetPos.vw * 0.7)
+
+    await ctx.close()
+  })
+
+  test('BLOCKER 7b: v1-script surface renders V2 positioning (bottom-center)', async ({ browser }) => {
+    test.setTimeout(120_000)
+    const { email, workspace } = creds('v1-surface')
+    const ctx = await browser.newContext()
+    const page = await ctx.newPage()
+    const slug = await signupAndGetSlug(page, email, workspace)
+    currentSlug = slug
+
+    await devSetPlan(page, 'pro')
+    await page.goto(BASE)
+    await page.waitForLoadState('networkidle')
+
+    const csrfRes = await page.request.get(`${DASHBOARD}/api/auth/csrf`)
+    const { csrfToken } = await csrfRes.json()
+    await page.request.post(`${DASHBOARD}/api/auth/callback/credentials`, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      data: `email=${email}&password=password123&csrfToken=${csrfToken}&json=true`,
+    })
+
+    // Set positioning to bottom-center.
+    await page.request.patch(`${BASE}/api/widget-config`, {
+      data: { positioning: { desktop: { anchor: 'bottom-center' } } },
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+    // Serve a customer page that loads the v1-script (data-api-key attribute).
+    const v1CustomerServer = createServer((req, res) => {
+      const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>V1 Customer</title></head><body><h1>V1 Customer</h1><script async defer src="${SUKHAN_ORIGIN}/api/widget/v1/sukhan.js" data-api-key="${slug}"></script></body></html>`
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+      res.end(html)
+    })
+    const v1Port = 8097
+    await new Promise<void>((resolve) => v1CustomerServer.listen(v1Port, '127.0.0.1', resolve))
+
+    try {
+      const customerPage = await ctx.newPage()
+      await customerPage.goto(`http://127.0.0.1:${v1Port}`)
+      await customerPage.waitForLoadState('networkidle')
+      await customerPage.waitForSelector('.sk-root', { timeout: 15_000 })
+      // Wait for positioning to be applied.
+      await customerPage.waitForFunction(() => {
+        const root = document.querySelector('.sk-root') as HTMLElement
+        return root && root.getAttribute('data-sk-anchor') !== null
+      }, { timeout: 15_000 })
+      await customerPage.waitForTimeout(500)
+
+      const widgetPos = await customerPage.evaluate(() => {
+        const root = document.querySelector('.sk-root') as HTMLElement
+        return {
+          anchor: root?.getAttribute('data-sk-anchor'),
+          left: root ? parseInt(root.style.left || '0', 10) : -1,
+          vw: window.innerWidth,
+        }
+      })
+      // v1-script must apply the V2 positioning (bottom-center).
+      expect(widgetPos.anchor).toBe('bottom-center')
+      expect(widgetPos.left).toBeGreaterThan(widgetPos.vw * 0.3)
+      expect(widgetPos.left).toBeLessThan(widgetPos.vw * 0.7)
+    } finally {
+      await new Promise<void>((resolve) => v1CustomerServer.close(() => resolve()))
+    }
+
+    await ctx.close()
+  })
+
+  test('BLOCKER 7c: Reset → Save → Reload preserves positioning', async ({ browser }) => {
+    test.setTimeout(120_000)
+    const { email, workspace } = creds('reset-save')
+    const ctx = await browser.newContext()
+    const page = await ctx.newPage()
+    const slug = await signupAndGetSlug(page, email, workspace)
+    currentSlug = slug
+
+    await devSetPlan(page, 'pro')
+    await page.goto(BASE)
+    await page.waitForLoadState('networkidle')
+    await openCustomizationTab(page)
+
+    // Set bottom-center + offsetX 100.
+    await page.getByTestId('positioning-device-desktop').click()
+    await page.getByTestId('positioning-anchor-bottom-end').click()
+    await page.getByTestId('positioning-offsetX-input').fill('100')
+    await page.getByTestId('positioning-save').click()
+    await expect(page.getByText(/موقعیت ذخیره شد|Positioning saved/)).toBeVisible({ timeout: 10_000 })
+
+    // Reload + verify.
+    await page.reload()
+    await page.waitForLoadState('networkidle')
+    await openCustomizationTab(page)
+    await page.getByTestId('positioning-device-desktop').click()
+    await expect(page.getByTestId('positioning-offsetX-input')).toHaveValue('100')
+
+    // Reset offsets to 0.
+    await page.getByTestId('positioning-reset').click()
+    await expect(page.getByTestId('positioning-offsetX-input')).toHaveValue('0')
+
+    // Save the reset.
+    await page.getByTestId('positioning-save').click()
+    await expect(page.getByText(/موقعیت ذخیره شد|Positioning saved/)).toBeVisible({ timeout: 10_000 })
+
+    // Reload + verify reset persisted.
+    await page.reload()
+    await page.waitForLoadState('networkidle')
+    await openCustomizationTab(page)
+    await page.getByTestId('positioning-device-desktop').click()
+    await expect(page.getByTestId('positioning-offsetX-input')).toHaveValue('0')
+
+    // Verify public config reflects the reset.
+    const configRes = await page.request.get(`${SUKHAN_ORIGIN}/api/widget/${slug}/config`)
+    const config = await configRes.json()
+    expect(config.positioning.desktop.offsetX).toBe(0)
 
     await ctx.close()
   })
