@@ -591,9 +591,11 @@ async function connectAndWait(
       ;(window as unknown as Record<string, unknown>)[handle] = socket
 
       let settled = false
+      let timer: ReturnType<typeof setTimeout> | undefined
       const done = (r: { connected: boolean; error?: string }) => {
         if (settled) return
         settled = true
+        if (timer) clearTimeout(timer)
         resolve(r)
       }
 
@@ -605,15 +607,12 @@ async function connectAndWait(
       })
 
       // Safety-net timeout.
-      const timer = setTimeout(() => {
+      timer = setTimeout(() => {
         done({ connected: false, error: 'timeout' })
       }, timeoutMs)
 
       // NOW connect — listeners are guaranteed to be in place.
       socket.connect()
-
-      // Clear the timeout when the promise resolves (cleanup).
-      void timer
     })
   }, { token, handle, timeoutMs })
 

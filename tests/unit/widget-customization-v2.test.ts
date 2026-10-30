@@ -289,8 +289,6 @@ describe('Appearance V2 — strict parsing (canonical, no unknown keys)', () => 
       get() { return {} },
       enumerable: true,
     })
-    // Even though the getter returns a valid empty object, accessor
-    // properties must be rejected — only data properties accepted.
     expect(parseAppearanceV2(obj)).toBeNull()
   })
   test('accessor property for mobile → null', () => {
@@ -300,6 +298,45 @@ describe('Appearance V2 — strict parsing (canonical, no unknown keys)', () => 
       enumerable: true,
     })
     expect(parseAppearanceV2(obj)).toBeNull()
+  })
+
+  // ── Strict parser: Proxy with throwing get trap → null (does not escape) ──
+  test('Proxy with throwing get trap on version → null (descriptor read, get trap bypassed)', () => {
+    const target = { version: 1, desktop: {}, mobile: {} }
+    const proxy = new Proxy(target, {
+      get() { throw new Error('proxy-boom') },
+    })
+    // getOwnPropertyDescriptor returns a data descriptor with value=1,
+    // but the get trap throws. The parser reads desc.value (bypasses get),
+    // so it should succeed — OR if the Proxy's getOwnPropertyDescriptor
+    // trap also throws, it returns null. Either way, it must NOT throw.
+    expect(() => parseAppearanceV2(proxy)).not.toThrow()
+    // The Proxy's getOwnPropertyDescriptor returns the target's descriptor
+    // (value: 1), which the parser reads directly. So this should parse
+    // successfully (the get trap is never triggered).
+    const result = parseAppearanceV2(proxy)
+    expect(result).not.toBeNull()
+    expect(result!.version).toBe(1)
+  })
+
+  test('Proxy with throwing get trap that also blocks getOwnPropertyDescriptor → null', () => {
+    const proxy = new Proxy({ version: 1 }, {
+      get() { throw new Error('proxy-boom') },
+      getOwnPropertyDescriptor() { throw new Error('desc-boom') },
+    })
+    expect(() => parseAppearanceV2(proxy)).not.toThrow()
+    expect(parseAppearanceV2(proxy)).toBeNull()
+  })
+
+  // ── Strict parser: revoked Proxy → null (does not throw) ────────────
+  test('revoked Proxy → null (does not throw)', () => {
+    const revocable = Proxy.revocable({ version: 1, desktop: {}, mobile: {} }, {})
+    revocable.revoke()
+    // After revocation, ANY trap throws TypeError. The parser must catch
+    // all of them (isPlainObject, safeOwnKeys, getOwnDataDescriptor) and
+    // return null.
+    expect(() => parseAppearanceV2(revocable.proxy)).not.toThrow()
+    expect(parseAppearanceV2(revocable.proxy)).toBeNull()
   })
 })
 

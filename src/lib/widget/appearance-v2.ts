@@ -94,12 +94,14 @@ const ALLOWED_TOP_LEVEL_KEYS = new Set(['version', 'desktop', 'mobile'])
  * class instances, arrays, and primitives.
  */
 function isPlainObject(value: unknown): boolean {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  if (typeof value !== 'object' || value === null) return false
   try {
+    // Array.isArray can throw for a revoked Proxy — guard inside try/catch.
+    if (Array.isArray(value)) return false
     const proto = Object.getPrototypeOf(value)
     return proto === Object.prototype || proto === null
   } catch {
-    return false // getPrototypeOf can throw for certain exotic objects
+    return false // getPrototypeOf / isArray can throw for exotic objects
   }
 }
 
@@ -119,20 +121,25 @@ function safeOwnKeys(obj: object): (string | symbol)[] | null {
 }
 
 /**
- * Check if a property is an own DATA property (not an accessor/getter).
- * Returns true if the property exists as a data descriptor (has `value`,
- * not `get`/`set`). Returns false for accessor properties, inherited
- * properties, or missing properties. Wraps in try/catch for safety.
+ * Get the own DATA property descriptor for a key. Returns the descriptor
+ * (with `value`) if the property exists as a data property (not an
+ * accessor). Returns null for accessor properties, inherited properties,
+ * missing properties, or if reflection throws.
+ *
+ * By reading from the descriptor's `value` field instead of direct property
+ * access, callers avoid triggering a Proxy `get` trap that could throw even
+ * after getOwnPropertyDescriptor returns a valid data descriptor.
  */
-function isOwnDataProperty(obj: object, key: string): boolean {
+function getOwnDataDescriptor(obj: object, key: string): { value: unknown } | null {
   try {
     const desc = Object.getOwnPropertyDescriptor(obj, key)
-    if (!desc) return false // not an own property
-    // Must be a data descriptor (has 'value' or 'writable'), not an accessor
-    // (has 'get' or 'set'). This rejects getter/setter properties.
-    return 'value' in desc
+    if (!desc) return null // not an own property
+    // Must be a data descriptor (has 'value'), not an accessor (has 'get'/'set').
+    if (!('value' in desc)) return null
+    // Return the descriptor so the caller reads desc.value (bypasses get trap).
+    return desc as { value: unknown }
   } catch {
-    return false // reflection threw → treat as not a data property
+    return null // reflection threw → treat as not a data property
   }
 }
 
@@ -154,29 +161,41 @@ export function parseAppearanceV2(value: unknown): AppearanceV2 | null {
   }
 
   // version must be an OWN DATA property (not an accessor/getter) + exactly 1.
-  // isOwnDataProperty uses Object.getOwnPropertyDescriptor to verify it's
-  // a data descriptor (has 'value', not 'get'/'set'). This rejects accessor
-  // properties that could throw or return arbitrary values without actually
-  // holding a real value.
-  if (!isOwnDataProperty(value, 'version')) return null
-  // Safe to read the value — it's a data property, not a getter.
-  const versionValue = (value as Record<string, unknown>).version
+  // getOwnDataDescriptor returns the descriptor with `value` so we read
+  // desc.value instead of direct property access — this bypasses a Proxy
+  // `get` trap that could throw even after getOwnPropertyDescriptor succeeds.
+  const versionDesc = getOwnDataDescriptor(value, 'version')
+  if (!versionDesc) return null // not an own data property → reject
+  const versionValue = versionDesc.value
   if (typeof versionValue !== 'number' || !Number.isInteger(versionValue) || versionValue !== APPEARANCE_V2_VERSION) {
     return null
   }
 
   // desktop / mobile: if present, must be plain objects with NO unexpected
-  // keys (including Symbol + non-enumerable). Also verify they're data
-  // properties (not accessors) before reading.
+  // keys. Read values from descriptors to bypass Proxy get traps.
   let desktopValue: unknown = undefined
   let mobileValue: unknown = undefined
-  if (ALLOWED_TOP_LEVEL_KEYS.has('desktop') && Object.prototype.hasOwnProperty.call(value, 'desktop')) {
-    if (!isOwnDataProperty(value, 'desktop')) return null // accessor → reject
-    desktopValue = (value as Record<string, unknown>).desktop
+  const desktopDesc = getOwnDataDescriptor(value, 'desktop')
+  if (desktopDesc !== null) {
+    desktopValue = desktopDesc.value
+  } else {
+    // desktop is either absent (fine) or an accessor/non-own (reject).
+    // Check if the key exists at all — if it does but isn't a data prop, reject.
+    try {
+      if (Object.prototype.hasOwnProperty.call(value, 'desktop')) return null
+    } catch {
+      return null // hasOwnProperty threw on exotic object → fail closed
+    }
   }
-  if (ALLOWED_TOP_LEVEL_KEYS.has('mobile') && Object.prototype.hasOwnProperty.call(value, 'mobile')) {
-    if (!isOwnDataProperty(value, 'mobile')) return null // accessor → reject
-    mobileValue = (value as Record<string, unknown>).mobile
+  const mobileDesc = getOwnDataDescriptor(value, 'mobile')
+  if (mobileDesc !== null) {
+    mobileValue = mobileDesc.value
+  } else {
+    try {
+      if (Object.prototype.hasOwnProperty.call(value, 'mobile')) return null
+    } catch {
+      return null // hasOwnProperty threw → fail closed
+    }
   }
   const desktop = parseDeviceAppearance(desktopValue)
   if (desktop === undefined) return null // malformed → fail closed
