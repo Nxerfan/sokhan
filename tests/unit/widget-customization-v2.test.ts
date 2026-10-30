@@ -136,10 +136,13 @@ describe('Appearance V2 — strict parsing (canonical, no unknown keys)', () => 
     expect(parsed!.mobile).toEqual({})
   })
   test('array → null', () => { expect(parseAppearanceV2([1, 2])).toBeNull() })
-  test('string → null', () => { expect(parseAppearanceV2('{"version":1}')).toBeNull() })
+  test('number → null (malformed)', () => { expect(parseAppearanceV2(1)).toBeNull() })
+  test('string → null (malformed)', () => { expect(parseAppearanceV2('{"version":1}')).toBeNull() })
+  test('boolean → null', () => { expect(parseAppearanceV2(true)).toBeNull() })
   test('missing version → null', () => { expect(parseAppearanceV2({ desktop: {} })).toBeNull() })
   test('unknown version (2) → null', () => { expect(parseAppearanceV2({ version: 2 })).toBeNull() })
   test('version as string → null', () => { expect(parseAppearanceV2({ version: '1' })).toBeNull() })
+  test('fractional version → null (non-integer)', () => { expect(parseAppearanceV2({ version: 1.5 })).toBeNull() })
 
   // BLOCKER 2 regression: unexpected top-level keys must be rejected.
   test('unexpected top-level key → null', () => {
@@ -172,6 +175,65 @@ describe('Appearance V2 — strict parsing (canonical, no unknown keys)', () => 
     const parsed = parseAppearanceV2(input)!
     expect(parsed).not.toBe(input) // different reference
     expect(parsed.desktop).not.toBe(input.desktop) // canonical, not raw
+  })
+
+  // ── Strict parser: reject non-plain objects ──────────────────────────
+  test('Date object → null (non-plain)', () => {
+    expect(parseAppearanceV2(new Date())).toBeNull()
+  })
+  test('Map → null (non-plain)', () => {
+    expect(parseAppearanceV2(new Map())).toBeNull()
+  })
+  test('Set → null (non-plain)', () => {
+    expect(parseAppearanceV2(new Set())).toBeNull()
+  })
+  test('class instance → null (non-plain)', () => {
+    class FakeConfig { version = 1; desktop = {}; mobile = {} }
+    expect(parseAppearanceV2(new FakeConfig())).toBeNull()
+  })
+  test('Date as desktop value → null (non-plain device)', () => {
+    expect(parseAppearanceV2({ version: 1, desktop: new Date() })).toBeNull()
+  })
+
+  // ── Strict parser: reject inherited version ──────────────────────────
+  test('inherited version via prototype → null (must be own property)', () => {
+    const proto = { version: 1 }
+    const child = Object.create(proto)
+    child.desktop = {}
+    // child.version is inherited (not own) → must reject
+    expect(parseAppearanceV2(child)).toBeNull()
+  })
+
+  // ── Strict parser: Object.create(null) is a valid plain object ───────
+  test('Object.create(null) with own version → valid (null prototype is OK)', () => {
+    const obj = Object.create(null)
+    obj.version = 1
+    obj.desktop = {}
+    obj.mobile = {}
+    const parsed = parseAppearanceV2(obj)
+    expect(parsed).not.toBeNull()
+    expect(parsed!.version).toBe(1)
+  })
+
+  // ── Strict parser: getter that throws does NOT escape ────────────────
+  test('getter that throws → null (caught, does not escape)', () => {
+    const obj = {}
+    Object.defineProperty(obj, 'version', {
+      get() { throw new Error('boom') },
+      enumerable: true,
+    })
+    // The parser must catch this + return null, not throw.
+    expect(() => parseAppearanceV2(obj)).not.toThrow()
+    expect(parseAppearanceV2(obj)).toBeNull()
+  })
+  test('getter that throws on desktop keys → null (caught)', () => {
+    const obj = { version: 1 }
+    Object.defineProperty(obj, 'desktop', {
+      get() { throw new Error('boom') },
+      enumerable: true,
+    })
+    expect(() => parseAppearanceV2(obj)).not.toThrow()
+    expect(parseAppearanceV2(obj)).toBeNull()
   })
 })
 
@@ -244,6 +306,71 @@ describe('normalizeStoredAppearance — V1 backward compat (stored normalization
     const stored: StoredAppearance = { ...v1Stored, appearanceV2: { version: 1, unknown: 'field' } }
     const result = normalizeStoredAppearance(stored, getEntitlements('pro'))
     expect(result.appearanceV2).toBeNull()
+  })
+
+  // ── Restored lost regression coverage ────────────────────────────────
+
+  test('Stored config with appearanceV2 as a string → null (fail closed)', () => {
+    const stored: StoredAppearance = { ...v1Stored, appearanceV2: 'not-json-object' }
+    const result = normalizeStoredAppearance(stored, getEntitlements('pro'))
+    expect(result.appearanceV2).toBeNull()
+    expect(result.accentColor).toBe('#0066FF') // V1 still present
+  })
+
+  test('Full V1 flat-field preservation (all fields checked individually)', () => {
+    const fullStored: StoredAppearance = {
+      accentColor: '#FF0000',
+      launcherShape: 'pill',
+      position: 'bottom-start',
+      avatarUrl: 'https://example.com/a.png',
+      logoUrl: 'https://example.com/l.png',
+      greetingTexts: { fa: 'سلام', en: 'Hello' },
+      defaultLocale: 'en',
+    }
+    const result = normalizeStoredAppearance(fullStored, getEntitlements('pro'))
+    expect(result.accentColor).toBe('#FF0000')
+    expect(result.launcherShape).toBe('pill')
+    expect(result.position).toBe('bottom-start')
+    expect(result.avatarUrl).toBe('https://example.com/a.png')
+    expect(result.logoUrl).toBe('https://example.com/l.png')
+    expect(result.greetingTexts).toEqual({ fa: 'سلام', en: 'Hello' })
+    expect(result.defaultLocale).toBe('en')
+    expect(result.appearanceV2).toBeNull()
+  })
+})
+
+// ─── Entitlement distinctions (restored detailed comparisons) ───────────
+
+describe('Entitlement distinctions — Free vs Pro detailed comparison', () => {
+  test('Free vs Pro have distinct capabilities across all key fields', () => {
+    const free = getEntitlements('free')!
+    const pro = getEntitlements('pro')!
+    // Every capability that differs between Free and Pro:
+    expect(free.precisePositioning).not.toBe(pro.precisePositioning)
+    expect(free.customColors).not.toBe(pro.customColors)
+    expect(free.launcherSelection).not.toBe(pro.launcherSelection)
+    expect(free.messagePreview).not.toBe(pro.messagePreview)
+    expect(free.attentionAnimations).not.toBe(pro.attentionAnimations)
+    expect(free.quickReplies).not.toBe(pro.quickReplies)
+    expect(free.preChatForm).not.toBe(pro.preChatForm)
+    expect(free.pageVisibility).not.toBe(pro.pageVisibility)
+    expect(free.alternativeContactButtons).not.toBe(pro.alternativeContactButtons)
+    expect(free.smartAvoidance).not.toBe(pro.smartAvoidance)
+    expect(free.contextChat).not.toBe(pro.contextChat)
+    expect(free.brandingRemoval).not.toBe(pro.brandingRemoval)
+    expect(free.legacyCustomizationUnlocked).not.toBe(pro.legacyCustomizationUnlocked)
+  })
+
+  test('The entitlement model is additive — does NOT change the PATCH gate behavior', () => {
+    // The existing PATCH gate uses !plan.customization. The entitlement
+    // model's isLegacyCustomizationUnlocked mirrors this for backward compat.
+    // Phase 1 does NOT wire the entitlement model into the PATCH gate —
+    // the gate stays on the legacy boolean until later phases implement
+    // per-capability checks.
+    const free = getEntitlements('free')!
+    const pro = getEntitlements('pro')!
+    expect(free.legacyCustomizationUnlocked).toBe(false) // mirrors customization:false
+    expect(pro.legacyCustomizationUnlocked).toBe(true) // mirrors customization:true
   })
 })
 

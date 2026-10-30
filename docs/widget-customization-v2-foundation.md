@@ -174,17 +174,29 @@ interface AppearanceV2 {
 
 **Prisma migration:** add `appearanceV2 Json?` to `WidgetConfig`. Existing rows get `null` (V1 behavior preserved). No destructive rewrite. No identity/access changes.
 
-### 5.4 Shared resolution
+### 5.4 Stored appearance normalization (IMPLEMENTED)
 
 **File:** `src/lib/widget/appearance-resolver.ts` (NEW)
 
-A resolver that takes the stored config (flat fields + appearanceV2) + the plan entitlements → produces the effective appearance. Used by `getEffectiveWidgetConfig` (adapter) + the public config + eventually the widget runtime.
+**IMPORTANT:** The implemented function is `normalizeStoredAppearance()`, NOT an effective resolver. It normalizes the STORED config (V1 flat fields + parsed V2 field) + includes the entitlements reference. It does NOT enforce entitlements — it returns the stored V1 flat fields as-is regardless of the plan.
 
-Phase 1: the resolver is a thin adapter — if `appearanceV2` is null, it returns the existing flat-field behavior (backward compat). If `appearanceV2` is present, it parses + validates it. The resolver does NOT change visible behavior in Phase 1 (no new visual features).
+The production effective resolver remains `getEffectiveWidgetConfig()` in `src/lib/payments/free-plan.ts`, which uses the legacy `customization: boolean` gate. The normalization module is NOT yet integrated into the production runtime.
 
-### 5.5 Backward-compat adapter
+Phase 1: `normalizeStoredAppearance()` is a thin stored-config normalizer — if `appearanceV2` is null/absent/malformed, it returns the existing flat-field behavior (backward compat). If `appearanceV2` is present, it parses + validates it strictly. The normalization does NOT change visible behavior.
 
-`getEffectiveWidgetConfig` continues to work as-is for V1 behavior. The entitlement model + appearance V2 are additive — they don't change the current Free-locked / paid-unlocked behavior until later phases implement the actual V2 features.
+### 5.5 Backward-compat adapter (CURRENT STATE)
+
+`getEffectiveWidgetConfig()` continues to work as-is for V1 behavior — it is UNCHANGED. The entitlement model + appearance V2 are additive + NOT wired into any production route. The current Free-locked / paid-unlocked behavior is preserved via `isLegacyCustomizationUnlocked()` mirroring the existing `customization: boolean`.
+
+### 5.6 Future effective resolution (NOT YET IMPLEMENTED)
+
+A future `resolveEffectiveAppearance()` function (separate from `normalizeStoredAppearance()`) will:
+- Take the normalized stored appearance + entitlements.
+- Enforce per-capability entitlement restrictions (e.g., Free can only use preset colors).
+- Produce the effective appearance that the widget actually renders.
+- Replace the hardcoded Free defaults in `getEffectiveWidgetConfig()`.
+
+This is deferred to later phases when actual V2 customization features are implemented.
 
 ---
 
@@ -192,25 +204,27 @@ Phase 1: the resolver is a thin adapter — if `appearanceV2` is null, it return
 
 | Risk | Mitigation |
 |---|---|
-| Changing `getEffectiveWidgetConfig` breaks the public config / widget rendering | The resolver is a thin adapter; V1 behavior unchanged when `appearanceV2` is null. |
-| Migration corrupts existing configs | Additive `Json?` field; existing rows get null; no data rewrite. |
-| Entitlement model changes Free behavior prematurely | Phase 1 does NOT change the `customization: boolean` gating. The entitlement model is additive + not wired into the PATCH gate yet. |
-| NPM package depends on server-only modules | The appearance V2 model + resolver are pure TS (no Prisma/Next.js imports). |
+| Changing `getEffectiveWidgetConfig` breaks the public config / widget rendering | `getEffectiveWidgetConfig` is UNCHANGED. The normalization module (`normalizeStoredAppearance`) is NOT wired into any production route. |
+| Migration corrupts existing configs | Additive `Json?` field; existing rows get null; no data rewrite. The migration SQL is idempotent (`ADD COLUMN IF NOT EXISTS`). |
+| Entitlement model changes Free behavior prematurely | Phase 1 does NOT change the `customization: boolean` gating. The entitlement model is additive + not wired into the PATCH gate or `getEffectiveWidgetConfig`. |
+| NPM package depends on server-only modules | The appearance V2 model + normalization module are pure TS (no Prisma/Next.js imports). |
 | Test regressions | All existing tests preserved; new tests are additive. |
+| Strict parser accepts non-plain objects | The parser uses `isPlainObject()` (prototype check) + `safeOwnKeys()` (try/catch) + `hasOwnProperty` for own-property enforcement. Rejects Date, Map, Set, class instances, inherited properties, and getter exceptions. |
 
 ---
 
 ## 7. Acceptance criteria for Phase 1
 
-1. Entitlement model defined for Free/Pro/Max/Self-hosted; unknown plans fail closed.
-2. Appearance V2 model with strict parsing + defaults + backward compat.
-3. Additive migration (`appearanceV2 Json?`); existing rows preserved.
-4. Shared resolver (thin adapter, V1 behavior unchanged).
-5. Focused tests: entitlement differences, invalid plans, existing compat, new-workspace defaults, migration preservation, malformed input, no plan bypass, effective vs stored, no regression.
+1. Entitlement model defined for Free/Pro/Max/Self-hosted; unknown plans fail closed (Map-based, prototype-safe, frozen definitions).
+2. Appearance V2 model with strict parsing (plain-object enforcement, own-property `version`, unknown-key rejection, getter-safe, canonical output) + defaults + backward compat.
+3. Additive migration (`appearanceV2 Json?`); existing rows preserved (nullable, idempotent SQL).
+4. Stored normalization module (`normalizeStoredAppearance`) — clearly documented as STORED normalization, NOT effective resolution. NOT wired into production routes.
+5. Focused tests: entitlement differences, invalid/prototype plans, existing compat, new-workspace defaults, migration coexistence, malformed/unknown-key/non-plain-object input, no plan bypass, stored vs effective distinction, no regression.
 6. No user-facing customization features implemented.
 7. No regression of existing public widget config, widget rendering, access policy, or NPM/script behavior.
 8. Local gate: typecheck, lint, prisma validate/generate, unit tests.
 9. CI: all 4 jobs green on the exact SHA.
+10. Migration tests prove POST-MIGRATION COEXISTENCE (V1 + V2 on the same row). The migration-time preservation guarantee is the idempotent additive SQL (`ADD COLUMN IF NOT EXISTS ... JSONB` — nullable, no data rewrite). A dedicated migration-time test (seed before migration, run SQL, verify row untouched) would require a baseline PostgreSQL snapshot not available in the current test environment.
 
 ---
 
@@ -223,12 +237,18 @@ Phase 1: the resolver is a thin adapter — if `appearanceV2` is null, it return
 
 ## 9. Shared runtime approach (for subsequent phases)
 
-The long-term goal: the production widget + Playground use the SAME rendering implementation. Phase 1 establishes the appearance V2 model + resolver as the shared contract. Subsequent phases will:
-1. Move the appearance-reading logic from the NPM widget / script runtime into a shared resolver that consumes the V2 model.
-2. The dashboard preview will use the same resolver.
-3. The Playground will use the same resolver + renderer.
+**CURRENT STATE:** The appearance V2 model (`appearance-v2.ts`) + stored normalization module (`appearance-resolver.ts`) are pure TS modules that are NOT yet integrated into any production route. No production consumer (NPM widget, script runtime, dashboard, public config) uses them yet. The production effective config is still resolved by `getEffectiveWidgetConfig()` using the legacy `customization: boolean` gate.
 
-**Browser/server packaging boundary:** the appearance V2 model + resolver are pure TS (no server-only imports). The NPM package can import them safely.
+**FUTURE PLAN:** The production widget + Playground will eventually use the SAME rendering implementation. Subsequent phases will:
+1. Implement `resolveEffectiveAppearance()` (separate from `normalizeStoredAppearance()`) that enforces entitlements.
+2. Wire the effective resolver into `getEffectiveWidgetConfig()` (replacing the hardcoded Free defaults).
+3. Move the appearance-reading logic from the NPM widget / script runtime into a shared resolver that consumes the V2 model.
+4. The dashboard preview will use the same resolver.
+5. The Playground will use the same resolver + renderer.
+
+**Browser/server packaging boundary:** the appearance V2 model + normalization module are pure TS (no server-only imports). The NPM package can import them safely.
+
+**Existing behavior intentionally unchanged:** The legacy Free customization gate (`customization: boolean` → `402 customization_locked` on PATCH, hardcoded Sukhan defaults on `getEffectiveWidgetConfig`) is preserved. The entitlement model's `isLegacyCustomizationUnlocked()` mirrors this for backward compat. No premature Free customization unlock.
 
 ---
 

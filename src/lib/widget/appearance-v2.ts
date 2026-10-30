@@ -62,16 +62,21 @@ export const DEFAULT_APPEARANCE_V2: AppearanceV2 = {
  *
  * Accepts ONLY:
  *   - null / undefined → null (no V2 config; fall back to V1 flat fields).
- *   - An object with EXACTLY version === 1 + optional desktop/mobile objects.
+ *   - A PLAIN object (prototype === Object.prototype or null) with EXACTLY
+ *     an own-property `version === 1` + optional desktop/mobile plain objects.
  *
  * Rejects (returns null):
- *   - Non-object values.
+ *   - Non-object values (numbers, strings, booleans).
  *   - Arrays.
+ *   - Non-plain objects (Date, Map, Set, class instances, etc.).
+ *   - Objects with inherited `version` (must be an own property).
  *   - Missing or non-integer version.
  *   - Unknown version (version !== 1).
+ *   - Fractional version.
  *   - desktop/mobile present but not plain objects.
  *   - Unexpected top-level keys (only version, desktop, mobile are allowed).
  *   - Unexpected keys inside desktop/mobile (Phase 1 defines no device fields).
+ *   - Getter-based exceptions (caught internally; never escapes).
  *
  * Returns a CANONICAL object (not the raw input reference) so callers never
  * hold an unvalidated object.
@@ -83,26 +88,78 @@ export const DEFAULT_APPEARANCE_V2: AppearanceV2 = {
 /** Allowed top-level keys in an AppearanceV2 object. */
 const ALLOWED_TOP_LEVEL_KEYS = new Set(['version', 'desktop', 'mobile'])
 
+/**
+ * Check if a value is a plain JSON-compatible object — prototype is exactly
+ * `Object.prototype` or `null` (Object.create(null)). Rejects Date, Map, Set,
+ * class instances, arrays, and primitives.
+ */
+function isPlainObject(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  try {
+    const proto = Object.getPrototypeOf(value)
+    return proto === Object.prototype || proto === null
+  } catch {
+    return false // getPrototypeOf can throw for certain exotic objects
+  }
+}
+
+/**
+ * Safely get own enumerable string keys of a plain object. Wraps Object.keys
+ * in try/catch to handle getter-based exceptions (a getter on a prototype
+ * could throw). Returns null if the operation fails.
+ */
+function safeOwnKeys(obj: object): string[] | null {
+  try {
+    return Object.keys(obj)
+  } catch {
+    return null // getter threw → fail closed
+  }
+}
+
 export function parseAppearanceV2(value: unknown): AppearanceV2 | null {
   if (value === null || value === undefined) return null
-  if (typeof value !== 'object' || Array.isArray(value)) return null
+  // Must be a plain object — reject Date, Map, Set, class instances, etc.
+  if (!isPlainObject(value)) return null
 
-  const v = value as Record<string, unknown>
+  // Safely get own keys (getter-safe).
+  const keys = safeOwnKeys(value)
+  if (keys === null) return null // getter threw → fail closed
 
   // Reject unexpected top-level keys — only version, desktop, mobile are allowed.
-  for (const key of Object.keys(v)) {
+  for (const key of keys) {
     if (!ALLOWED_TOP_LEVEL_KEYS.has(key)) return null
   }
 
-  // version must be exactly 1 (the current version).
-  if (typeof v.version !== 'number' || !Number.isInteger(v.version) || v.version !== APPEARANCE_V2_VERSION) {
+  // version must be an OWN property (not inherited) + exactly 1.
+  // hasOwnProperty is safe (doesn't trigger getters). But accessing the
+  // value CAN trigger a getter that throws — wrap in try/catch.
+  if (!Object.prototype.hasOwnProperty.call(value, 'version')) return null
+  let versionValue: unknown
+  try {
+    versionValue = (value as Record<string, unknown>).version
+  } catch {
+    return null // getter threw → fail closed
+  }
+  if (typeof versionValue !== 'number' || !Number.isInteger(versionValue) || versionValue !== APPEARANCE_V2_VERSION) {
     return null
   }
 
   // desktop / mobile: if present, must be plain objects with NO unexpected keys.
-  const desktop = parseDeviceAppearance(v.desktop)
+  // Property access can trigger getters — wrap in try/catch.
+  let desktopValue: unknown, mobileValue: unknown
+  try {
+    desktopValue = (value as Record<string, unknown>).desktop
+  } catch {
+    return null // getter threw → fail closed
+  }
+  try {
+    mobileValue = (value as Record<string, unknown>).mobile
+  } catch {
+    return null // getter threw → fail closed
+  }
+  const desktop = parseDeviceAppearance(desktopValue)
   if (desktop === undefined) return null // malformed → fail closed
-  const mobile = parseDeviceAppearance(v.mobile)
+  const mobile = parseDeviceAppearance(mobileValue)
   if (mobile === undefined) return null
 
   // Return a CANONICAL object (not the raw input reference) so callers
@@ -123,14 +180,19 @@ export function parseAppearanceV2(value: unknown): AppearanceV2 | null {
  * Phase 1: DeviceAppearance has NO fields. Any key inside a device object
  * is UNEXPECTED and causes rejection (returns undefined). This enforces
  * strict parsing — no arbitrary unvalidated object references pass through.
+ * Non-plain objects (Date, Map, Set, class instances) are rejected.
+ * Getter-based exceptions are caught (never escape).
  */
 function parseDeviceAppearance(value: unknown): DeviceAppearance | null | undefined {
   if (value === null || value === undefined) return null
-  if (typeof value !== 'object' || Array.isArray(value)) return undefined // malformed
+  // Must be a plain object — reject Date, Map, Set, class instances, etc.
+  if (!isPlainObject(value)) return undefined // malformed
+  // Safely get own keys (getter-safe).
+  const keys = safeOwnKeys(value)
+  if (keys === null) return undefined // getter threw → fail closed
   // Phase 1: DeviceAppearance has no fields. Reject ANY keys — only an
   // empty object (or absent) is valid. Future phases will add + validate
   // specific device fields here.
-  const keys = Object.keys(value as Record<string, unknown>)
   if (keys.length > 0) return undefined // unexpected keys → fail closed
   // Return a canonical empty object (not the raw input reference).
   return {}
