@@ -197,6 +197,11 @@ model WidgetConfig {
   loginButtonLabel           String?
   loginReturnUrlParam        String?
   identityEndpointPath       String?
+  // --- Widget Customization V2 (appearance model) ---
+  // Additive nullable field for the versioned appearance V2 config.
+  // null = V1 behavior (flat fields are the source of truth).
+  // Existing rows get null (no destructive rewrite). No identity/access changes.
+  appearanceV2               Json?
   createdAt                  DateTime  @default(now())
   updatedAt                  DateTime  @updatedAt
 
