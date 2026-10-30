@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test'
 import { createServer, type Server } from 'node:http'
 import { execSync } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { otpSignupPlaywright } from './helpers/otp-signup'
 
@@ -880,16 +880,12 @@ test.describe('Widget V2 Positioning — browser regression', () => {
         const filePath = join(PKG_DIR, 'dist', fileMatch[1])
         if (existsSync(filePath)) {
           res.writeHead(200, { 'Content-Type': 'application/javascript' })
-          // Use Bun.file for reading — but createServer doesn't have Bun.
-          // Read synchronously.
-          const { readFileSync } = require('node:fs')
           res.end(readFileSync(filePath))
           return
         }
       }
       // Alias /sukhan-widget.js → dist/index.js
       if (req.url === '/sukhan-widget.js') {
-        const { readFileSync } = require('node:fs')
         res.writeHead(200, { 'Content-Type': 'application/javascript' })
         res.end(readFileSync(WIDGET_BUNDLE))
         return
