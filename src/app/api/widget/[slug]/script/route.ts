@@ -517,9 +517,8 @@ ${POSITIONING_FN_SOURCE}
     css(root, { position: 'fixed', zIndex: '2147483000' });
     state.rootEl = root;
 
-    // Apply the computed position (left + bottom in px).
-    applyPosition();
-    setupResizeListener();
+    // Position application is deferred to after the panel + launcher are
+    // appended (the panel side cannot be set before the panel DOM element exists).
 
     launcher = el('button', 'sk-launcher ' + shapeClass(config.launcherShape));
     launcher.setAttribute('aria-label', state.locale === 'fa' ? 'گفت‌وگو' : 'Open chat');
@@ -662,6 +661,11 @@ ${POSITIONING_FN_SOURCE}
     panel.appendChild(inputBar);
     root.appendChild(panel); root.appendChild(launcher);
     document.body.appendChild(root);
+
+    // Apply the computed position NOW that the panel exists (the panel side
+    // could not be set earlier because the panel DOM element didn't exist yet).
+    applyPosition();
+    setupResizeListener();
 
     // Mode-aware identity bootstrap (anonymous/verified_visitor/site_user_only).
     // Replaces the historical anonymous-only identifyVisitor() call — the

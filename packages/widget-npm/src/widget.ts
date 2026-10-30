@@ -546,9 +546,9 @@ export class SukhanWidget implements SukhanInstance {
     })
     this.panel = panel
 
-    // Apply the initial position + set up the resize listener.
-    this.applyPosition()
-    this.setupResizeListener()
+    // Position application is deferred to after the panel + launcher are
+    // appended to the root (the panel side cannot be set before the panel
+    // DOM element exists). See applyPosition() at the end of mount().
 
     const header = el('div', 'sk-header')
     css(header, {
@@ -743,6 +743,11 @@ export class SukhanWidget implements SukhanInstance {
     root.appendChild(panel)
     root.appendChild(launcher)
     this.container.appendChild(root)
+
+    // Apply the computed position NOW that the panel exists (the panel side
+    // could not be set earlier because the panel DOM element didn't exist yet).
+    this.applyPosition()
+    this.setupResizeListener()
 
     this.renderMessages()
   }
