@@ -848,13 +848,14 @@ test.describe('Widget V2 Colors — browser regression', () => {
     await customerPage.waitForSelector('.sk-panel', { state: 'visible', timeout: 10_000 })
     await customerPage.waitForTimeout(1000)
 
-    // Wait for the input element to be present + visible.
-    await customerPage.waitForSelector('input.sk-input', { state: 'visible', timeout: 15_000 })
+    // Wait for the input element to be present + visible (same selector
+    // pattern as widget-live-messaging.spec.ts).
+    const widgetInput = customerPage.locator('.sk-panel input').first()
+    await expect(widgetInput).toBeVisible({ timeout: 15_000 })
 
     // Type + send a visitor message.
-    const input = customerPage.locator('input.sk-input')
-    await input.fill('Test visitor message for bubble colors')
-    await input.press('Enter')
+    await widgetInput.fill('Test visitor message for bubble colors')
+    await widgetInput.press('Enter')
     await customerPage.waitForTimeout(3000)
 
     // Wait for the visitor bubble (.sk-vis) to appear.
