@@ -98,7 +98,7 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
       mode: 'preset' | 'custom'
       presetId?: string
       tokens: Record<string, string>
-    }
+    } | null  // null when Free without V2 selection (legacy runtime)
     stored: {
       mode: 'preset' | 'custom'
       presetId?: string

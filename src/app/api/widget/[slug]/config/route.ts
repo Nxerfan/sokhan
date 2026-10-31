@@ -146,12 +146,18 @@ export async function GET(
   const hasStoredV1Accent = !!(widgetConfig.accentColor && /^#[0-9a-fA-F]{6}$/.test(widgetConfig.accentColor))
   const shouldExposeColors = hasV2ColorSelection || (isPaidPlan && hasStoredV1Accent)
 
-  // Derive the V1 `accentColor` from the effective colors for legacy consumers.
-  // For Free without V2 colors, use the original stored accentColor (preserving
-  // the pre-V2 appearance).
+  // Derive the V1 `accentColor` for legacy consumers.
+  // When V2 colors ARE exposed: use the V2 effective accent.
+  // When V2 colors are NOT exposed: use `config.accentColor` from
+  // getEffectiveWidgetConfig() — this is the AUTHORIZED effective accent
+  // that respects the plan lock. For Free, it returns '#E09A2B' (Sukhan
+  // default), NOT the raw stored V1 accent from a previous paid period.
+  // For paid without V2, it returns the stored accent. For unknown plans,
+  // it returns the locked default. The raw `widgetConfig.accentColor` is
+  // NEVER directly exposed to unauthorized plans.
   const legacyAccent = shouldExposeColors
     ? effectiveColors.tokens.accent
-    : (widgetConfig.accentColor || effectiveColors.tokens.accent)
+    : config.accentColor
   const configWithPosition = { ...config, position: legacyPosition, accentColor: legacyAccent }
 
   // Build the response — conditionally include `colors` only when the tenant

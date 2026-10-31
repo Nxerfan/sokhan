@@ -101,7 +101,14 @@ export async function GET() {
           presetColors: entitlements?.presetColors ?? false,
           customColors: entitlements?.customColors ?? false,
         },
-        effective: effectiveColors,
+        // When no V2 color selection is stored AND the plan is Free (no
+        // legacyCustomizationUnlocked), the widget runtime uses pre-V2
+        // hardcoded colors (gold header). In this case, `effective` is null
+        // to signal the dashboard to show the legacy appearance, NOT the
+        // V2 sukhan palette (which would mismatch the deployed widget).
+        effective: (storedColors !== null || (entitlements?.legacyCustomizationUnlocked ?? false))
+          ? effectiveColors
+          : null,
         stored: storedColors,
       },
     } as const

@@ -59,7 +59,8 @@ interface StoredColorTheme {
  */
 interface ColorsData {
   entitlements: ColorEntitlements
-  effective: EffectiveColorTheme
+  /** null when the widget runtime uses pre-V2 hardcoded colors (Free without V2 selection). */
+  effective: EffectiveColorTheme | null
   stored: StoredColorTheme | null
 }
 
@@ -91,6 +92,25 @@ const CONTRAST_PAIRS: ReadonlyArray<[ColorTokenName, ColorTokenName, boolean]> =
   ['visitorBubbleText', 'visitorBubbleBg', false],
   ['agentBubbleText', 'agentBubbleBg', false],
 ]
+
+/**
+ * The pre-V2 hardcoded widget colors. When the dashboard's `colors.effective`
+ * is null (Free without V2 color selection), the widget runtime uses these
+ * hardcoded colors. The preview must show these to match the deployed widget.
+ */
+const LEGACY_COLOR_TOKENS: ColorTokens = {
+  accent: '#E09A2B',
+  launcherBg: '#0E1116',
+  launcherFg: '#FAF7F2',
+  headerBg: '#E09A2B',
+  headerText: '#FFFFFF',
+  panelBg: '#FFFFFF',
+  panelText: '#0E1116',
+  visitorBubbleBg: '#0E1116',
+  visitorBubbleText: '#FAF7F2',
+  agentBubbleBg: '#FFFFFF',
+  agentBubbleText: '#0E1116',
+}
 
 /**
  * Convert a token name to a translation key under `settings.colors.tokens`.
@@ -153,8 +173,10 @@ export function WidgetColorsPanel({
   const canCustom = entitlements.customColors
 
   // The selected mode + preset for display (falls back to effective when no draft).
-  const selectedMode: 'preset' | 'custom' = draft?.mode ?? colors?.effective.mode ?? 'preset'
-  const selectedPresetId: string = draft?.presetId ?? colors?.effective.presetId ?? DEFAULT_PALETTE_ID
+  // When `colors.effective` is null (Free without V2 → legacy runtime), the
+  // mode is 'preset' with no presetId (showing the legacy appearance).
+  const selectedMode: 'preset' | 'custom' = draft?.mode ?? colors?.effective?.mode ?? 'preset'
+  const selectedPresetId: string = draft?.presetId ?? colors?.effective?.presetId ?? DEFAULT_PALETTE_ID
 
   // The tokens to render in the preview.
   const previewTokens: ColorTokens = useMemo(() => {
@@ -162,16 +184,18 @@ export function WidgetColorsPanel({
       return draft.custom
     }
     // Preset mode (draft or effective): look up the palette.
-    const presetId = draft?.mode === 'preset' ? draft.presetId : colors?.effective.presetId
+    const presetId = draft?.mode === 'preset' ? draft.presetId : colors?.effective?.presetId
     if (presetId) {
       const p = getPaletteById(presetId)
       if (p) return p.tokens
     }
     // Fall back to effective tokens (normalized to a complete ColorTokens).
-    if (colors?.effective.tokens) {
+    if (colors?.effective?.tokens) {
       return normalizeTokens(colors.effective.tokens)
     }
-    return DEFAULT_COLOR_TOKENS
+    // No V2 effective colors (Free without V2 selection) → use the pre-V2
+    // legacy colors so the preview matches the deployed widget.
+    return LEGACY_COLOR_TOKENS
   }, [draft, colors])
 
   // Dirty detection: compare draft to stored (canonical).

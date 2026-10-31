@@ -4,6 +4,7 @@ import { execSync } from 'node:child_process'
 import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { otpSignupPlaywright } from './helpers/otp-signup'
+import { setAccessMode } from './helpers/set-access'
 
 /**
  * Widget V2 Colors — browser regression.
@@ -728,6 +729,216 @@ test.describe('Widget V2 Colors — browser regression', () => {
     } finally {
       await new Promise<void>((r) => npmServer.close(() => r()))
     }
+
+    await ctx.close()
+  })
+
+  // ─── BLOCKER 1: Legacy accent leak regression ──────────────────────────
+
+  test('BLOCKER 1: Pro V1 accent → Free downgrade → public accentColor is Sukhan default, not stored accent', async ({ browser }) => {
+    test.setTimeout(120_000)
+    const { email, workspace } = creds('legacy-leak')
+    const ctx = await browser.newContext()
+    const page = await ctx.newPage()
+    const slug = await signupAndGetSlug(page, email, workspace)
+    currentSlug = slug
+
+    // 1. Upgrade to Pro + set a non-default V1 accent.
+    await devSetPlan(page, 'pro')
+    await page.goto(BASE)
+    await page.waitForLoadState('networkidle')
+    const csrfRes = await page.request.get(`${DASHBOARD}/api/auth/csrf`)
+    const { csrfToken } = await csrfRes.json()
+    await page.request.post(`${DASHBOARD}/api/auth/callback/credentials`, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      data: `email=${email}&password=password123&csrfToken=${csrfToken}&json=true`,
+    })
+    await page.request.patch(`${BASE}/api/widget-config`, {
+      data: { accentColor: '#123456' },
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+    // 2. Verify Pro sees the custom accent.
+    const proConfigRes = await page.request.get(`${SUKHAN_ORIGIN}/api/widget/${slug}/config`)
+    const proConfig = await proConfigRes.json()
+    expect(proConfig.accentColor).toBe('#123456')
+
+    // 3. Downgrade to Free (no V2 colors stored).
+    await devSetPlan(page, 'free')
+    await page.goto(BASE)
+    await page.waitForLoadState('networkidle')
+
+    // 4. GET public config — must NOT expose the stored #123456.
+    const freeConfigRes = await page.request.get(`${SUKHAN_ORIGIN}/api/widget/${slug}/config`)
+    const freeConfig = await freeConfigRes.json()
+    // accentColor must be the Sukhan default, not the stored paid accent.
+    expect(freeConfig.accentColor).toBe('#E09A2B')
+    // colors must be absent (legacy runtime for Free without V2).
+    expect(freeConfig.colors).toBeUndefined()
+
+    // 5. Verify the rendered widget uses the Sukhan gold header.
+    const customerPage = await ctx.newPage()
+    await customerPage.goto(CUSTOMER_ORIGIN)
+    await customerPage.waitForLoadState('networkidle')
+    await customerPage.waitForSelector('.sk-root', { timeout: 15_000 })
+    await customerPage.waitForTimeout(1000)
+    const headerBg = await customerPage.evaluate(() => {
+      const header = document.querySelector('.sk-header') as HTMLElement
+      return header ? getComputedStyle(header).backgroundColor : null
+    })
+    // Pre-V2 gold header (#E09A2B = rgb(224, 154, 43)).
+    expect(headerBg).toBe(hexToRgb('#E09A2B'))
+
+    // 6. Verify the stored V1 accent is still in the DB (preserved for upgrade).
+    // Re-upgrade to Pro and verify the accent is restored.
+    await devSetPlan(page, 'pro')
+    await page.goto(BASE)
+    await page.waitForLoadState('networkidle')
+    const proAgainConfigRes = await page.request.get(`${SUKHAN_ORIGIN}/api/widget/${slug}/config`)
+    const proAgainConfig = await proAgainConfigRes.json()
+    expect(proAgainConfig.accentColor).toBe('#123456')
+
+    await ctx.close()
+  })
+
+  // ─── BLOCKER 2: Visitor/agent bubble computed colors (slug-script) ─────
+
+  test('BLOCKER 2: Slug-script visitor + agent bubble computed colors match custom tokens', async ({ browser }) => {
+    test.setTimeout(180_000)
+    const { email, workspace } = creds('bubble-colors')
+    const ctx = await browser.newContext()
+    const page = await ctx.newPage()
+    const slug = await signupAndGetSlug(page, email, workspace)
+    currentSlug = slug
+
+    await devSetPlan(page, 'pro')
+    await page.goto(BASE)
+    await page.waitForLoadState('networkidle')
+    const csrfRes = await page.request.get(`${DASHBOARD}/api/auth/csrf`)
+    const { csrfToken } = await csrfRes.json()
+    await page.request.post(`${DASHBOARD}/api/auth/callback/credentials`, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      data: `email=${email}&password=password123&csrfToken=${csrfToken}&json=true`,
+    })
+
+    // Set custom colors with distinctive bubble colors.
+    await page.request.patch(`${BASE}/api/widget-config`, {
+      data: { colors: { mode: 'custom', custom: CUSTOM_TOKENS } },
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+    // Set anonymous access so the widget can bootstrap without auth.
+    await setAccessMode(page, 'anonymous')
+
+    // Load the customer page (slug-script auto-bootstraps).
+    const customerPage = await ctx.newPage()
+    await customerPage.goto(CUSTOMER_ORIGIN)
+    await customerPage.waitForLoadState('networkidle')
+    await customerPage.waitForSelector('.sk-root', { timeout: 15_000 })
+    await customerPage.waitForFunction(() => {
+      const root = document.querySelector('.sk-root') as HTMLElement
+      return root && root.getAttribute('data-sk-color-mode') !== null
+    }, { timeout: 15_000 })
+    await customerPage.waitForTimeout(2000)
+
+    // Open the panel.
+    await customerPage.click('.sk-launcher')
+    await customerPage.waitForTimeout(1000)
+
+    // Type + send a visitor message.
+    const input = customerPage.locator('.sk-input input, .sk-input')
+    await input.fill('Test visitor message for bubble colors')
+    await input.press('Enter')
+    await customerPage.waitForTimeout(2000)
+
+    // Wait for the visitor bubble (.sk-vis) to appear.
+    await customerPage.waitForSelector('.sk-vis', { timeout: 15_000 })
+
+    // Verify visitor bubble computed colors.
+    const visitorColors = await customerPage.evaluate(() => {
+      const bubble = document.querySelector('.sk-vis') as HTMLElement
+      if (!bubble) return null
+      const cs = getComputedStyle(bubble)
+      return { bg: cs.backgroundColor, color: cs.color }
+    })
+    expect(visitorColors).not.toBeNull()
+    expect(visitorColors!.bg).toBe(hexToRgb(CUSTOM_TOKENS.visitorBubbleBg))
+    expect(visitorColors!.color).toBe(hexToRgb(CUSTOM_TOKENS.visitorBubbleText))
+
+    // Send an agent reply via the dashboard API.
+    // Get the conversation list for this tenant.
+    const convsRes = await page.request.get(`${DASHBOARD}/api/conversations`)
+    const convsData = await convsRes.json()
+    const conversations = convsData.conversations ?? []
+    expect(conversations.length).toBeGreaterThan(0)
+    const convId = conversations[0].id
+
+    // Send an agent message.
+    await page.request.post(`${DASHBOARD}/api/conversations/${convId}/messages`, {
+      data: { content: { text: 'Test agent reply for bubble colors' }, contentType: 'text' },
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+    // Wait for the agent bubble (.sk-agt) to appear (via polling or realtime).
+    await customerPage.waitForSelector('.sk-agt', { timeout: 30_000 })
+
+    // Verify agent bubble computed colors.
+    const agentColors = await customerPage.evaluate(() => {
+      const bubble = document.querySelector('.sk-agt') as HTMLElement
+      if (!bubble) return null
+      const cs = getComputedStyle(bubble)
+      return { bg: cs.backgroundColor, color: cs.color }
+    })
+    expect(agentColors).not.toBeNull()
+    expect(agentColors!.bg).toBe(hexToRgb(CUSTOM_TOKENS.agentBubbleBg))
+    expect(agentColors!.color).toBe(hexToRgb(CUSTOM_TOKENS.agentBubbleText))
+
+    await ctx.close()
+  })
+
+  // ─── BLOCKER 3: Free preview matches legacy widget ────────────────────
+
+  test('BLOCKER 3: Free without V2 colors — preview shows legacy gold header, not V2 dark header', async ({ browser }) => {
+    test.setTimeout(120_000)
+    const { email, workspace } = creds('preview-legacy')
+    const ctx = await browser.newContext()
+    const page = await ctx.newPage()
+    const slug = await signupAndGetSlug(page, email, workspace)
+    currentSlug = slug
+
+    // Free plan (default after signup). No V2 colors stored.
+    await page.goto(BASE)
+    await page.waitForLoadState('networkidle')
+
+    // Open customization tab → Colors panel.
+    const nav = page.getByRole('navigation', { name: 'primary' })
+    await nav.getByRole('button', { name: /^ویجت$|^Widget$/ }).click()
+    await page.getByRole('button', { name: /^سفارشی‌سازی$|^Customization$/ }).click()
+    await expect(page.getByTestId('colors-panel')).toBeVisible({ timeout: 15_000 })
+    await page.waitForTimeout(1000)
+
+    // The preview header should show the legacy gold color (#E09A2B),
+    // NOT the V2 sukhan palette's dark header (#0E1116).
+    const previewHeaderBg = await page.evaluate(() => {
+      const header = document.querySelector('[data-testid="colors-preview-header"]') as HTMLElement
+      if (!header) return null
+      return getComputedStyle(header).backgroundColor
+    })
+    expect(previewHeaderBg).not.toBeNull()
+    // Legacy gold header = #E09A2B = rgb(224, 154, 43).
+    expect(previewHeaderBg).toBe(hexToRgb('#E09A2B'))
+
+    // Also verify the actual rendered widget on the customer page uses gold header.
+    const customerPage = await ctx.newPage()
+    await customerPage.goto(CUSTOMER_ORIGIN)
+    await customerPage.waitForLoadState('networkidle')
+    await customerPage.waitForSelector('.sk-root', { timeout: 15_000 })
+    await customerPage.waitForTimeout(1000)
+    const widgetHeaderBg = await customerPage.evaluate(() => {
+      const header = document.querySelector('.sk-header') as HTMLElement
+      return header ? getComputedStyle(header).backgroundColor : null
+    })
+    expect(widgetHeaderBg).toBe(hexToRgb('#E09A2B'))
 
     await ctx.close()
   })
