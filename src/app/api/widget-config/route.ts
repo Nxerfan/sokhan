@@ -101,14 +101,21 @@ export async function GET() {
           presetColors: entitlements?.presetColors ?? false,
           customColors: entitlements?.customColors ?? false,
         },
-        // When no V2 color selection is stored AND the plan is Free (no
-        // legacyCustomizationUnlocked), the widget runtime uses pre-V2
-        // hardcoded colors (gold header). In this case, `effective` is null
-        // to signal the dashboard to show the legacy appearance, NOT the
-        // V2 sukhan palette (which would mismatch the deployed widget).
-        effective: (storedColors !== null || (entitlements?.legacyCustomizationUnlocked ?? false))
-          ? effectiveColors
-          : null,
+        // The dashboard `effective` must match what the PUBLIC widget
+        // actually renders. When the plan is not entitled to customColors
+        // AND the stored mode is 'custom', the public widget does NOT
+        // apply the custom tokens (they're preserved but not applied).
+        // In this case, `effective` must reflect the authorized fallback
+        // (not the stored custom tokens).
+        effective: (() => {
+          // No stored colors at all + Free → legacy (null).
+          if (storedColors === null && !(entitlements?.legacyCustomizationUnlocked ?? false)) {
+            return null
+          }
+          // Stored custom but not entitled → use the resolver's effective
+          // (which already strips custom tokens for non-entitled plans).
+          return effectiveColors
+        })(),
         stored: storedColors,
       },
     } as const

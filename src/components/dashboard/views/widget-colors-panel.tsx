@@ -153,15 +153,16 @@ export function WidgetColorsPanel({
   // Initialize draft when colors data loads.
   useEffect(() => {
     if (!colors) return
+    const ent = colors.entitlements
     /* eslint-disable react-hooks/set-state-in-effect */
     if (colors.stored) {
-      // When effective is null (Free downgrade with stored paid custom),
-      // do NOT initialize the draft from the stored custom colors.
-      // The preview must show the authorized effective (legacy) appearance.
-      // The stored custom tokens are preserved for upgrade restore but
-      // must NOT be displayed as the active preview on Free.
-      if (colors.effective === null && colors.stored.mode === 'custom') {
-        // Free with stored custom → show legacy preview, not custom.
+      // When the plan is NOT entitled to customColors (e.g., Free after
+      // downgrade from Pro), do NOT initialize the draft from stored
+      // custom colors — even if `colors.effective` is non-null (the
+      // server may return the default palette as effective). The preview
+      // must reflect the authorized appearance, not the unauthorized
+      // custom tokens. Stored custom tokens remain for upgrade restore.
+      if (!ent.customColors && colors.stored.mode === 'custom') {
         setDraft(null)
       } else {
         setDraft({
@@ -171,8 +172,6 @@ export function WidgetColorsPanel({
         })
       }
     } else {
-      // Stored is null → draft is null (matches positioning panel pattern).
-      // The preview falls back to `colors.effective`.
       setDraft(null)
     }
     /* eslint-enable react-hooks/set-state-in-effect */
