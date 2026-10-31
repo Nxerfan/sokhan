@@ -846,7 +846,7 @@ test.describe('Widget V2 Colors — browser regression', () => {
     await customerPage.waitForTimeout(1000)
 
     // Type + send a visitor message.
-    const input = customerPage.locator('.sk-input input, .sk-input')
+    const input = customerPage.locator('input.sk-input')
     await input.fill('Test visitor message for bubble colors')
     await input.press('Enter')
     await customerPage.waitForTimeout(2000)
