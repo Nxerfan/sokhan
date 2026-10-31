@@ -751,6 +751,89 @@ export class SukhanWidget implements SukhanInstance {
     this.applyPosition()
     this.setupResizeListener()
 
+    // Apply V2 color tokens from `config.colors.tokens` (additive). Falls
+    // back to the hardcoded brand colors set above when `config.colors` is
+    // absent (older backends). Color application is INDEPENDENT of
+    // positioning — both can change without affecting each other.
+    this.applyColors(config)
+
+    this.renderMessages()
+  }
+
+  /**
+   * Apply V2 color tokens to the widget surfaces via inline styles.
+   *
+   * Reads `config.colors.tokens` (additive public config field). When the
+   * field is absent (older backends), the function only sets the
+   * `data-sk-color-mode="legacy"` diagnostic attribute on the root and
+   * leaves the hardcoded brand colors set in `mount()` intact — this
+   * preserves backward compatibility with pre-V2 backends.
+   *
+   * When the field is present, the function overrides the inline styles on:
+   *   - launcher (background + color)
+   *   - panel (background)
+   *   - header (background + color)
+   *   - body text element (color)
+   *   - typing indicator (background — accent surface)
+   *   - send button (background — accent surface)
+   *   - visitor + agent message bubbles (re-rendered by `renderMessages()`
+   *     which reads `this.config.colors` directly)
+   *
+   * Inline styles (not CSS classes) are used so customer website stylesheets
+   * cannot accidentally override the resolved tokens. The function is
+   * idempotent — calling it multiple times with the same config produces
+   * the same DOM state.
+   */
+  private applyColors(config: WidgetConfig): void {
+    if (!this.root) return
+    const colors = config.colors
+    if (!colors || !colors.tokens) {
+      // Backward-compat: mark the root with the legacy mode so tests can
+      // distinguish "V2 colors absent" from "V2 colors applied". The
+      // hardcoded brand colors set in mount() remain.
+      this.root.setAttribute('data-sk-color-mode', 'legacy')
+      return
+    }
+    const t = colors.tokens
+    // Diagnostic attribute for tests — proves the widget received + applied
+    // V2 colors (verifiable without inspecting inline styles).
+    this.root.setAttribute('data-sk-color-mode', colors.mode || 'preset')
+    if (colors.presetId) {
+      this.root.setAttribute('data-sk-color-preset', colors.presetId)
+    }
+
+    // Launcher — background + foreground.
+    if (this.launcher) {
+      this.launcher.style.background = t.launcherBg
+      this.launcher.style.color = t.launcherFg
+    }
+    // Panel body background.
+    if (this.panel) {
+      this.panel.style.background = t.panelBg
+    }
+    // Header — background + text color.
+    // The header element is the first child of the panel; we look it up by
+    // class to avoid retaining an extra DOM ref just for colors.
+    const headerEl = this.panel?.querySelector('.sk-header') as HTMLElement | null
+    if (headerEl) {
+      headerEl.style.background = t.headerBg
+      headerEl.style.color = t.headerText
+    }
+    // Body text color (applied to the body container; bubbles set their own
+    // text color separately, but the body container color cascades to system
+    // messages + timestamps).
+    if (this.bodyEl) {
+      this.bodyEl.style.color = t.panelText
+    }
+    // Accent surfaces: send button + typing indicator background.
+    if (this.sendBtn) {
+      this.sendBtn.style.background = t.accent
+    }
+    if (this.typingEl) {
+      this.typingEl.style.background = t.accent
+    }
+    // Re-render messages so visitor/agent bubbles pick up the new tokens.
+    // renderMessages() is a no-op when bodyEl is missing.
     this.renderMessages()
   }
 
@@ -1857,8 +1940,16 @@ export class SukhanWidget implements SukhanInstance {
         bubble.textContent = (msg.content && msg.content.text) || ''
       } else {
         const align = isVisitor ? 'flex-end' : 'flex-start'
-        const bg = isVisitor ? '#0E1116' : '#fff'
-        const color = isVisitor ? '#FAF7F2' : '#0E1116'
+        // V2 colors: read visitor/agent bubble tokens when present.
+        // Falls back to the hardcoded brand colors when config.colors is
+        // absent (older backends) — same values as the pre-V2 widget.
+        const tokens = this.config?.colors?.tokens
+        const bg = isVisitor
+          ? (tokens?.visitorBubbleBg || '#0E1116')
+          : (tokens?.agentBubbleBg || '#fff')
+        const color = isVisitor
+          ? (tokens?.visitorBubbleText || '#FAF7F2')
+          : (tokens?.agentBubbleText || '#0E1116')
         const radius = isVisitor ? '12px 12px 4px 12px' : '12px 12px 12px 4px'
         css(bubble, {
           alignSelf: align,

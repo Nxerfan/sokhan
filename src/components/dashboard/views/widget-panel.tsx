@@ -15,6 +15,7 @@ import { PanelHeader } from './members-panel'
 import { cn } from '@/lib/utils'
 import { WidgetAccessIdentity } from './widget-access-identity'
 import { WidgetPositioningPanel } from './widget-positioning-panel'
+import { WidgetColorsPanel } from './widget-colors-panel'
 
 type WidgetConfig = {
   accentColor: string
@@ -90,6 +91,20 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
       mobile: { anchor: 'bottom-start' | 'bottom-end' | 'bottom-center'; offsetX?: number; offsetY?: number } | null
     }
   } | null>(null)
+  // V2 colors data (from GET /api/widget-config `colors` field).
+  const [colors, setColors] = useState<{
+    entitlements: { presetColors: boolean; customColors: boolean }
+    effective: {
+      mode: 'preset' | 'custom'
+      presetId?: string
+      tokens: Record<string, string>
+    }
+    stored: {
+      mode: 'preset' | 'custom'
+      presetId?: string
+      custom?: Record<string, string>
+    } | null
+  } | null>(null)
 
   const apiUrl = typeof window !== 'undefined' ? window.location.origin : HOSTED_API_URL
 
@@ -116,6 +131,8 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
     setIsLocked(Boolean(cfgData.isLocked))
     // V2 positioning data.
     if (cfgData.positioning) setPositioning(cfgData.positioning)
+    // V2 colors data.
+    if (cfgData.colors) setColors(cfgData.colors)
     const domData = await domRes.json()
     setDomains(domData.domains ?? [])
     setDomainLimit(domData.limit ?? 0)
@@ -593,6 +610,13 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
           <WidgetPositioningPanel
             slug={slug}
             positioning={positioning}
+            defaultDirection={(config.defaultLocale === 'fa' ? 'rtl' : 'ltr') as 'rtl' | 'ltr'}
+            onReload={load}
+          />
+          {/* V2 Colors — presets for all plans, custom tokens for paid plans. */}
+          <WidgetColorsPanel
+            slug={slug}
+            colors={colors}
             defaultDirection={(config.defaultLocale === 'fa' ? 'rtl' : 'ltr') as 'rtl' | 'ltr'}
             onReload={load}
           />

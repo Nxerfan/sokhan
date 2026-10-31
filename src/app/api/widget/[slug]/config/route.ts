@@ -11,6 +11,10 @@ import {
   deriveLegacyPosition,
   type StoredPositioningInput,
 } from '@/lib/widget/effective-positioning'
+import {
+  resolveEffectiveColors,
+  type StoredColorInput,
+} from '@/lib/widget/effective-colors'
 
 /** CORS headers for widget API responses. */
 function widgetHeaders(res: NextResponse): NextResponse {
@@ -87,6 +91,7 @@ export async function GET(
       identityEndpointPath: true,
       position: true,
       appearanceV2: true,
+      accentColor: true,
     },
   })
   if (!widgetConfig) {
@@ -121,7 +126,17 @@ export async function GET(
   // positioning. V1 only supports bottom-start/bottom-end; bottom-center
   // maps to bottom-end (the canonical product default).
   const legacyPosition = deriveLegacyPosition(effectivePos.desktop)
-  const configWithPosition = { ...config, position: legacyPosition }
+  // V2 colors: resolve effective colors from stored V2/V1 + entitlements.
+  // The public config exposes ONLY effective colors permitted by the plan.
+  // Stored paid custom colors are NEVER exposed to Free visitors.
+  const colorInput: StoredColorInput = {
+    accentColor: widgetConfig.accentColor ?? null,
+    appearanceV2: widgetConfig.appearanceV2,
+  }
+  const effectiveColors = resolveEffectiveColors(colorInput, entitlements)
+  // Derive the V1 `accentColor` from the effective colors for legacy consumers.
+  const legacyAccent = effectiveColors.tokens.accent
+  const configWithPosition = { ...config, position: legacyPosition, accentColor: legacyAccent }
 
   // Additive: the safe public access-policy fields. Existing clients continue
   // working (additive top-level fields). NEVER expose the raw integration
@@ -138,5 +153,7 @@ export async function GET(
       desktop: effectivePos.desktop,
       mobile: effectivePos.mobile,
     },
+    // V2 colors (additive — older clients ignore this field).
+    colors: effectiveColors,
   }))
 }

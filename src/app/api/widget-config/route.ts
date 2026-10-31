@@ -18,6 +18,17 @@ import {
   hasUnrecognizedFields,
   type PositioningPatchData,
 } from '@/lib/widget/positioning-patch'
+import {
+  resolveEffectiveColors,
+  getStoredColorTheme,
+  type StoredColorInput,
+} from '@/lib/widget/effective-colors'
+import {
+  validateColorPatch,
+  mergeColorPatch,
+  hasColorField,
+  type ColorPatchData,
+} from '@/lib/widget/color-patch'
 
 /**
  * GET /api/widget-config — dashboard widget configuration.
@@ -59,6 +70,14 @@ export async function GET() {
     const storedDesktop = getStoredPositioning(storedInput, 'desktop')
     const storedMobile = getStoredPositioning(storedInput, 'mobile')
 
+    // V2 colors: resolve effective + stored.
+    const colorInput: StoredColorInput = {
+      accentColor: stored?.accentColor ?? null,
+      appearanceV2: stored?.appearanceV2,
+    }
+    const effectiveColors = resolveEffectiveColors(colorInput, entitlements)
+    const storedColors = getStoredColorTheme(colorInput)
+
     return {
       stored,
       isLocked,
@@ -77,6 +96,14 @@ export async function GET() {
           mobile: storedMobile,
         },
       },
+      colors: {
+        entitlements: {
+          presetColors: entitlements?.presetColors ?? false,
+          customColors: entitlements?.customColors ?? false,
+        },
+        effective: effectiveColors,
+        stored: storedColors,
+      },
     } as const
   })
   if (!result) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
@@ -85,6 +112,7 @@ export async function GET() {
     effective: result.result.effective,
     isLocked: result.result.isLocked,
     positioning: result.result.positioning,
+    colors: result.result.colors,
   })
 }
 
@@ -125,6 +153,22 @@ const POSITIONING_ERROR_STATUS: Record<string, number> = {
   positioning_offset_out_of_bounds: 400,
   positioning_unexpected_key: 400,
   positioning_no_fields: 400,
+}
+
+/** Color-specific error codes → HTTP status mapping. */
+const COLOR_ERROR_STATUS: Record<string, number> = {
+  colors_not_authorized: 403,
+  colors_not_object: 400,
+  colors_mode_missing: 400,
+  colors_mode_invalid: 400,
+  colors_preset_id_missing: 400,
+  colors_preset_id_invalid: 400,
+  colors_custom_not_allowed: 403,
+  colors_custom_missing: 400,
+  colors_custom_invalid: 400,
+  colors_custom_unexpected_key: 400,
+  colors_unexpected_key: 400,
+  colors_no_fields: 400,
 }
 
 /**
@@ -175,19 +219,18 @@ export async function PATCH(req: NextRequest) {
 
     // ---- Determine the request type ----
     const hasPositioning = hasPositioningField(body)
+    const hasColors = hasColorField(body)
     const hasOtherFields = hasOtherCustomizationFields(body)
 
-    // Reject unrecognized top-level fields ONLY on isolated positioning
-    // requests (when `positioning` is present). This prevents bypass via
-    // unknown keys on the positioning contract without breaking existing
-    // customization PATCHes (which may send the full WidgetConfig object
-    // including non-customization fields like id, tenantId, etc.).
-    if (hasPositioning && hasUnrecognizedFields(body)) {
+    // Reject unrecognized top-level fields when the request contains
+    // positioning or colors (isolated contracts). Prevents bypass via
+    // unknown keys without breaking existing customization PATCHes.
+    if ((hasPositioning || hasColors) && hasUnrecognizedFields(body)) {
       return { badRequest: true as const, code: 'unrecognized_field' }
     }
 
-    // If Free sends non-positioning customization (with or without
-    // positioning), reject with 402 — no bypass by mixing.
+    // If Free sends non-positioning/non-color customization (with or
+    // without positioning/colors), reject with 402 — no bypass by mixing.
     if (isPlanLocked && hasOtherFields) {
       return { planLocked: true as const }
     }
@@ -200,6 +243,16 @@ export async function PATCH(req: NextRequest) {
         return { positioningError: true as const, code: posResult.code }
       }
       positioningPatch = posResult.data
+    }
+
+    // ---- Validate colors (if present) ----
+    let colorPatch: ColorPatchData | null = null
+    if (hasColors) {
+      const colorResult = validateColorPatch({ colors: body.colors }, entitlements)
+      if (!colorResult.ok) {
+        return { colorError: true as const, code: colorResult.code }
+      }
+      colorPatch = colorResult.data
     }
 
     // ---- Validate + collect other customization fields (paid only) ----
@@ -281,6 +334,26 @@ export async function PATCH(req: NextRequest) {
       data.appearanceV2 = merged as unknown as string // Prisma Json field
     }
 
+    // ---- Apply color patch (if validated) ----
+    // IMPORTANT: if both positioning + color patches are present, the color
+    // merge reads the ALREADY-MERGED appearanceV2 (from positioning merge)
+    // so positioning is preserved. If only color is present, it reads the
+    // existing stored appearanceV2.
+    if (colorPatch) {
+      // If positioning was already applied, use the merged result; otherwise
+      // read from DB.
+      let baseAppearanceV2: unknown = data.appearanceV2 ?? undefined
+      if (baseAppearanceV2 === undefined) {
+        const existing = await db.widgetConfig.findUnique({
+          where: { tenantId: tid },
+          select: { appearanceV2: true },
+        })
+        baseAppearanceV2 = existing?.appearanceV2
+      }
+      const mergedColors = mergeColorPatch(baseAppearanceV2, colorPatch)
+      data.appearanceV2 = mergedColors as unknown as string // Prisma Json field
+    }
+
     if (Object.keys(data).length === 0) {
       return { badRequest: true as const, code: 'no_fields' }
     }
@@ -303,6 +376,10 @@ export async function PATCH(req: NextRequest) {
   }
   if ('positioningError' in r) {
     const status = POSITIONING_ERROR_STATUS[r.code as string] ?? 400
+    return NextResponse.json({ error: r.code }, { status })
+  }
+  if ('colorError' in r) {
+    const status = COLOR_ERROR_STATUS[r.code as string] ?? 400
     return NextResponse.json({ error: r.code }, { status })
   }
   if ('badRequest' in r) return NextResponse.json({ error: r.code }, { status: 400 })

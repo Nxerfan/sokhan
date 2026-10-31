@@ -249,6 +249,28 @@ ${POSITIONING_FN_SOURCE}
     state.resizeHandler = null;
   }
 
+  // ---- V2 Color application ----
+  function applyColors(config) {
+    if (!state.rootEl) return;
+    var colors = config.colors;
+    if (!colors || !colors.tokens) {
+      state.rootEl.setAttribute('data-sk-color-mode', 'legacy');
+      return;
+    }
+    var t = colors.tokens;
+    state.rootEl.setAttribute('data-sk-color-mode', colors.mode || 'preset');
+    if (colors.presetId) state.rootEl.setAttribute('data-sk-color-preset', colors.presetId);
+    if (launcher) { launcher.style.background = t.launcherBg; launcher.style.color = t.launcherFg; }
+    if (panel) { panel.style.background = t.panelBg; }
+    var headerEl = panel ? panel.querySelector('.sk-header') : null;
+    if (headerEl) { headerEl.style.background = t.headerBg; headerEl.style.color = t.headerText; }
+    if (bodyEl) { bodyEl.style.color = t.panelText; }
+    if (sendBtn) { sendBtn.style.background = t.accent; }
+    if (typingEl) { typingEl.style.background = t.accent; }
+    // Re-render messages so bubbles pick up new colors.
+    if (typeof renderMessages === 'function') renderMessages();
+  }
+
   // ============================================================
   // Central message merge — the SINGLE ingestion chokepoint.
   // ============================================================
@@ -681,6 +703,8 @@ ${POSITIONING_FN_SOURCE}
     // could not be set earlier because the panel DOM element didn't exist yet).
     applyPosition();
     setupResizeListener();
+    // Apply V2 color tokens (additive — falls back to legacy colors if absent).
+    applyColors(config);
 
     // Mode-aware identity bootstrap (anonymous/verified_visitor/site_user_only).
     // Replaces the historical anonymous-only identifyVisitor() call — the
