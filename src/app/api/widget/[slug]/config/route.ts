@@ -13,6 +13,7 @@ import {
 } from '@/lib/widget/effective-positioning'
 import {
   resolveEffectiveColors,
+  getStoredColorTheme,
   type StoredColorInput,
 } from '@/lib/widget/effective-colors'
 
@@ -134,26 +135,46 @@ export async function GET(
     appearanceV2: widgetConfig.appearanceV2,
   }
   const effectiveColors = resolveEffectiveColors(colorInput, entitlements)
+  // Check if the tenant has an explicit V2 color selection OR is a paid plan
+  // with a stored V1 accent. If neither (e.g., Free with no V2 colors), do
+  // NOT include `colors` in the public response — the widget uses its
+  // hardcoded pre-V2 colors (preserving existing appearance for tenants
+  // who haven't adopted V2 colors).
+  const storedColorTheme = getStoredColorTheme(colorInput)
+  const hasV2ColorSelection = storedColorTheme !== null
+  const isPaidPlan = entitlements?.legacyCustomizationUnlocked ?? false
+  const hasStoredV1Accent = !!(widgetConfig.accentColor && /^#[0-9a-fA-F]{6}$/.test(widgetConfig.accentColor))
+  const shouldExposeColors = hasV2ColorSelection || (isPaidPlan && hasStoredV1Accent)
+
   // Derive the V1 `accentColor` from the effective colors for legacy consumers.
-  const legacyAccent = effectiveColors.tokens.accent
+  // For Free without V2 colors, use the original stored accentColor (preserving
+  // the pre-V2 appearance).
+  const legacyAccent = shouldExposeColors
+    ? effectiveColors.tokens.accent
+    : (widgetConfig.accentColor || effectiveColors.tokens.accent)
   const configWithPosition = { ...config, position: legacyPosition, accentColor: legacyAccent }
 
-  // Additive: the safe public access-policy fields. Existing clients continue
-  // working (additive top-level fields). NEVER expose the raw integration
-  // secret, integrationSecretHash, or any server-only credential — only the
-  // explicitly safe policy fields selected above.
-  return widgetHeaders(NextResponse.json({
+  // Build the response — conditionally include `colors` only when the tenant
+  // has an explicit V2 color selection or a paid V1 accent. This preserves
+  // the pre-V2 widget appearance for Free tenants who haven't adopted V2.
+  const responseBody: Record<string, unknown> = {
     slug,
     name: tenant.name,
     ...configWithPosition,
     ...publicPolicy,
     realtime,
-    // V2 positioning (additive — older clients ignore this field).
     positioning: {
       desktop: effectivePos.desktop,
       mobile: effectivePos.mobile,
     },
-    // V2 colors (additive — older clients ignore this field).
-    colors: effectiveColors,
-  }))
+  }
+  if (shouldExposeColors) {
+    responseBody.colors = effectiveColors
+  }
+
+  // Additive: the safe public access-policy fields. Existing clients continue
+  // working (additive top-level fields). NEVER expose the raw integration
+  // secret, integrationSecretHash, or any server-only credential — only the
+  // explicitly safe policy fields selected above.
+  return widgetHeaders(NextResponse.json(responseBody))
 }
