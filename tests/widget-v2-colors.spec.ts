@@ -889,18 +889,24 @@ test.describe('Widget V2 Colors — browser regression', () => {
       await customerPage.waitForTimeout(1000)
 
       // Inject a visitor message via the NPM widget's __ingestMessage helper.
+      // This directly adds a message to the widget's state and triggers
+      // renderMessages, creating a .sk-vis bubble with the custom colors.
       await customerPage.evaluate(() => {
         const inst = (window as any).__sukhan
-        if (inst && typeof inst.__ingestMessage === 'function') {
-          inst.__ingestMessage({
-            id: 'test-visitor-1',
-            conversationId: 'test',
-            senderType: 'contact',
-            contentType: 'text',
-            content: { text: 'Test visitor message' },
-            createdAt: new Date().toISOString(),
-          })
+        if (!inst) throw new Error('__sukhan instance not found on window')
+        if (typeof inst.__ingestMessage !== 'function') {
+          // List available methods for debugging.
+          const methods = Object.getOwnPropertyNames(Object.getPrototypeOf(inst)).join(', ')
+          throw new Error(`__ingestMessage not found. Available: ${methods}`)
         }
+        inst.__ingestMessage({
+          id: 'test-visitor-1',
+          conversationId: 'test',
+          senderType: 'contact',
+          contentType: 'text',
+          content: { text: 'Test visitor message' },
+          createdAt: new Date().toISOString(),
+        })
       })
       await customerPage.waitForTimeout(1000)
 
@@ -921,16 +927,15 @@ test.describe('Widget V2 Colors — browser regression', () => {
       // Inject an agent message via __ingestMessage.
       await customerPage.evaluate(() => {
         const inst = (window as any).__sukhan
-        if (inst && typeof inst.__ingestMessage === 'function') {
-          inst.__ingestMessage({
-            id: 'test-agent-1',
-            conversationId: 'test',
-            senderType: 'ai',
-            contentType: 'text',
-            content: { text: 'Test agent message' },
-            createdAt: new Date().toISOString(),
-          })
-        }
+        if (!inst) throw new Error('__sukhan instance not found')
+        inst.__ingestMessage({
+          id: 'test-agent-1',
+          conversationId: 'test',
+          senderType: 'ai',
+          contentType: 'text',
+          content: { text: 'Test agent message' },
+          createdAt: new Date().toISOString(),
+        })
       })
       await customerPage.waitForTimeout(1000)
 
