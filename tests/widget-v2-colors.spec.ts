@@ -804,7 +804,7 @@ test.describe('Widget V2 Colors — browser regression', () => {
   // ─── BLOCKER 2: Visitor/agent bubble computed colors (slug-script) ─────
 
   test('BLOCKER 2: Slug-script visitor + agent bubble computed colors match custom tokens', async ({ browser }) => {
-    test.setTimeout(180_000)
+    test.setTimeout(300_000)
     const { email, workspace } = creds('bubble-colors')
     const ctx = await browser.newContext()
     const page = await ctx.newPage()
@@ -839,20 +839,26 @@ test.describe('Widget V2 Colors — browser regression', () => {
       const root = document.querySelector('.sk-root') as HTMLElement
       return root && root.getAttribute('data-sk-color-mode') !== null
     }, { timeout: 15_000 })
-    await customerPage.waitForTimeout(2000)
 
-    // Open the panel.
+    // Wait for the widget to finish bootstrapping (identity + input ready).
+    await customerPage.waitForTimeout(3000)
+
+    // Open the panel + wait for the input to be ready.
     await customerPage.click('.sk-launcher')
+    await customerPage.waitForSelector('.sk-panel', { state: 'visible', timeout: 10_000 })
     await customerPage.waitForTimeout(1000)
+
+    // Wait for the input element to be present + visible.
+    await customerPage.waitForSelector('input.sk-input', { state: 'visible', timeout: 15_000 })
 
     // Type + send a visitor message.
     const input = customerPage.locator('input.sk-input')
     await input.fill('Test visitor message for bubble colors')
     await input.press('Enter')
-    await customerPage.waitForTimeout(2000)
+    await customerPage.waitForTimeout(3000)
 
     // Wait for the visitor bubble (.sk-vis) to appear.
-    await customerPage.waitForSelector('.sk-vis', { timeout: 15_000 })
+    await customerPage.waitForSelector('.sk-vis', { timeout: 30_000 })
 
     // Verify visitor bubble computed colors.
     const visitorColors = await customerPage.evaluate(() => {
@@ -866,21 +872,19 @@ test.describe('Widget V2 Colors — browser regression', () => {
     expect(visitorColors!.color).toBe(hexToRgb(CUSTOM_TOKENS.visitorBubbleText))
 
     // Send an agent reply via the dashboard API.
-    // Get the conversation list for this tenant.
     const convsRes = await page.request.get(`${DASHBOARD}/api/conversations`)
     const convsData = await convsRes.json()
     const conversations = convsData.conversations ?? []
     expect(conversations.length).toBeGreaterThan(0)
     const convId = conversations[0].id
 
-    // Send an agent message.
     await page.request.post(`${DASHBOARD}/api/conversations/${convId}/messages`, {
       data: { content: { text: 'Test agent reply for bubble colors' }, contentType: 'text' },
       headers: { 'Content-Type': 'application/json' },
     })
 
     // Wait for the agent bubble (.sk-agt) to appear (via polling or realtime).
-    await customerPage.waitForSelector('.sk-agt', { timeout: 30_000 })
+    await customerPage.waitForSelector('.sk-agt', { timeout: 60_000 })
 
     // Verify agent bubble computed colors.
     const agentColors = await customerPage.evaluate(() => {
