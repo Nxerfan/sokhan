@@ -154,9 +154,17 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
   async function save() {
     if (!config || isLocked) return
     setSaving(true)
+    // When V2 colors are active (stored), strip accentColor from the save
+    // body to avoid sending a stale legacy value that conflicts with the
+    // V2 color theme. The V2 Colors panel is the single source of truth
+    // for color when V2 colors are selected.
+    const saveBody: Record<string, unknown> = { ...config }
+    if (colors?.stored) {
+      delete saveBody.accentColor
+    }
     let res: Response
     try {
-      res = await fetch('/api/widget-config', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config) })
+      res = await fetch('/api/widget-config', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(saveBody) })
     } catch {
       toast.error(locale === 'fa' ? 'ذخیره ناموفق بود' : 'Failed to save')
       setSaving(false)
@@ -631,9 +639,12 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
                 <div className="space-y-2">
                   <Label>{t('accentColor')}</Label>
                   <div className="flex items-center gap-3">
-                    <input type="color" value={(disp ?? config).accentColor} onChange={(e) => update('accentColor', e.target.value)} disabled={isLocked} className="h-9 w-12 cursor-pointer rounded border border-border bg-transparent disabled:cursor-not-allowed disabled:opacity-50" />
-                    <Input data-testid="customization-accent" value={(disp ?? config).accentColor} onChange={(e) => update('accentColor', e.target.value)} dir="ltr" className="font-mono" disabled={isLocked} />
+                    <input type="color" value={(disp ?? config).accentColor} onChange={(e) => update('accentColor', e.target.value)} disabled={isLocked || !!colors?.stored} className="h-9 w-12 cursor-pointer rounded border border-border bg-transparent disabled:cursor-not-allowed disabled:opacity-50" />
+                    <Input data-testid="customization-accent" value={(disp ?? config).accentColor} onChange={(e) => update('accentColor', e.target.value)} dir="ltr" className="font-mono" disabled={isLocked || !!colors?.stored} />
                   </div>
+                  {!!colors?.stored && (
+                    <p className="text-xs text-muted-foreground">{fa ? 'رنگ توسط پنل رنگ‌های V2 مدیریت می‌شود' : 'Color is managed by the V2 Colors panel'}</p>
+                  )}
                 </div>
                 <div className="grid grid-cols-2 gap-3">
                   <div className="space-y-2">

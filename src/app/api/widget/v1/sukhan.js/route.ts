@@ -127,6 +127,7 @@ ${POSITIONING_FN_SOURCE}
     panelSide: 'right',
     rootEl: null,
     resizeHandler: null,
+    colorTokens: null,
   };
 
   // ============================================================
@@ -242,17 +243,19 @@ ${POSITIONING_FN_SOURCE}
     if (!state.rootEl) return;
     var colors = config.colors;
     if (!colors || !colors.tokens) {
+      state.colorTokens = null;
       state.rootEl.setAttribute('data-sk-color-mode', 'legacy');
       return;
     }
     var t = colors.tokens;
+    state.colorTokens = t;
     state.rootEl.setAttribute('data-sk-color-mode', colors.mode || 'preset');
     if (colors.presetId) state.rootEl.setAttribute('data-sk-color-preset', colors.presetId);
     if (launcher) { launcher.style.background = t.launcherBg; launcher.style.color = t.launcherFg; }
     if (panel) { panel.style.background = t.panelBg; }
     var headerEl = panel ? panel.querySelector('.sk-header') : null;
     if (headerEl) { headerEl.style.background = t.headerBg; headerEl.style.color = t.headerText; }
-    if (bodyEl) { bodyEl.style.color = t.panelText; }
+    if (bodyEl) { bodyEl.style.background = t.panelBg; bodyEl.style.color = t.panelText; }
     if (sendBtn) { sendBtn.style.background = t.accent; }
     if (typingEl) { typingEl.style.background = t.accent; }
     if (typeof renderMessages === 'function') renderMessages();
@@ -703,8 +706,9 @@ ${POSITIONING_FN_SOURCE}
         bubble.textContent = msg.content.text || '';
       } else {
         var align = isVisitor ? 'flex-end' : 'flex-start';
-        var bg = isVisitor ? '#0E1116' : '#fff';
-        var color = isVisitor ? '#FAF7F2' : '#0E1116';
+        var ct = state.colorTokens;
+        var bg = isVisitor ? (ct ? ct.visitorBubbleBg : '#0E1116') : (ct ? ct.agentBubbleBg : '#fff');
+        var color = isVisitor ? (ct ? ct.visitorBubbleText : '#FAF7F2') : (ct ? ct.agentBubbleText : '#0E1116');
         var radius = isVisitor ? '12px 12px 4px 12px' : '12px 12px 12px 4px';
         css(bubble, { alignSelf:align, background:bg, color:color, borderRadius:radius, padding:'8px 12px', fontSize:'13px', maxWidth:'75%', boxShadow:'0 1px 2px rgba(0,0,0,.06)', wordBreak:'break-word' });
         bubble.setAttribute('dir', 'auto');

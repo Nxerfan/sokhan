@@ -190,12 +190,16 @@ export function mergeColorPatch(
     mobile: {},
   }
 
-  // Downgrade preservation: if the patch switches to preset mode but the
-  // existing stored colors had custom tokens (paid), preserve those custom
-  // tokens in storage so they can be restored on upgrade. The effective
-  // resolver will ignore them when the plan doesn't have customColors.
+  // Downgrade preservation: if the patch switches to preset mode (or
+  // changes preset), preserve any existing stored custom tokens so they
+  // can be restored on upgrade. This applies on EVERY preset-to-preset
+  // transition, not just custom→preset — repeated palette changes must
+  // NOT destroy previously saved paid custom tokens.
   let mergedColors = patch.theme
-  if (patch.theme.mode === 'preset' && base.colors?.mode === 'custom' && base.colors.custom) {
+  if (
+    patch.theme.mode === 'preset' &&
+    base.colors?.custom
+  ) {
     mergedColors = {
       mode: 'preset',
       presetId: patch.theme.presetId,

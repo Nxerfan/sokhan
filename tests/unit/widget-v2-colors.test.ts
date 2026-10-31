@@ -456,20 +456,28 @@ describe('Effective color resolver — resolveEffectiveColors', () => {
     expect(eff.tokens).toEqual(DEFAULT_EFFECTIVE_COLORS.tokens)
   })
 
-  test('No V2 colors + V1 accentColor → derive from accent', () => {
+  test('No V2 colors + V1 accentColor → derive from accent (PAID only)', () => {
+    // BLOCKER 1: V1 accent fallback applies ONLY to paid plans
+    // (legacyCustomizationUnlocked). Free without V2 colors gets defaults.
     const stored: StoredColorInput = {
       accentColor: '#AABBCC',
       appearanceV2: { version: 1, desktop: {} },
     }
-    const eff = resolveEffectiveColors(stored, freeEnt)
-    expect(eff.mode).toBe('preset')
-    // Derived: default tokens with accent/headerBg/agentBubbleBg replaced
-    expect(eff.tokens.accent).toBe('#AABBCC')
-    expect(eff.tokens.headerBg).toBe('#AABBCC')
-    expect(eff.tokens.agentBubbleBg).toBe('#AABBCC')
-    // Other tokens stay default
-    expect(eff.tokens.launcherBg).toEqual(DEFAULT_COLOR_TOKENS.launcherBg)
-    expect(eff.tokens.panelBg).toEqual(DEFAULT_COLOR_TOKENS.panelBg)
+    // Pro: V1 accent applied (preserves historical look).
+    const proEff = resolveEffectiveColors(stored, proEnt)
+    expect(proEff.mode).toBe('preset')
+    expect(proEff.tokens.accent).toBe('#AABBCC')
+    expect(proEff.tokens.headerBg).toBe('#AABBCC')
+    // Pre-V2 agent bubbles are WHITE, not accent (legacy compat).
+    expect(proEff.tokens.agentBubbleBg).toBe('#FFFFFF')
+    expect(proEff.tokens.agentBubbleText).toBe('#0E1116')
+    // Visitor bubbles: dark (pre-V2 appearance).
+    expect(proEff.tokens.visitorBubbleBg).toBe('#0E1116')
+    expect(proEff.tokens.visitorBubbleText).toBe('#FAF7F2')
+
+    // Free: V1 accent NOT applied → default Sukhan palette.
+    const freeEff = resolveEffectiveColors(stored, freeEnt)
+    expect(freeEff.tokens.accent).toBe(DEFAULT_COLOR_TOKENS.accent)
   })
 
   test('No V2 + no V1 → default Sukhan palette', () => {
@@ -485,16 +493,22 @@ describe('Effective color resolver — resolveEffectiveColors', () => {
     expect(eff).toEqual(DEFAULT_EFFECTIVE_COLORS)
   })
 
-  test('Malformed V2 → V1 fallback', () => {
+  test('Malformed V2 → V1 fallback (PAID only)', () => {
     const stored: StoredColorInput = {
       accentColor: '#ABCDEF',
       appearanceV2: { version: 999 }, // unknown version → parser returns null
     }
+    // Pro: V2 malformed → fall back to V1 accentColor (pre-V2 appearance).
     const eff = resolveEffectiveColors(stored, proEnt)
-    // V2 malformed → fall back to V1 accentColor derivation
     expect(eff.tokens.accent).toBe('#ABCDEF')
     expect(eff.tokens.headerBg).toBe('#ABCDEF')
-    expect(eff.tokens.agentBubbleBg).toBe('#ABCDEF')
+    // Pre-V2 agent bubbles are white, not accent.
+    expect(eff.tokens.agentBubbleBg).toBe('#FFFFFF')
+    expect(eff.tokens.agentBubbleText).toBe('#0E1116')
+
+    // Free: V2 malformed → default Sukhan palette (NOT V1 accent).
+    const freeEff = resolveEffectiveColors(stored, freeEnt)
+    expect(freeEff.tokens.accent).toBe(DEFAULT_COLOR_TOKENS.accent)
   })
 
   test('Downgrade/upgrade: Free edits preset, paid custom tokens preserved in storage', () => {
@@ -810,5 +824,150 @@ describe('Entitlements — getEntitlements', () => {
   test("getEntitlements('__proto__') returns null", () => {
     expect(getEntitlements('__proto__')).toBeNull()
     expect(getEntitlements('prototype')).toBeNull()
+  })
+})
+
+// ─── BLOCKER 2: Preset-to-preset custom token preservation ───────────────
+
+describe('BLOCKER 2 — Preset-to-preset custom token preservation', () => {
+  const proEnt = getEntitlements('pro')
+
+  test('Pro custom → preset → preset → preset: custom tokens preserved across all transitions', () => {
+    // 1. Pro saves custom colors.
+    const customTokens: Record<string, string> = {
+      accent: '#FF00FF', launcherBg: '#1A0033', launcherFg: '#FFCCFF',
+      headerBg: '#5B0E2D', headerText: '#FFE5EE', panelBg: '#FAF5F8',
+      panelText: '#1A0033', visitorBubbleBg: '#F5DCE8', visitorBubbleText: '#1A0033',
+      agentBubbleBg: '#FF00FF', agentBubbleText: '#FFFFFF',
+    }
+    const customPatch = validateColorPatch(
+      { colors: { mode: 'custom', custom: customTokens } },
+      proEnt,
+    )
+    expect(customPatch.ok).toBe(true)
+    if (!customPatch.ok) return
+
+    // 2. First merge: custom theme stored.
+    let stored = mergeColorPatch(null, customPatch.data)
+    expect(stored.colors?.custom).toEqual(customTokens as any)
+
+    // 3. Switch to emerald preset.
+    const emeraldPatch = validateColorPatch(
+      { colors: { mode: 'preset', presetId: 'emerald' } },
+      proEnt,
+    )
+    expect(emeraldPatch.ok).toBe(true)
+    if (!emeraldPatch.ok) return
+    stored = mergeColorPatch(stored, emeraldPatch.data)
+    expect(stored.colors?.mode).toBe('preset')
+    expect(stored.colors?.presetId).toBe('emerald')
+    // Custom tokens MUST be preserved!
+    expect(stored.colors?.custom).toEqual(customTokens as any)
+
+    // 4. Switch to ocean preset (second preset-to-preset transition).
+    const oceanPatch = validateColorPatch(
+      { colors: { mode: 'preset', presetId: 'ocean' } },
+      proEnt,
+    )
+    expect(oceanPatch.ok).toBe(true)
+    if (!oceanPatch.ok) return
+    stored = mergeColorPatch(stored, oceanPatch.data)
+    expect(stored.colors?.presetId).toBe('ocean')
+    // Custom tokens STILL preserved after second transition!
+    expect(stored.colors?.custom).toEqual(customTokens as any)
+
+    // 5. Switch back to custom mode → original tokens restored.
+    const customAgainPatch = validateColorPatch(
+      { colors: { mode: 'custom', custom: stored.colors!.custom! } },
+      proEnt,
+    )
+    expect(customAgainPatch.ok).toBe(true)
+    if (!customAgainPatch.ok) return
+    stored = mergeColorPatch(stored, customAgainPatch.data)
+    expect(stored.colors?.mode).toBe('custom')
+    expect(stored.colors?.custom).toEqual(customTokens as any)
+  })
+
+  test('Free preset → preset: custom tokens from prior paid period preserved', () => {
+    const freeEnt = getEntitlements('free')
+    // Simulate: Pro had custom colors, then downgraded to Free.
+    // Free can only save presets.
+    const existingWithCustom = {
+      version: 1,
+      desktop: {},
+      mobile: {},
+      colors: { mode: 'preset', presetId: 'sukhan', custom: { accent: '#123456', launcherBg: '#000000', launcherFg: '#FFFFFF', headerBg: '#123456', headerText: '#FFFFFF', panelBg: '#FFFFFF', panelText: '#000000', visitorBubbleBg: '#000000', visitorBubbleText: '#FFFFFF', agentBubbleBg: '#FFFFFF', agentBubbleText: '#000000' } },
+    }
+
+    // Free selects emerald preset.
+    const emeraldPatch = validateColorPatch(
+      { colors: { mode: 'preset', presetId: 'emerald' } },
+      freeEnt,
+    )
+    expect(emeraldPatch.ok).toBe(true)
+    if (!emeraldPatch.ok) return
+
+    const merged = mergeColorPatch(existingWithCustom, emeraldPatch.data)
+    // Preset updated.
+    expect(merged.colors?.presetId).toBe('emerald')
+    // Custom tokens preserved (not destroyed by preset-to-preset transition).
+    expect(merged.colors?.custom).toBeDefined()
+    expect(merged.colors?.custom?.accent).toBe('#123456')
+  })
+})
+
+// ─── BLOCKER 5: Palette WCAG AA contrast ─────────────────────────────────
+
+describe('BLOCKER 5 — Predefined palette WCAG AA contrast', () => {
+  const { contrastRatio, meetsContrastAA, COLOR_PALETTES } = require('../../src/lib/widget/color-palettes')
+
+  // Test all text/background pairs for each palette.
+  const pairs: Array<{ name: string; fgKey: string; bgKey: string }> = [
+    { name: 'header text on header bg', fgKey: 'headerText', bgKey: 'headerBg' },
+    { name: 'launcher fg on launcher bg', fgKey: 'launcherFg', bgKey: 'launcherBg' },
+    { name: 'panel text on panel bg', fgKey: 'panelText', bgKey: 'panelBg' },
+    { name: 'visitor text on visitor bg', fgKey: 'visitorBubbleText', bgKey: 'visitorBubbleBg' },
+    { name: 'agent text on agent bg', fgKey: 'agentBubbleText', bgKey: 'agentBubbleBg' },
+  ]
+
+  for (const palette of COLOR_PALETTES) {
+    for (const pair of pairs) {
+      test(`${palette.id}: ${pair.name} meets WCAG AA (≥4.5:1)`, () => {
+        const fg = palette.tokens[pair.fgKey]
+        const bg = palette.tokens[pair.bgKey]
+        const ratio = contrastRatio(fg, bg)
+        expect(ratio).toBeGreaterThanOrEqual(4.5)
+      })
+    }
+  }
+})
+
+// ─── BLOCKER 5: Sukhan palette matches pre-V2 appearance ─────────────────
+
+describe('BLOCKER 5 — Sukhan palette matches pre-V2 widget appearance', () => {
+  const { getPaletteById } = require('../../src/lib/widget/color-palettes')
+
+  test('sukhan palette visitor bubbles are dark (pre-V2 appearance)', () => {
+    const sukhan = getPaletteById('sukhan')
+    expect(sukhan.tokens.visitorBubbleBg).toBe('#0E1116') // dark
+    expect(sukhan.tokens.visitorBubbleText).toBe('#FAF7F2') // light
+  })
+
+  test('sukhan palette agent bubbles are light (pre-V2 appearance)', () => {
+    const sukhan = getPaletteById('sukhan')
+    expect(sukhan.tokens.agentBubbleBg).toBe('#F0EEE9') // light
+    expect(sukhan.tokens.agentBubbleText).toBe('#0E1116') // dark
+  })
+
+  test('sukhan palette header is dark (not gold) for AA contrast', () => {
+    const sukhan = getPaletteById('sukhan')
+    // Header uses dark bg (launcherBg) for AA contrast with light text.
+    expect(sukhan.tokens.headerBg).toBe('#0E1116')
+    expect(sukhan.tokens.headerText).toBe('#FAF7F2')
+  })
+
+  test('sukhan palette accent is still gold (for buttons/links)', () => {
+    const sukhan = getPaletteById('sukhan')
+    expect(sukhan.tokens.accent).toBe('#E09A2B')
   })
 })

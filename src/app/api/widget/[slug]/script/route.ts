@@ -139,6 +139,7 @@ ${POSITIONING_FN_SOURCE}
     panelSide: 'right',   // 'left' | 'right' | 'center'
     rootEl: null,         // the root DOM element (for repositioning)
     resizeHandler: null,  // resize listener (for cleanup)
+    colorTokens: null,    // V2 color tokens (from config.colors.tokens)
   };
 
   // ============================================================
@@ -254,17 +255,19 @@ ${POSITIONING_FN_SOURCE}
     if (!state.rootEl) return;
     var colors = config.colors;
     if (!colors || !colors.tokens) {
+      state.colorTokens = null;
       state.rootEl.setAttribute('data-sk-color-mode', 'legacy');
       return;
     }
     var t = colors.tokens;
+    state.colorTokens = t; // store for renderMessages bubble colors
     state.rootEl.setAttribute('data-sk-color-mode', colors.mode || 'preset');
     if (colors.presetId) state.rootEl.setAttribute('data-sk-color-preset', colors.presetId);
     if (launcher) { launcher.style.background = t.launcherBg; launcher.style.color = t.launcherFg; }
     if (panel) { panel.style.background = t.panelBg; }
     var headerEl = panel ? panel.querySelector('.sk-header') : null;
     if (headerEl) { headerEl.style.background = t.headerBg; headerEl.style.color = t.headerText; }
-    if (bodyEl) { bodyEl.style.color = t.panelText; }
+    if (bodyEl) { bodyEl.style.background = t.panelBg; bodyEl.style.color = t.panelText; }
     if (sendBtn) { sendBtn.style.background = t.accent; }
     if (typingEl) { typingEl.style.background = t.accent; }
     // Re-render messages so bubbles pick up new colors.
@@ -1281,8 +1284,11 @@ ${POSITIONING_FN_SOURCE}
         bubble.textContent = msg.content.text || '';
       } else {
         var align = isVisitor ? 'flex-end' : 'flex-start';
-        var bg = isVisitor ? '#0E1116' : '#fff';
-        var color = isVisitor ? '#FAF7F2' : '#0E1116';
+        // V2 colors: read visitor/agent bubble tokens from state when present.
+        // Falls back to hardcoded brand colors when config.colors is absent.
+        var ct = state.colorTokens;
+        var bg = isVisitor ? (ct ? ct.visitorBubbleBg : '#0E1116') : (ct ? ct.agentBubbleBg : '#fff');
+        var color = isVisitor ? (ct ? ct.visitorBubbleText : '#FAF7F2') : (ct ? ct.agentBubbleText : '#0E1116');
         var radius = isVisitor ? '12px 12px 4px 12px' : '12px 12px 12px 4px';
         // #1 + #8 visual state: pending → slightly dimmed + a
         // "sending…" caption; failed → red border + retry button +

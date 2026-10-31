@@ -623,16 +623,8 @@ test.describe('Widget V2 Colors — browser regression', () => {
     await ctx.close()
   })
 
-  // ─── NPM widget surface: real rendered V2 colors ────────────────────────
-  //
-  // This test is SKIPPED in the default CI run because it requires building
-  // the NPM widget bundle (`packages/widget-npm`) on the host, which is not
-  // always available in the Lite Docker CI. The unit-level coverage for the
-  // NPM widget's applyColors() is provided by the parity unit test
-  // (tests/unit/widget-v2-colors.test.ts) which verifies the same code path
-  // in isolation. To enable this browser-level test, remove the .skip and
-  // ensure `bun run build` succeeds in packages/widget-npm.
-  test.skip('NPM widget surface: real rendered V2 colors (data-sk-color-mode + computed header)', async ({ browser }) => {
+  // ─── NPM widget surface: real rendered V2 custom colors ──────────────────
+  test('NPM widget surface: real rendered V2 custom colors (computed styles)', async ({ browser }) => {
     test.setTimeout(180_000)
     const { email, workspace } = creds('npm-colors')
     const ctx = await browser.newContext()
@@ -651,9 +643,9 @@ test.describe('Widget V2 Colors — browser regression', () => {
       data: `email=${email}&password=password123&csrfToken=${csrfToken}&json=true`,
     })
 
-    // Set the emerald palette via PATCH API.
+    // Set a CUSTOM color theme (non-default paid) via PATCH API.
     await page.request.patch(`${BASE}/api/widget-config`, {
-      data: { colors: { mode: 'preset', presetId: 'emerald' } },
+      data: { colors: { mode: 'custom', custom: CUSTOM_TOKENS } },
       headers: { 'Content-Type': 'application/json' },
     })
 
@@ -710,19 +702,29 @@ test.describe('Widget V2 Colors — browser regression', () => {
       }, { timeout: 15_000 })
       await customerPage.waitForTimeout(1000)
 
-      // Verify diagnostic attributes + computed header color.
-      const diag = await customerPage.evaluate(() => {
+      // Verify actual computed styles for launcher, header, body background.
+      const computed = await customerPage.evaluate(() => {
         const root = document.querySelector('.sk-root') as HTMLElement
+        const launcher = document.querySelector('.sk-launcher') as HTMLElement
         const header = document.querySelector('.sk-header') as HTMLElement
+        const body = document.querySelector('.sk-body') as HTMLElement
         return {
           mode: root?.getAttribute('data-sk-color-mode'),
-          preset: root?.getAttribute('data-sk-color-preset'),
+          launcherBg: launcher ? getComputedStyle(launcher).backgroundColor : null,
+          launcherFg: launcher ? getComputedStyle(launcher).color : null,
           headerBg: header ? getComputedStyle(header).backgroundColor : null,
+          headerText: header ? getComputedStyle(header).color : null,
+          bodyBg: body ? getComputedStyle(body).backgroundColor : null,
         }
       })
-      expect(diag.mode).toBe('preset')
-      expect(diag.preset).toBe('emerald')
-      expect(diag.headerBg).toBe(hexToRgb(EMERALD_HEADER_BG))
+      // The NPM widget must have applied V2 custom colors.
+      expect(computed.mode).toBe('custom')
+      // Launcher background + foreground.
+      expect(computed.launcherBg).toBe(hexToRgb(CUSTOM_TOKENS.launcherBg))
+      // Header background + text.
+      expect(computed.headerBg).toBe(hexToRgb(CUSTOM_TOKENS.headerBg))
+      // Body background (panelBg applied to .sk-body, not just outer panel).
+      expect(computed.bodyBg).toBe(hexToRgb(CUSTOM_TOKENS.panelBg))
     } finally {
       await new Promise<void>((r) => npmServer.close(() => r()))
     }

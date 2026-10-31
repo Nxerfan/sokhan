@@ -109,34 +109,55 @@ export function resolveEffectiveColors(
     }
   }
 
-  // No V2 colors → try V1 accentColor fallback.
-  if (stored.accentColor && /^#[0-9a-fA-F]{6}$/.test(stored.accentColor)) {
-    // Derive a minimal token set from the V1 accent color.
-    // This preserves the historical look for paid tenants who haven't
-    // migrated to V2 colors yet.
+  // No V2 colors → try V1 accentColor fallback ONLY for paid plans
+  // (legacyCustomizationUnlocked). Free tenants without a V2 color
+  // selection get the default Sukhan palette — not an arbitrary stored
+  // V1 accent from a previous paid period. The stored V1 accent is
+  // preserved in the WidgetConfig row for restoration on upgrade.
+  if (
+    stored.accentColor &&
+    /^#[0-9a-fA-F]{6}$/.test(stored.accentColor) &&
+    entitlements.legacyCustomizationUnlocked
+  ) {
     return deriveFromAccentColor(stored.accentColor)
   }
 
-  // No V2, no V1 → default.
+  // No V2, no V1 (or Free with no V2) → default Sukhan palette.
   return { ...DEFAULT_EFFECTIVE_COLORS }
 }
 
 /**
  * Derive a color token set from a single V1 accent color.
  *
- * This preserves the historical look: accent color on the header + agent
- * bubbles, dark launcher, white panel, etc. It's NOT a full palette —
- * just a compatible mapping that uses the tenant's saved accent color.
+ * This preserves the EXACT pre-V2 widget appearance for paid tenants who
+ * haven't migrated to V2 colors yet. The pre-V2 runtime hardcodes:
+ *   - Header: bg=accent, text=#FFFFFF (white)
+ *   - Launcher: bg=#0E1116, fg=#FAF7F2
+ *   - Panel: bg=#FFFFFF, text=#0E1116
+ *   - Visitor bubbles: bg=#0E1116 (dark), text=#FAF7F2 (light)
+ *   - Agent bubbles: bg=#FFFFFF (white), text=#0E1116 (dark)
+ *
+ * This is NOT a palette — it's a V1 compatibility fallback. The accent
+ * color is the only variable; all other tokens are fixed to the pre-V2
+ * hardcoded values. This ensures no existing paid tenant's widget
+ * appearance changes as a side effect of enabling V2.
  */
 function deriveFromAccentColor(accent: string): EffectiveColors {
   return {
     mode: 'preset',
     presetId: undefined, // not a named palette — derived from V1
     tokens: {
-      ...DEFAULT_COLOR_TOKENS,
       accent,
+      launcherBg: '#0E1116',
+      launcherFg: '#FAF7F2',
       headerBg: accent,
-      agentBubbleBg: accent,
+      headerText: '#FFFFFF',
+      panelBg: '#FFFFFF',
+      panelText: '#0E1116',
+      visitorBubbleBg: '#0E1116',
+      visitorBubbleText: '#FAF7F2',
+      agentBubbleBg: '#FFFFFF',
+      agentBubbleText: '#0E1116',
     },
   }
 }

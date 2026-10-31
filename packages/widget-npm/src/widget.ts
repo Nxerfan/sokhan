@@ -819,11 +819,12 @@ export class SukhanWidget implements SukhanInstance {
       headerEl.style.background = t.headerBg
       headerEl.style.color = t.headerText
     }
-    // Body text color (applied to the body container; bubbles set their own
-    // text color separately, but the body container color cascades to system
-    // messages + timestamps).
+    // Body text color + background (applied to the body container; bubbles
+    // set their own colors separately, but the body container color cascades
+    // to system messages + timestamps).
     if (this.bodyEl) {
       this.bodyEl.style.color = t.panelText
+      this.bodyEl.style.background = t.panelBg
     }
     // Accent surfaces: send button + typing indicator background.
     if (this.sendBtn) {
