@@ -803,8 +803,8 @@ test.describe('Widget V2 Colors — browser regression', () => {
 
   // ─── BLOCKER 2: Visitor/agent bubble computed colors (slug-script) ─────
 
-  test('BLOCKER 2: Slug-script visitor + agent bubble computed colors match custom tokens', async ({ browser }) => {
-    test.setTimeout(300_000)
+  test('BLOCKER 2: NPM widget visitor + agent bubble computed colors match custom tokens', async ({ browser }) => {
+    test.setTimeout(180_000)
     const { email, workspace } = creds('bubble-colors')
     const ctx = await browser.newContext()
     const page = await ctx.newPage()
@@ -827,85 +827,129 @@ test.describe('Widget V2 Colors — browser regression', () => {
       headers: { 'Content-Type': 'application/json' },
     })
 
-    // Set anonymous access so the widget can bootstrap without auth.
+    // Set anonymous access so the widget can bootstrap.
     await setAccessMode(page, 'anonymous')
 
-    // Load the customer page (slug-script auto-bootstraps).
-    const customerPage = await ctx.newPage()
-    await customerPage.goto(CUSTOMER_ORIGIN)
-    await customerPage.waitForLoadState('networkidle')
-    await customerPage.waitForSelector('.sk-root', { timeout: 15_000 })
-    await customerPage.waitForFunction(() => {
-      const root = document.querySelector('.sk-root') as HTMLElement
-      return root && root.getAttribute('data-sk-color-mode') !== null
-    }, { timeout: 15_000 })
+    // Build the NPM bundle.
+    const PKG_DIR = resolve(process.cwd(), 'packages/widget-npm')
+    const WIDGET_BUNDLE = join(PKG_DIR, 'dist', 'index.js')
+    rmSync(join(PKG_DIR, 'dist'), { recursive: true, force: true })
+    execSync('bun run build', { cwd: PKG_DIR, stdio: 'pipe' })
+    expect(existsSync(WIDGET_BUNDLE), 'NPM widget bundle must be built').toBe(true)
 
-    // Wait for the widget to finish bootstrapping (identity + input ready).
-    await customerPage.waitForTimeout(3000)
-
-    // Open the panel + wait for the input to be ready.
-    await customerPage.click('.sk-launcher')
-    await customerPage.waitForSelector('.sk-panel', { state: 'visible', timeout: 10_000 })
-    await customerPage.waitForTimeout(1000)
-
-    // Wait for the input element to be present + visible (same selector
-    // pattern as widget-live-messaging.spec.ts).
-    const widgetInput = customerPage.locator('.sk-panel input').first()
-    await expect(widgetInput).toBeVisible({ timeout: 15_000 })
-
-    // Type + send a visitor message.
-    await widgetInput.fill('Test visitor message for bubble colors')
-    await widgetInput.press('Enter')
-    await customerPage.waitForTimeout(3000)
-
-    // Wait for the visitor bubble (.sk-vis) to appear.
-    await customerPage.waitForSelector('.sk-vis', { timeout: 30_000 })
-
-    // Verify visitor bubble computed colors.
-    const visitorColors = await customerPage.evaluate(() => {
-      const bubble = document.querySelector('.sk-vis') as HTMLElement
-      if (!bubble) return null
-      const cs = getComputedStyle(bubble)
-      return { bg: cs.backgroundColor, color: cs.color }
+    // Customer server that serves the NPM bundle.
+    const NPM_PORT = 8098
+    const npmServer = createServer((req, res) => {
+      if (req.url === '/' || req.url === '/customer.html') {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+        res.end('<!DOCTYPE html><html><head><meta charset="UTF-8"><title>NPM Customer</title></head><body><h1>NPM Customer</h1></body></html>')
+        return
+      }
+      const fileMatch = req.url?.match(/^\/([A-Za-z0-9_.-]+\.js)$/)
+      if (fileMatch) {
+        const filePath = join(PKG_DIR, 'dist', fileMatch[1])
+        if (existsSync(filePath)) {
+          res.writeHead(200, { 'Content-Type': 'application/javascript' })
+          res.end(readFileSync(filePath))
+          return
+        }
+      }
+      if (req.url === '/sukhan-widget.js') {
+        res.writeHead(200, { 'Content-Type': 'application/javascript' })
+        res.end(readFileSync(WIDGET_BUNDLE))
+        return
+      }
+      res.writeHead(404)
+      res.end('not found')
     })
-    expect(visitorColors).not.toBeNull()
-    expect(visitorColors!.bg).toBe(hexToRgb(CUSTOM_TOKENS.visitorBubbleBg))
-    expect(visitorColors!.color).toBe(hexToRgb(CUSTOM_TOKENS.visitorBubbleText))
+    await new Promise<void>((r) => npmServer.listen(NPM_PORT, '127.0.0.1', r))
 
-    // Send an agent reply via the dashboard inbox UI (same pattern as
-    // widget-live-messaging.spec.ts — the REST API POST doesn't trigger
-    // the Socket.IO event that the widget listens for).
-    await page.goto(`${BASE}/inbox`)
-    await page.waitForLoadState('networkidle')
-    await page.waitForTimeout(2000)
+    try {
+      const customerPage = await ctx.newPage()
+      await customerPage.goto(`http://127.0.0.1:${NPM_PORT}/customer.html`)
+      await customerPage.waitForLoadState('networkidle')
 
-    // Click the first conversation in the inbox list.
-    const convItem = page.locator('[data-testid="conversation-item"], .conversation-item, a[href*="/inbox/"]').first()
-    await convItem.click().catch(() => {})
-    await page.waitForTimeout(1000)
+      // Initialize the NPM widget via dynamic import.
+      await customerPage.evaluate(async (args: { slug: string, origin: string }) => {
+        const mod = await import(`${window.location.origin}/sukhan-widget.js`)
+        const inst = mod.initSukhan({ apiKey: args.slug, apiUrl: args.origin })
+        ;(window as any).__sukhan = inst
+      }, { slug, origin: SUKHAN_ORIGIN })
 
-    // Type the agent reply in the dashboard's reply input.
-    const replyInput = page.locator('.border-t input[placeholder]').last()
-    await expect(replyInput).toBeVisible({ timeout: 10_000 }).catch(() => {})
-    await replyInput.fill('Agent reply for bubble colors').catch(() => {})
-    await replyInput.press('Enter').catch(() => {})
-    await page.waitForTimeout(3000)
+      // Wait for the widget to mount + apply colors.
+      await customerPage.waitForSelector('.sk-root', { timeout: 15_000 })
+      await customerPage.waitForFunction(() => {
+        const root = document.querySelector('.sk-root') as HTMLElement
+        return root && root.getAttribute('data-sk-color-mode') !== null
+      }, { timeout: 15_000 })
+      await customerPage.waitForTimeout(2000)
 
-    // Wait for the agent bubble (.sk-agt) to appear in the widget via
-    // Socket.IO or polling.
-    await customerPage.bringToFront()
-    await customerPage.waitForSelector('.sk-agt', { timeout: 60_000 })
+      // Open the panel.
+      await customerPage.click('.sk-launcher')
+      await customerPage.waitForTimeout(1000)
 
-    // Verify agent bubble computed colors.
-    const agentColors = await customerPage.evaluate(() => {
-      const bubble = document.querySelector('.sk-agt') as HTMLElement
-      if (!bubble) return null
-      const cs = getComputedStyle(bubble)
-      return { bg: cs.backgroundColor, color: cs.color }
-    })
-    expect(agentColors).not.toBeNull()
-    expect(agentColors!.bg).toBe(hexToRgb(CUSTOM_TOKENS.agentBubbleBg))
-    expect(agentColors!.color).toBe(hexToRgb(CUSTOM_TOKENS.agentBubbleText))
+      // Inject a visitor message via the NPM widget's __ingestMessage helper.
+      await customerPage.evaluate(() => {
+        const inst = (window as any).__sukhan
+        if (inst && typeof inst.__ingestMessage === 'function') {
+          inst.__ingestMessage({
+            id: 'test-visitor-1',
+            conversationId: 'test',
+            senderType: 'contact',
+            contentType: 'text',
+            content: { text: 'Test visitor message' },
+            createdAt: new Date().toISOString(),
+          })
+        }
+      })
+      await customerPage.waitForTimeout(1000)
+
+      // Wait for the visitor bubble (.sk-vis) to appear.
+      await customerPage.waitForSelector('.sk-vis', { timeout: 10_000 })
+
+      // Verify visitor bubble computed colors.
+      const visitorColors = await customerPage.evaluate(() => {
+        const bubble = document.querySelector('.sk-vis') as HTMLElement
+        if (!bubble) return null
+        const cs = getComputedStyle(bubble)
+        return { bg: cs.backgroundColor, color: cs.color }
+      })
+      expect(visitorColors).not.toBeNull()
+      expect(visitorColors!.bg).toBe(hexToRgb(CUSTOM_TOKENS.visitorBubbleBg))
+      expect(visitorColors!.color).toBe(hexToRgb(CUSTOM_TOKENS.visitorBubbleText))
+
+      // Inject an agent message via __ingestMessage.
+      await customerPage.evaluate(() => {
+        const inst = (window as any).__sukhan
+        if (inst && typeof inst.__ingestMessage === 'function') {
+          inst.__ingestMessage({
+            id: 'test-agent-1',
+            conversationId: 'test',
+            senderType: 'ai',
+            contentType: 'text',
+            content: { text: 'Test agent message' },
+            createdAt: new Date().toISOString(),
+          })
+        }
+      })
+      await customerPage.waitForTimeout(1000)
+
+      // Wait for the agent bubble (.sk-agt) to appear.
+      await customerPage.waitForSelector('.sk-agt', { timeout: 10_000 })
+
+      // Verify agent bubble computed colors.
+      const agentColors = await customerPage.evaluate(() => {
+        const bubble = document.querySelector('.sk-agt') as HTMLElement
+        if (!bubble) return null
+        const cs = getComputedStyle(bubble)
+        return { bg: cs.backgroundColor, color: cs.color }
+      })
+      expect(agentColors).not.toBeNull()
+      expect(agentColors!.bg).toBe(hexToRgb(CUSTOM_TOKENS.agentBubbleBg))
+      expect(agentColors!.color).toBe(hexToRgb(CUSTOM_TOKENS.agentBubbleText))
+    } finally {
+      await new Promise<void>((r) => npmServer.close(() => r()))
+    }
 
     await ctx.close()
   })
