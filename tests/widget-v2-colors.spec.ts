@@ -904,6 +904,10 @@ test.describe('Widget V2 Colors — browser regression', () => {
       headers: { 'Content-Type': 'application/json' },
     })
 
+    // Set anonymous access mode so the widget bootstraps via identifyVisitor()
+    // (required for the intercepted contact POST to be called).
+    await setAccessMode(page, 'anonymous')
+
     const customerPage = await ctx.newPage()
     await setupDeterministicMessages(customerPage, slug)
     await customerPage.goto(CUSTOMER_ORIGIN)
@@ -954,6 +958,9 @@ test.describe('Widget V2 Colors — browser regression', () => {
       data: { colors: { mode: 'custom', custom: CUSTOM_TOKENS } },
       headers: { 'Content-Type': 'application/json' },
     })
+
+    // Set anonymous access mode so the widget bootstraps via identifyVisitor().
+    await setAccessMode(page, 'anonymous')
 
     const v1Server = createServer((req, res) => {
       const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>V1</title></head><body><script async defer src="${SUKHAN_ORIGIN}/api/widget/v1/sukhan.js" data-api-key="${slug}"></script></body></html>`
@@ -1014,6 +1021,9 @@ test.describe('Widget V2 Colors — browser regression', () => {
       data: { colors: { mode: 'custom', custom: CUSTOM_TOKENS } },
       headers: { 'Content-Type': 'application/json' },
     })
+
+    // Set anonymous access mode so the widget bootstraps via identifyVisitor().
+    await setAccessMode(page, 'anonymous')
 
     const PKG_DIR = resolve(process.cwd(), 'packages/widget-npm')
     const WIDGET_BUNDLE = join(PKG_DIR, 'dist', 'index.js')
