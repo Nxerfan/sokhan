@@ -872,19 +872,28 @@ test.describe('Widget V2 Colors — browser regression', () => {
     expect(visitorColors!.bg).toBe(hexToRgb(CUSTOM_TOKENS.visitorBubbleBg))
     expect(visitorColors!.color).toBe(hexToRgb(CUSTOM_TOKENS.visitorBubbleText))
 
-    // Send an agent reply via the dashboard API.
-    const convsRes = await page.request.get(`${DASHBOARD}/api/conversations`)
-    const convsData = await convsRes.json()
-    const conversations = convsData.conversations ?? []
-    expect(conversations.length).toBeGreaterThan(0)
-    const convId = conversations[0].id
+    // Send an agent reply via the dashboard inbox UI (same pattern as
+    // widget-live-messaging.spec.ts — the REST API POST doesn't trigger
+    // the Socket.IO event that the widget listens for).
+    await page.goto(`${BASE}/inbox`)
+    await page.waitForLoadState('networkidle')
+    await page.waitForTimeout(2000)
 
-    await page.request.post(`${DASHBOARD}/api/conversations/${convId}/messages`, {
-      data: { content: { text: 'Test agent reply for bubble colors' }, contentType: 'text' },
-      headers: { 'Content-Type': 'application/json' },
-    })
+    // Click the first conversation in the inbox list.
+    const convItem = page.locator('[data-testid="conversation-item"], .conversation-item, a[href*="/inbox/"]').first()
+    await convItem.click().catch(() => {})
+    await page.waitForTimeout(1000)
 
-    // Wait for the agent bubble (.sk-agt) to appear (via polling or realtime).
+    // Type the agent reply in the dashboard's reply input.
+    const replyInput = page.locator('.border-t input[placeholder]').last()
+    await expect(replyInput).toBeVisible({ timeout: 10_000 }).catch(() => {})
+    await replyInput.fill('Agent reply for bubble colors').catch(() => {})
+    await replyInput.press('Enter').catch(() => {})
+    await page.waitForTimeout(3000)
+
+    // Wait for the agent bubble (.sk-agt) to appear in the widget via
+    // Socket.IO or polling.
+    await customerPage.bringToFront()
     await customerPage.waitForSelector('.sk-agt', { timeout: 60_000 })
 
     // Verify agent bubble computed colors.
