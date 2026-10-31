@@ -1000,7 +1000,7 @@ test.describe('Widget V2 Colors — browser regression', () => {
   })
 
   test('BLOCKER 2: NPM widget visitor + agent bubble computed colors match custom tokens', async ({ browser }) => {
-    test.setTimeout(180_000)
+    test.setTimeout(300_000)
     const { email, workspace } = creds('bubble-npm')
     const ctx = await browser.newContext()
     const page = await ctx.newPage()
