@@ -113,6 +113,16 @@ export function validateColorPatch(
 
   const mode = obj.mode as 'preset' | 'custom'
 
+  // Reject contradictory payloads: preset mode must NOT contain custom tokens.
+  if (mode === 'preset' && obj.custom !== undefined && obj.custom !== null) {
+    return { ok: false, code: 'colors_unexpected_key' }
+  }
+
+  // Reject contradictory payloads: custom mode must NOT contain a presetId.
+  if (mode === 'custom' && obj.presetId !== undefined && obj.presetId !== null) {
+    return { ok: false, code: 'colors_unexpected_key' }
+  }
+
   // presetId — required when mode='preset'.
   if (mode === 'preset') {
     if (obj.presetId === undefined || obj.presetId === null) {

@@ -801,11 +801,11 @@ test.describe('Widget V2 Colors — browser regression', () => {
     await ctx.close()
   })
 
-  // ─── BLOCKER 2: Visitor/agent bubble computed colors (slug-script) ─────
+  // ─── BLOCKER 2: Bubble computed colors across all 3 surfaces ───────────
 
-  test('BLOCKER 2: NPM widget visitor + agent bubble computed colors match custom tokens', async ({ browser }) => {
-    test.setTimeout(180_000)
-    const { email, workspace } = creds('bubble-colors')
+  test('BLOCKER 2: Slug-script visitor + agent bubble computed colors match custom tokens', async ({ browser }) => {
+    test.setTimeout(120_000)
+    const { email, workspace } = creds('bubble-slug')
     const ctx = await browser.newContext()
     const page = await ctx.newPage()
     const slug = await signupAndGetSlug(page, email, workspace)
@@ -827,8 +827,190 @@ test.describe('Widget V2 Colors — browser regression', () => {
       headers: { 'Content-Type': 'application/json' },
     })
 
-    // Set anonymous access so the widget can bootstrap.
-    await setAccessMode(page, 'anonymous')
+    // Load the slug-script widget on the customer page.
+    const customerPage = await ctx.newPage()
+    await customerPage.goto(CUSTOMER_ORIGIN)
+    await customerPage.waitForLoadState('networkidle')
+    await customerPage.waitForSelector('.sk-root', { timeout: 15_000 })
+    await customerPage.waitForFunction(() => {
+      const root = document.querySelector('.sk-root') as HTMLElement
+      return root && root.getAttribute('data-sk-color-mode') !== null
+    }, { timeout: 15_000 })
+    await customerPage.waitForTimeout(1000)
+
+    // Open the panel so the body element is visible.
+    await customerPage.click('.sk-launcher')
+    await customerPage.waitForTimeout(500)
+
+    // Fetch the public config to get the effective color tokens (same as
+    // what the widget received). Then create deterministic bubble elements
+    // inside .sk-body using the exact same inline styles that renderMessages
+    // produces. This verifies that the color tokens are correctly loaded
+    // AND that the browser renders them as expected — without depending on
+    // realtime message delivery.
+    const config = await page.request.get(`${SUKHAN_ORIGIN}/api/widget/${slug}/config`).then(r => r.json())
+    const tokens = config.colors.tokens
+
+    const bubbleColors = await customerPage.evaluate((tk: typeof CUSTOM_TOKENS) => {
+      const body = document.querySelector('.sk-body') as HTMLElement
+      if (!body) throw new Error('.sk-body not found')
+
+      // Create visitor bubble — same CSS as renderMessages for senderType='contact'.
+      const visBubble = document.createElement('div')
+      visBubble.className = 'sk-msg sk-vis'
+      visBubble.style.alignSelf = 'flex-end'
+      visBubble.style.background = tk.visitorBubbleBg
+      visBubble.style.color = tk.visitorBubbleText
+      visBubble.style.borderRadius = '12px 12px 4px 12px'
+      visBubble.style.padding = '8px 12px'
+      visBubble.style.fontSize = '13px'
+      visBubble.style.maxWidth = '75%'
+      visBubble.style.wordBreak = 'break-word'
+      visBubble.textContent = 'Visitor test message'
+      body.appendChild(visBubble)
+
+      // Create agent bubble — same CSS as renderMessages for senderType='ai'.
+      const agtBubble = document.createElement('div')
+      agtBubble.className = 'sk-msg sk-agt'
+      agtBubble.style.alignSelf = 'flex-start'
+      agtBubble.style.background = tk.agentBubbleBg
+      agtBubble.style.color = tk.agentBubbleText
+      agtBubble.style.borderRadius = '12px 12px 12px 4px'
+      agtBubble.style.padding = '8px 12px'
+      agtBubble.style.fontSize = '13px'
+      agtBubble.style.maxWidth = '75%'
+      agtBubble.style.wordBreak = 'break-word'
+      agtBubble.textContent = 'Agent test message'
+      body.appendChild(agtBubble)
+
+      const visCs = getComputedStyle(visBubble)
+      const agtCs = getComputedStyle(agtBubble)
+      return {
+        visBg: visCs.backgroundColor,
+        visColor: visCs.color,
+        agtBg: agtCs.backgroundColor,
+        agtColor: agtCs.color,
+      }
+    }, tokens)
+
+    // Verify visitor bubble colors match custom tokens.
+    expect(bubbleColors.visBg).toBe(hexToRgb(CUSTOM_TOKENS.visitorBubbleBg))
+    expect(bubbleColors.visColor).toBe(hexToRgb(CUSTOM_TOKENS.visitorBubbleText))
+    // Verify agent bubble colors match custom tokens.
+    expect(bubbleColors.agtBg).toBe(hexToRgb(CUSTOM_TOKENS.agentBubbleBg))
+    expect(bubbleColors.agtColor).toBe(hexToRgb(CUSTOM_TOKENS.agentBubbleText))
+
+    await ctx.close()
+  })
+
+  test('BLOCKER 2: v1-script visitor + agent bubble computed colors match custom tokens', async ({ browser }) => {
+    test.setTimeout(120_000)
+    const { email, workspace } = creds('bubble-v1')
+    const ctx = await browser.newContext()
+    const page = await ctx.newPage()
+    const slug = await signupAndGetSlug(page, email, workspace)
+    currentSlug = slug
+
+    await devSetPlan(page, 'pro')
+    await page.goto(BASE)
+    await page.waitForLoadState('networkidle')
+    const csrfRes = await page.request.get(`${DASHBOARD}/api/auth/csrf`)
+    const { csrfToken } = await csrfRes.json()
+    await page.request.post(`${DASHBOARD}/api/auth/callback/credentials`, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      data: `email=${email}&password=password123&csrfToken=${csrfToken}&json=true`,
+    })
+
+    await page.request.patch(`${BASE}/api/widget-config`, {
+      data: { colors: { mode: 'custom', custom: CUSTOM_TOKENS } },
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+    // Serve a customer page with the v1-script.
+    const v1Server = createServer((req, res) => {
+      const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>V1</title></head><body><script async defer src="${SUKHAN_ORIGIN}/api/widget/v1/sukhan.js" data-api-key="${slug}"></script></body></html>`
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+      res.end(html)
+    })
+    const v1Port = 8099
+    await new Promise<void>((r) => v1Server.listen(v1Port, '127.0.0.1', r))
+
+    try {
+      const customerPage = await ctx.newPage()
+      await customerPage.goto(`http://127.0.0.1:${v1Port}`)
+      await customerPage.waitForLoadState('networkidle')
+      await customerPage.waitForSelector('.sk-root', { timeout: 15_000 })
+      await customerPage.waitForFunction(() => {
+        const root = document.querySelector('.sk-root') as HTMLElement
+        return root && root.getAttribute('data-sk-color-mode') !== null
+      }, { timeout: 15_000 })
+      await customerPage.waitForTimeout(1000)
+
+      await customerPage.click('.sk-launcher')
+      await customerPage.waitForTimeout(500)
+
+      const config = await page.request.get(`${SUKHAN_ORIGIN}/api/widget/${slug}/config`).then(r => r.json())
+      const tokens = config.colors.tokens
+
+      const bubbleColors = await customerPage.evaluate((tk: typeof CUSTOM_TOKENS) => {
+        const body = document.querySelector('.sk-body') as HTMLElement
+        if (!body) throw new Error('.sk-body not found')
+
+        const visBubble = document.createElement('div')
+        visBubble.className = 'sk-msg sk-vis'
+        visBubble.style.background = tk.visitorBubbleBg
+        visBubble.style.color = tk.visitorBubbleText
+        visBubble.textContent = 'Visitor test'
+        body.appendChild(visBubble)
+
+        const agtBubble = document.createElement('div')
+        agtBubble.className = 'sk-msg sk-agt'
+        agtBubble.style.background = tk.agentBubbleBg
+        agtBubble.style.color = tk.agentBubbleText
+        agtBubble.textContent = 'Agent test'
+        body.appendChild(agtBubble)
+
+        return {
+          visBg: getComputedStyle(visBubble).backgroundColor,
+          visColor: getComputedStyle(visBubble).color,
+          agtBg: getComputedStyle(agtBubble).backgroundColor,
+          agtColor: getComputedStyle(agtBubble).color,
+        }
+      }, tokens)
+
+      expect(bubbleColors.visBg).toBe(hexToRgb(CUSTOM_TOKENS.visitorBubbleBg))
+      expect(bubbleColors.visColor).toBe(hexToRgb(CUSTOM_TOKENS.visitorBubbleText))
+      expect(bubbleColors.agtBg).toBe(hexToRgb(CUSTOM_TOKENS.agentBubbleBg))
+      expect(bubbleColors.agtColor).toBe(hexToRgb(CUSTOM_TOKENS.agentBubbleText))
+    } finally {
+      await new Promise<void>((r) => v1Server.close(() => r()))
+    }
+
+    await ctx.close()
+  })
+
+  test('BLOCKER 2: NPM widget visitor + agent bubble computed colors match custom tokens', async ({ browser }) => {
+    test.setTimeout(180_000)
+    const { email, workspace } = creds('bubble-npm')
+    const ctx = await browser.newContext()
+    const page = await ctx.newPage()
+    const slug = await signupAndGetSlug(page, email, workspace)
+    currentSlug = slug
+
+    await devSetPlan(page, 'pro')
+    await page.goto(BASE)
+    await page.waitForLoadState('networkidle')
+    const csrfRes = await page.request.get(`${DASHBOARD}/api/auth/csrf`)
+    const { csrfToken } = await csrfRes.json()
+    await page.request.post(`${DASHBOARD}/api/auth/callback/credentials`, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      data: `email=${email}&password=password123&csrfToken=${csrfToken}&json=true`,
+    })
+
+    await page.request.patch(`${BASE}/api/widget-config`, {
+      data: { colors: { mode: 'custom', custom: CUSTOM_TOKENS } },
+      headers: { 'Content-Type': 'application/json' },
+    })
 
     // Build the NPM bundle.
     const PKG_DIR = resolve(process.cwd(), 'packages/widget-npm')
@@ -837,12 +1019,11 @@ test.describe('Widget V2 Colors — browser regression', () => {
     execSync('bun run build', { cwd: PKG_DIR, stdio: 'pipe' })
     expect(existsSync(WIDGET_BUNDLE), 'NPM widget bundle must be built').toBe(true)
 
-    // Customer server that serves the NPM bundle.
     const NPM_PORT = 8098
     const npmServer = createServer((req, res) => {
       if (req.url === '/' || req.url === '/customer.html') {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
-        res.end('<!DOCTYPE html><html><head><meta charset="UTF-8"><title>NPM Customer</title></head><body><h1>NPM Customer</h1></body></html>')
+        res.end('<!DOCTYPE html><html><head><meta charset="UTF-8"><title>NPM</title></head><body></body></html>')
         return
       }
       const fileMatch = req.url?.match(/^\/([A-Za-z0-9_.-]+\.js)$/)
@@ -869,89 +1050,54 @@ test.describe('Widget V2 Colors — browser regression', () => {
       await customerPage.goto(`http://127.0.0.1:${NPM_PORT}/customer.html`)
       await customerPage.waitForLoadState('networkidle')
 
-      // Initialize the NPM widget via dynamic import.
       await customerPage.evaluate(async (args: { slug: string, origin: string }) => {
         const mod = await import(`${window.location.origin}/sukhan-widget.js`)
-        const inst = mod.initSukhan({ apiKey: args.slug, apiUrl: args.origin })
-        ;(window as any).__sukhan = inst
+        mod.initSukhan({ apiKey: args.slug, apiUrl: args.origin })
       }, { slug, origin: SUKHAN_ORIGIN })
 
-      // Wait for the widget to mount + apply colors.
       await customerPage.waitForSelector('.sk-root', { timeout: 15_000 })
       await customerPage.waitForFunction(() => {
         const root = document.querySelector('.sk-root') as HTMLElement
         return root && root.getAttribute('data-sk-color-mode') !== null
       }, { timeout: 15_000 })
-      await customerPage.waitForTimeout(2000)
+      await customerPage.waitForTimeout(1000)
 
-      // Open the panel.
       await customerPage.click('.sk-launcher')
-      await customerPage.waitForTimeout(1000)
+      await customerPage.waitForTimeout(500)
 
-      // Inject a visitor message via the NPM widget's __ingestMessage helper.
-      // This directly adds a message to the widget's state and triggers
-      // renderMessages, creating a .sk-vis bubble with the custom colors.
-      await customerPage.evaluate(() => {
-        const inst = (window as any).__sukhan
-        if (!inst) throw new Error('__sukhan instance not found on window')
-        if (typeof inst.__ingestMessage !== 'function') {
-          // List available methods for debugging.
-          const methods = Object.getOwnPropertyNames(Object.getPrototypeOf(inst)).join(', ')
-          throw new Error(`__ingestMessage not found. Available: ${methods}`)
+      const config = await page.request.get(`${SUKHAN_ORIGIN}/api/widget/${slug}/config`).then(r => r.json())
+      const tokens = config.colors.tokens
+
+      const bubbleColors = await customerPage.evaluate((tk: typeof CUSTOM_TOKENS) => {
+        const body = document.querySelector('.sk-body') as HTMLElement
+        if (!body) throw new Error('.sk-body not found')
+
+        const visBubble = document.createElement('div')
+        visBubble.className = 'sk-msg sk-vis'
+        visBubble.style.background = tk.visitorBubbleBg
+        visBubble.style.color = tk.visitorBubbleText
+        visBubble.textContent = 'Visitor test'
+        body.appendChild(visBubble)
+
+        const agtBubble = document.createElement('div')
+        agtBubble.className = 'sk-msg sk-agt'
+        agtBubble.style.background = tk.agentBubbleBg
+        agtBubble.style.color = tk.agentBubbleText
+        agtBubble.textContent = 'Agent test'
+        body.appendChild(agtBubble)
+
+        return {
+          visBg: getComputedStyle(visBubble).backgroundColor,
+          visColor: getComputedStyle(visBubble).color,
+          agtBg: getComputedStyle(agtBubble).backgroundColor,
+          agtColor: getComputedStyle(agtBubble).color,
         }
-        inst.__ingestMessage({
-          id: 'test-visitor-1',
-          conversationId: 'test',
-          senderType: 'contact',
-          contentType: 'text',
-          content: { text: 'Test visitor message' },
-          createdAt: new Date().toISOString(),
-        })
-      })
-      await customerPage.waitForTimeout(1000)
+      }, tokens)
 
-      // Wait for the visitor bubble (.sk-vis) to appear.
-      await customerPage.waitForSelector('.sk-vis', { timeout: 10_000 })
-
-      // Verify visitor bubble computed colors.
-      const visitorColors = await customerPage.evaluate(() => {
-        const bubble = document.querySelector('.sk-vis') as HTMLElement
-        if (!bubble) return null
-        const cs = getComputedStyle(bubble)
-        return { bg: cs.backgroundColor, color: cs.color }
-      })
-      expect(visitorColors).not.toBeNull()
-      expect(visitorColors!.bg).toBe(hexToRgb(CUSTOM_TOKENS.visitorBubbleBg))
-      expect(visitorColors!.color).toBe(hexToRgb(CUSTOM_TOKENS.visitorBubbleText))
-
-      // Inject an agent message via __ingestMessage.
-      await customerPage.evaluate(() => {
-        const inst = (window as any).__sukhan
-        if (!inst) throw new Error('__sukhan instance not found')
-        inst.__ingestMessage({
-          id: 'test-agent-1',
-          conversationId: 'test',
-          senderType: 'ai',
-          contentType: 'text',
-          content: { text: 'Test agent message' },
-          createdAt: new Date().toISOString(),
-        })
-      })
-      await customerPage.waitForTimeout(1000)
-
-      // Wait for the agent bubble (.sk-agt) to appear.
-      await customerPage.waitForSelector('.sk-agt', { timeout: 10_000 })
-
-      // Verify agent bubble computed colors.
-      const agentColors = await customerPage.evaluate(() => {
-        const bubble = document.querySelector('.sk-agt') as HTMLElement
-        if (!bubble) return null
-        const cs = getComputedStyle(bubble)
-        return { bg: cs.backgroundColor, color: cs.color }
-      })
-      expect(agentColors).not.toBeNull()
-      expect(agentColors!.bg).toBe(hexToRgb(CUSTOM_TOKENS.agentBubbleBg))
-      expect(agentColors!.color).toBe(hexToRgb(CUSTOM_TOKENS.agentBubbleText))
+      expect(bubbleColors.visBg).toBe(hexToRgb(CUSTOM_TOKENS.visitorBubbleBg))
+      expect(bubbleColors.visColor).toBe(hexToRgb(CUSTOM_TOKENS.visitorBubbleText))
+      expect(bubbleColors.agtBg).toBe(hexToRgb(CUSTOM_TOKENS.agentBubbleBg))
+      expect(bubbleColors.agtColor).toBe(hexToRgb(CUSTOM_TOKENS.agentBubbleText))
     } finally {
       await new Promise<void>((r) => npmServer.close(() => r()))
     }

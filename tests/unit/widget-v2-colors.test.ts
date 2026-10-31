@@ -916,6 +916,42 @@ describe('BLOCKER 2 — Preset-to-preset custom token preservation', () => {
   })
 })
 
+// ─── BLOCKER 4: Reject contradictory color PATCH payloads ────────────────
+
+describe('BLOCKER 4 — Reject contradictory color PATCH payloads', () => {
+  const proEnt = getEntitlements('pro')
+
+  test('mode=preset + custom tokens → rejected', () => {
+    const result = validateColorPatch({
+      colors: { mode: 'preset', presetId: 'sukhan', custom: VALID_CUSTOM_TOKENS },
+    }, proEnt)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.code).toBe('colors_unexpected_key')
+  })
+
+  test('mode=custom + presetId → rejected', () => {
+    const result = validateColorPatch({
+      colors: { mode: 'custom', presetId: 'sukhan', custom: VALID_CUSTOM_TOKENS },
+    }, proEnt)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.code).toBe('colors_unexpected_key')
+  })
+
+  test('mode=preset without custom → accepted (normal)', () => {
+    const result = validateColorPatch({
+      colors: { mode: 'preset', presetId: 'sukhan' },
+    }, proEnt)
+    expect(result.ok).toBe(true)
+  })
+
+  test('mode=custom without presetId → accepted (normal)', () => {
+    const result = validateColorPatch({
+      colors: { mode: 'custom', custom: VALID_CUSTOM_TOKENS },
+    }, proEnt)
+    expect(result.ok).toBe(true)
+  })
+})
+
 // ─── BLOCKER 5: Palette WCAG AA contrast ─────────────────────────────────
 
 describe('BLOCKER 5 — Predefined palette WCAG AA contrast', () => {
