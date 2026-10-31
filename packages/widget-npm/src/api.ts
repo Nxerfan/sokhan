@@ -118,9 +118,12 @@ export class ApiClient {
   }
 
   async fetchConfig(): Promise<WidgetConfig> {
-    const res = await fetch(`${this.apiUrl}/api/widget/${this.slug}/config`, {
+    // Cache-busting timestamp ensures fresh config (V2 positioning changes
+    // propagate immediately — no stale cached response from a previous load).
+    const res = await fetch(`${this.apiUrl}/api/widget/${this.slug}/config?_t=${Date.now()}`, {
       method: 'GET',
       headers: { Accept: 'application/json' },
+      cache: 'no-store',
     })
     return ensureOk<WidgetConfig>(res)
   }

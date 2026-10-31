@@ -123,7 +123,30 @@
     "position": "Position",
     "positions": {
       "bottom-start": "Bottom start",
-      "bottom-end": "Bottom end"
+      "bottom-end": "Bottom end",
+      "bottom-center": "Bottom center"
+    },
+    "positioning": {
+      "title": "Widget Positioning",
+      "hint": "Position the chat launcher independently for desktop and mobile.",
+      "desktop": "Desktop",
+      "mobile": "Mobile",
+      "presets": "Position preset",
+      "offsetX": "Horizontal offset (px)",
+      "offsetY": "Vertical offset (px)",
+      "offsetXHint": "Positive = right, negative = left.",
+      "offsetYHint": "Positive = up, negative = down.",
+      "reset": "Reset to preset",
+      "save": "Save positioning",
+      "discard": "Discard changes",
+      "dragHint": "Drag the launcher in the preview to reposition.",
+      "lockedOffsets": "Custom offsets require a paid plan. Your saved offsets are preserved and will restore on upgrade.",
+      "offsetsLocked": "Custom offsets are a paid-plan feature.",
+      "dirty": "Unsaved changes",
+      "saveSuccess": "Positioning saved",
+      "saveFail": "Failed to save positioning",
+      "invalidOffset": "Offset must be an integer between -2000 and 2000",
+      "positioningLocked": "Positioning is not available on your current plan."
     },
     "avatarUrl": "Agent avatar URL",
     "logoUrl": "Logo URL",

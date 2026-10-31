@@ -38,6 +38,17 @@ export interface WidgetConfig {
   isLocked?: boolean
   poweredBy?: boolean
   /**
+   * V2 positioning (Phase 2). The backend resolves the EFFECTIVE
+   * positioning per device from stored config + plan entitlements.
+   * Offsets are included only for plans entitled to precise
+   * positioning. Older backends omit this field → the widget falls
+   * back to the V1 `position` field (bottom-start/bottom-end only).
+   */
+  positioning?: {
+    desktop: import('./positioning').EffectivePositioning
+    mobile: import('./positioning').EffectivePositioning
+  }
+  /**
    * Backend-supplied realtime endpoint config (additive field). The widget
    * uses this as the PRIMARY runtime source. Older backends omit the
    * field; the widget falls back to the documented hosted default.

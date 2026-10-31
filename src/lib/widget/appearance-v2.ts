@@ -1,13 +1,10 @@
 /**
  * Widget Appearance V2 — versioned appearance model.
  *
- * A minimal, typed, versioned appearance configuration that supports
- * independent desktop/mobile configuration. This is the FOUNDATION for
- * Customization V2 — later phases add individual visual fields (positioning,
- * colors, launcher styles, animations, message preview, etc.) to this model.
- *
- * Phase 1 keeps this minimal: only the version + the desktop/mobile structure.
- * No new visual fields are implemented in this phase.
+ * A typed, versioned appearance configuration that supports independent
+ * desktop/mobile configuration. Phase 1 established the version + structure.
+ * Phase 2 / Feature 1 adds device-specific positioning (anchor + bounded
+ * X/Y offsets) as the first concrete visual field.
  *
  * Design:
  *   - Explicit schema version (currently 1).
@@ -23,24 +20,47 @@
  * NPM widget / browser bundle to import.
  */
 
+import {
+  POSITIONING_ANCHORS,
+  OFFSET_MIN,
+  OFFSET_MAX,
+  type PositioningAnchor,
+} from './positioning-geometry'
+
 /** The appearance schema version. Currently 1. */
 export const APPEARANCE_V2_VERSION = 1 as const
 
 /**
- * Device-specific appearance. Phase 1 is an empty structure (no fields yet).
- * Later phases add: position, colors, launcherStyle, animations, dimensions,
- * etc. The structure is defined now so the version + parsing are stable.
+ * Device-specific appearance.
+ *
+ * Phase 2 / Feature 1 adds `positioning` (anchor + bounded X/Y offsets).
+ * Future phases add more visual fields (colors, launcherStyle, animations,
+ * etc.). The structure is versioned — adding optional fields does NOT bump
+ * the schema version (they are additive + nullable).
  */
-// Phase 1: DeviceAppearance has no fields yet. Future phases add visual
-// fields (position, colors, launcherStyle, etc.). The empty interface is
-// intentional — it establishes the structure for future extension.
-// eslint-disable-next-line @typescript-eslint/no-empty-object-type
 export interface DeviceAppearance {
-  // Phase 1: no fields. Future phases add visual fields here.
-  // Example (NOT implemented yet):
-  //   position?: string
-  //   accentColor?: string
-  //   launcherShape?: string
+  /**
+   * Widget positioning for this device. Anchor is always present when
+   * positioning is configured; offsetX/offsetY are advanced-plan-only
+   * (but may be stored for Free for future upgrade restore).
+   */
+  positioning?: DevicePositioning
+}
+
+/**
+ * Per-device positioning config. `anchor` is the 3-preset base position;
+ * `offsetX`/`offsetY` are bounded pixel adjustments (advanced plans only).
+ *
+ * Coordinate semantics (see positioning-geometry.ts for full details):
+ *   - offsetX: positive = right (physical pixels)
+ *   - offsetY: positive = up (physical pixels)
+ */
+export interface DevicePositioning {
+  anchor: PositioningAnchor
+  /** Horizontal offset in pixels (positive = right). Advanced plans only. */
+  offsetX?: number
+  /** Vertical offset in pixels (positive = up). Advanced plans only. */
+  offsetY?: number
 }
 
 /** The versioned appearance configuration. */
@@ -64,6 +84,8 @@ export const DEFAULT_APPEARANCE_V2: AppearanceV2 = {
  *   - null / undefined → null (no V2 config; fall back to V1 flat fields).
  *   - A PLAIN object (prototype === Object.prototype or null) with EXACTLY
  *     an own-property `version === 1` + optional desktop/mobile plain objects.
+ *   - desktop/mobile may contain an optional `positioning` object with
+ *     a valid `anchor` + optional bounded integer `offsetX`/`offsetY`.
  *
  * Rejects (returns null):
  *   - Non-object values (numbers, strings, booleans).
@@ -75,7 +97,11 @@ export const DEFAULT_APPEARANCE_V2: AppearanceV2 = {
  *   - Fractional version.
  *   - desktop/mobile present but not plain objects.
  *   - Unexpected top-level keys (only version, desktop, mobile are allowed).
- *   - Unexpected keys inside desktop/mobile (Phase 1 defines no device fields).
+ *   - Unexpected keys inside desktop/mobile (only `positioning` is allowed).
+ *   - positioning present but not a plain object / malformed.
+ *   - Invalid anchor (not one of the 3 presets).
+ *   - offsetX/offsetY present but not finite integers / out of bounds.
+ *   - Unexpected keys inside positioning (only anchor, offsetX, offsetY).
  *   - Getter-based exceptions (caught internally; never escapes).
  *
  * Returns a CANONICAL object (not the raw input reference) so callers never
@@ -211,15 +237,20 @@ export function parseAppearanceV2(value: unknown): AppearanceV2 | null {
   }
 }
 
+/** Allowed keys inside a device appearance object. */
+const ALLOWED_DEVICE_KEYS = new Set(['positioning'])
+
+/** Allowed keys inside a positioning object. */
+const ALLOWED_POSITIONING_KEYS = new Set(['anchor', 'offsetX', 'offsetY'])
+
 /**
  * Parse a device-specific appearance. Returns:
  *   - undefined → malformed (caller fails closed).
  *   - null → absent (no device config).
- *   - {} → valid (canonical empty object — Phase 1 defines no device fields).
+ *   - DeviceAppearance → valid (canonical object with parsed positioning).
  *
- * Phase 1: DeviceAppearance has NO fields. Any key inside a device object
- * is UNEXPECTED and causes rejection (returns undefined). This enforces
- * strict parsing — no arbitrary unvalidated object references pass through.
+ * Phase 2: DeviceAppearance may contain an optional `positioning` object.
+ * Any other key is UNEXPECTED and causes rejection (returns undefined).
  * Non-plain objects (Date, Map, Set, class instances) are rejected.
  * Getter-based exceptions are caught (never escape).
  */
@@ -230,12 +261,97 @@ function parseDeviceAppearance(value: unknown): DeviceAppearance | null | undefi
   // Safely get ALL own keys (enumerable + non-enumerable, string + Symbol).
   const keys = safeOwnKeys(value)
   if (keys === null) return undefined // reflection threw → fail closed
-  // Phase 1: DeviceAppearance has no fields. Reject ANY keys (including
-  // non-enumerable + Symbol) — only an empty object (or absent) is valid.
-  // Future phases will add + validate specific device fields here.
-  if (keys.length > 0) return undefined // unexpected keys → fail closed
-  // Return a canonical empty object (not the raw input reference).
-  return {}
+  // Only `positioning` is allowed inside a device object.
+  for (const key of keys) {
+    if (typeof key !== 'string' || !ALLOWED_DEVICE_KEYS.has(key)) return undefined
+  }
+
+  const result: DeviceAppearance = {}
+
+  // Parse positioning if present (read from descriptor to bypass Proxy get).
+  const positioningDesc = getOwnDataDescriptor(value, 'positioning')
+  let positioningValue: unknown = undefined
+  if (positioningDesc !== null) {
+    positioningValue = positioningDesc.value
+  } else {
+    try {
+      if (Object.prototype.hasOwnProperty.call(value, 'positioning')) return undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  if (positioningValue !== undefined) {
+    const positioning = parsePositioning(positioningValue)
+    if (positioning === undefined) return undefined // malformed → fail closed
+    if (positioning !== null) {
+      result.positioning = positioning
+    }
+  }
+
+  return result
+}
+
+/**
+ * Parse a positioning object. Returns:
+ *   - undefined → malformed (caller fails closed).
+ *   - null → absent (positioning is null/undefined).
+ *   - DevicePositioning → valid (canonical object).
+ *
+ * Validates: anchor is one of the 3 presets; offsetX/offsetY are optional
+ * finite integers within [-2000, 2000]; no unexpected keys.
+ */
+function parsePositioning(value: unknown): DevicePositioning | null | undefined {
+  if (value === null || value === undefined) return null
+  if (!isPlainObject(value)) return undefined // malformed
+  const keys = safeOwnKeys(value)
+  if (keys === null) return undefined
+  // Only anchor, offsetX, offsetY are allowed.
+  for (const key of keys) {
+    if (typeof key !== 'string' || !ALLOWED_POSITIONING_KEYS.has(key)) return undefined
+  }
+
+  // anchor — required, must be a valid preset. Read from descriptor.
+  const anchorDesc = getOwnDataDescriptor(value, 'anchor')
+  if (!anchorDesc) return undefined // anchor must be an own data property
+  const anchorValue = anchorDesc.value
+  if (typeof anchorValue !== 'string' || !(POSITIONING_ANCHORS as readonly string[]).includes(anchorValue)) {
+    return undefined
+  }
+
+  const result: DevicePositioning = { anchor: anchorValue as PositioningAnchor }
+
+  // offsetX — optional, must be a finite integer within bounds.
+  const offsetXDesc = getOwnDataDescriptor(value, 'offsetX')
+  if (offsetXDesc !== null) {
+    const v = offsetXDesc.value
+    if (typeof v !== 'number' || !Number.isFinite(v) || !Number.isInteger(v)) return undefined
+    if (v < OFFSET_MIN || v > OFFSET_MAX) return undefined
+    result.offsetX = v
+  } else {
+    try {
+      if (Object.prototype.hasOwnProperty.call(value, 'offsetX')) return undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  // offsetY — optional, must be a finite integer within bounds.
+  const offsetYDesc = getOwnDataDescriptor(value, 'offsetY')
+  if (offsetYDesc !== null) {
+    const v = offsetYDesc.value
+    if (typeof v !== 'number' || !Number.isFinite(v) || !Number.isInteger(v)) return undefined
+    if (v < OFFSET_MIN || v > OFFSET_MAX) return undefined
+    result.offsetY = v
+  } else {
+    try {
+      if (Object.prototype.hasOwnProperty.call(value, 'offsetY')) return undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  return result
 }
 
 /**

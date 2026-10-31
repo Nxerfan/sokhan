@@ -1,6 +1,7 @@
 import { db } from '@/lib/db'
 import { normalizeApiKey } from '@/lib/widget/widget-utils'
 import { IDENTITY_HELPERS_JS, IDENTITY_STATEFUL_JS } from '@/lib/widget-script-identity'
+import { POSITIONING_FN_SOURCE } from '@/lib/widget/positioning-script'
 
 /**
  * Script-tag alternative endpoint — versioned under `/api/widget/v1/`.
@@ -108,6 +109,7 @@ export function buildScript(socketUrlOverride: string | null, isVercel: boolean)
   }
 ${IDENTITY_HELPERS_JS}
 ${IDENTITY_STATEFUL_JS}
+${POSITIONING_FN_SOURCE}
   var state = {
     open: false,
     config: null,
@@ -121,7 +123,119 @@ ${IDENTITY_STATEFUL_JS}
     locale: 'fa',
     dir: 'rtl',
     connected: false,
+    effectivePos: null,
+    panelSide: 'right',
+    rootEl: null,
+    resizeHandler: null,
   };
+
+  // ============================================================
+  // V2 Positioning helpers (shared geometry from positioning-script.ts).
+  // ============================================================
+  function resolveDevicePositioning(config) {
+    // __skDetectDevice returns 'mobile' or 'desktop' (string, not boolean).
+    var device = __skDetectDevice();
+    if (config.positioning && config.positioning[device]) {
+      return config.positioning[device];
+    }
+    var v1Pos = config.position || 'bottom-end';
+    var anchor = v1Pos === 'bottom-start' ? 'bottom-start' : 'bottom-end';
+    return { anchor: anchor, offsetX: 0, offsetY: 0 };
+  }
+
+  function getLauncherDims(shape) {
+    if (shape === 'tab') return { w: 60, h: 52 };
+    if (shape === 'pill') return { w: 64, h: 48 };
+    return { w: 52, h: 52 };
+  }
+
+  function applyPosition() {
+    if (!state.config || !state.rootEl || !state.effectivePos) return;
+    var pos = state.effectivePos;
+    var dims = getLauncherDims(state.config.launcherShape);
+    var sab = __skGetSafeAreaBottom();
+    var result = __skComputePosition({
+      anchor: pos.anchor,
+      offsetX: pos.offsetX || 0,
+      offsetY: pos.offsetY || 0,
+      dir: state.dir,
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight,
+      launcherWidth: dims.w,
+      launcherHeight: dims.h,
+      safeAreaBottom: sab,
+      baseMargin: 20
+    });
+    state.rootEl.style.left = result.left + 'px';
+    state.rootEl.style.bottom = result.bottom + 'px';
+    state.rootEl.style.right = '';
+    // Diagnostic data attributes — prove the widget received + applied
+    // V2 positioning (verifiable by browser tests).
+    state.rootEl.setAttribute('data-sk-anchor', pos.anchor);
+    state.rootEl.setAttribute('data-sk-offset-x', String(pos.offsetX || 0));
+    state.rootEl.setAttribute('data-sk-offset-y', String(pos.offsetY || 0));
+    state.panelSide = result.panelSide;
+    applyPanelSide(result.panelSide);
+    // Apply panel vertical containment — keep the panel inside the
+    // viewport even when the launcher is near the top edge.
+    if (panel) {
+      var pv = __skComputePanelVertical(result.bottom, dims.h, window.innerHeight, 12, 500, sab);
+      panel.style.bottom = pv.bottom + 'px';
+      panel.style.maxHeight = pv.maxHeight + 'px';
+    }
+  }
+
+  function applyPanelSide(side) {
+    if (!panel || !state.config || !state.effectivePos) return;
+    var pos = state.effectivePos;
+    var dims = getLauncherDims(state.config.launcherShape);
+    var lr = __skComputePosition({
+      anchor: pos.anchor, offsetX: pos.offsetX || 0, offsetY: pos.offsetY || 0,
+      dir: state.dir, viewportWidth: window.innerWidth, viewportHeight: window.innerHeight,
+      launcherWidth: dims.w, launcherHeight: dims.h,
+      safeAreaBottom: __skGetSafeAreaBottom(), baseMargin: 20
+    });
+    var ph = __skComputePanelHorizontal(lr.left, dims.w, 360, window.innerWidth, side, 20);
+    panel.style.left = ph.left + 'px';
+    panel.style.right = '';
+    panel.style.width = ph.width + 'px';
+    applyPanelTransform();
+  }
+
+  function applyPanelTransform() {
+    if (!panel) return;
+    if (state.open) {
+      panel.style.transform = 'translateY(0) scale(1)';
+    } else {
+      panel.style.transform = 'translateY(8px) scale(.98)';
+    }
+  }
+
+  function setupResizeListener() {
+    if (state.resizeHandler) return;
+    var handler = function() {
+      var newPos = resolveDevicePositioning(state.config);
+      var oldPos = state.effectivePos;
+      if (!oldPos || newPos.anchor !== oldPos.anchor || newPos.offsetX !== oldPos.offsetX || newPos.offsetY !== oldPos.offsetY) {
+        state.effectivePos = newPos;
+      }
+      applyPosition();
+    };
+    state.resizeHandler = handler;
+    try {
+      window.addEventListener('resize', handler);
+      window.addEventListener('orientationchange', handler);
+    } catch (e) {}
+  }
+
+  function teardownResizeListener() {
+    if (!state.resizeHandler) return;
+    try {
+      window.removeEventListener('resize', state.resizeHandler);
+      window.removeEventListener('orientationchange', state.resizeHandler);
+    } catch (e) {}
+    state.resizeHandler = null;
+  }
 
   var STORAGE_KEY = 'sukhan_visitor_' + SLUG;
 
@@ -175,20 +289,20 @@ ${IDENTITY_STATEFUL_JS}
     state.locale = config.defaultLocale === 'en' ? 'en' : 'fa';
     state.dir = config.defaultDirection === 'ltr' ? 'ltr' : 'rtl';
     var accent = config.accentColor || '#E09A2B';
-    // CUST-C: canonical product default is 'bottom-end' (matches the
-    // signup-created rows, free-lock effective config, PATCH fallback,
-    // and the slug script runtime). Stored explicit positions are
-    // never rewritten — this fallback only fires on a missing field.
-    var pos = config.position || 'bottom-end';
-    var side = pos === 'bottom-start' ? 'left' : 'right';
-    if (state.dir === 'rtl') side = pos === 'bottom-start' ? 'right' : 'left';
+
+    // V2 positioning: resolve effective positioning for the current device.
+    state.effectivePos = resolveDevicePositioning(config);
+    state.panelSide = 'right';
 
     injectStyles(accent);
 
     var root = el('div', 'sk-root');
     root.setAttribute('dir', state.dir);
-    css(root, { position: 'fixed', bottom: '20px', zIndex: '2147483000' });
-    root.style[side] = '20px';
+    css(root, { position: 'fixed', zIndex: '2147483000' });
+    state.rootEl = root;
+
+    // Position application is deferred to after the panel + launcher are
+    // appended (the panel side cannot be set before the panel DOM element exists).
 
     launcher = el('button', 'sk-launcher ' + shapeClass(config.launcherShape));
     launcher.setAttribute('aria-label', state.locale === 'fa' ? 'گفت‌وگو' : 'Open chat');
@@ -216,7 +330,7 @@ ${IDENTITY_STATEFUL_JS}
       opacity: '0', transform: 'translateY(8px) scale(.98)', pointerEvents: 'none',
       transition: 'opacity .18s ease, transform .18s ease'
     });
-    panel.style[side] = '0';
+    // Panel side is applied by applyPosition() via applyPanelSide().
 
     // Safe image URL check (CUST-B): only absolute http(s) URLs are ever
     // assigned to img.src. The backend validates these too — this is
@@ -333,6 +447,11 @@ ${IDENTITY_STATEFUL_JS}
     root.appendChild(panel); root.appendChild(launcher);
     document.body.appendChild(root);
 
+    // Apply the computed position NOW that the panel exists (the panel side
+    // could not be set earlier because the panel DOM element didn't exist yet).
+    applyPosition();
+    setupResizeListener();
+
     renderMessages();
     // Mode-aware identity bootstrap (anonymous/verified_visitor/site_user_only).
     // The anonymous path still calls identifyVisitor() internally via __sk_bootstrap().
@@ -342,11 +461,13 @@ ${IDENTITY_STATEFUL_JS}
   function toggle(){
     state.open = !state.open;
     if (state.open) {
-      css(panel, { opacity:'1', transform:'translateY(0) scale(1)', pointerEvents:'auto' });
+      css(panel, { opacity:'1', pointerEvents:'auto' });
+      applyPanelTransform();
       pulseDot.style.display = 'none';
       setTimeout(function(){ inputEl && inputEl.focus(); }, 200);
     } else {
-      css(panel, { opacity:'0', transform:'translateY(8px) scale(.98)', pointerEvents:'none' });
+      css(panel, { opacity:'0', pointerEvents:'none' });
+      applyPanelTransform();
     }
   }
 
@@ -695,7 +816,9 @@ ${IDENTITY_STATEFUL_JS}
 
   // ---- Bootstrap ----
   function fetchConfig(){
-    fetch(CONFIG_URL)
+    // Cache-busting timestamp ensures fresh config (V2 positioning changes
+    // propagate immediately — no stale cached response from a previous load).
+    fetch(CONFIG_URL + '?_t=' + Date.now(), { cache: 'no-store' })
       .then(function(r){ return r.json(); })
       .then(function(config){ mount(config); })
       .catch(function(e){ console.error('[sukhan] config fetch failed', e); });

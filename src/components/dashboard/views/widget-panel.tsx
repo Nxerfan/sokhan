@@ -14,6 +14,7 @@ import { toast } from 'sonner'
 import { PanelHeader } from './members-panel'
 import { cn } from '@/lib/utils'
 import { WidgetAccessIdentity } from './widget-access-identity'
+import { WidgetPositioningPanel } from './widget-positioning-panel'
 
 type WidgetConfig = {
   accentColor: string
@@ -77,6 +78,18 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
   const [backendStatus, setBackendStatus] = useState<'idle' | 'checking' | 'ok' | 'fail'>('idle')
   const [convInfo, setConvInfo] = useState<ConvInfo>({ hasConversations: false, hasAgentReply: false })
   const [checklistDismissed, setChecklistDismissedDismissed] = useState(false)
+  // V2 positioning data (from GET /api/widget-config `positioning` field).
+  const [positioning, setPositioning] = useState<{
+    entitlements: { presetPositioning: boolean; precisePositioning: boolean }
+    effective: {
+      desktop: { anchor: 'bottom-start' | 'bottom-end' | 'bottom-center'; offsetX: number; offsetY: number }
+      mobile: { anchor: 'bottom-start' | 'bottom-end' | 'bottom-center'; offsetX: number; offsetY: number }
+    }
+    stored: {
+      desktop: { anchor: 'bottom-start' | 'bottom-end' | 'bottom-center'; offsetX?: number; offsetY?: number } | null
+      mobile: { anchor: 'bottom-start' | 'bottom-end' | 'bottom-center'; offsetX?: number; offsetY?: number } | null
+    }
+  } | null>(null)
 
   const apiUrl = typeof window !== 'undefined' ? window.location.origin : HOSTED_API_URL
 
@@ -101,6 +114,8 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
     // never an impossible paid appearance.
     if (cfgData.effective) setEffective(cfgData.effective as WidgetConfig)
     setIsLocked(Boolean(cfgData.isLocked))
+    // V2 positioning data.
+    if (cfgData.positioning) setPositioning(cfgData.positioning)
     const domData = await domRes.json()
     setDomains(domData.domains ?? [])
     setDomainLimit(domData.limit ?? 0)
@@ -562,9 +577,9 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
       )}
 
       {tab === 'customization' && config && (
-        <div className="grid gap-4 lg:grid-cols-2">
+        <div className="flex flex-col gap-4">
           {isLocked && (
-            <Card data-testid="customization-locked-banner" className="border-amber-600/40 bg-amber-500/5 lg:col-span-2">
+            <Card data-testid="customization-locked-banner" className="border-amber-600/40 bg-amber-500/5">
               <CardContent className="flex items-start gap-3 p-4">
                 <Lock className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
                 <div className="space-y-1">
@@ -574,6 +589,14 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
               </CardContent>
             </Card>
           )}
+          {/* V2 Positioning — available for all plans (Free: presets only). */}
+          <WidgetPositioningPanel
+            slug={slug}
+            positioning={positioning}
+            defaultDirection={(config.defaultLocale === 'fa' ? 'rtl' : 'ltr') as 'rtl' | 'ltr'}
+            onReload={load}
+          />
+        <div className="grid gap-4 lg:grid-cols-2">
           <div className="flex flex-col gap-4">
             <Card>
               <CardHeader>
@@ -668,6 +691,7 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
               </div>
             </CardContent>
           </Card>
+        </div>
         </div>
       )}
 
