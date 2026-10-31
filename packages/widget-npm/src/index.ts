@@ -124,7 +124,9 @@ export function initSukhan(options: SukhanOptions = {}): SukhanInstance {
     get config() {
       return widget.config
     },
-  }
+    /** @internal — test-only: inject a message into the widget's state. */
+    __ingestMessage: (m: unknown) => widget.__ingestMessage(m as any),
+  } as SukhanInstance & { __ingestMessage: (m: unknown) => void }
 }
 
 // ---------- Auto-init ----------

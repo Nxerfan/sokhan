@@ -11,6 +11,11 @@ import {
   deriveLegacyPosition,
   type StoredPositioningInput,
 } from '@/lib/widget/effective-positioning'
+import {
+  resolveEffectiveColors,
+  getStoredColorTheme,
+  type StoredColorInput,
+} from '@/lib/widget/effective-colors'
 
 /** CORS headers for widget API responses. */
 function widgetHeaders(res: NextResponse): NextResponse {
@@ -87,6 +92,7 @@ export async function GET(
       identityEndpointPath: true,
       position: true,
       appearanceV2: true,
+      accentColor: true,
     },
   })
   if (!widgetConfig) {
@@ -121,22 +127,60 @@ export async function GET(
   // positioning. V1 only supports bottom-start/bottom-end; bottom-center
   // maps to bottom-end (the canonical product default).
   const legacyPosition = deriveLegacyPosition(effectivePos.desktop)
-  const configWithPosition = { ...config, position: legacyPosition }
+  // V2 colors: resolve effective colors from stored V2/V1 + entitlements.
+  // The public config exposes ONLY effective colors permitted by the plan.
+  // Stored paid custom colors are NEVER exposed to Free visitors.
+  const colorInput: StoredColorInput = {
+    accentColor: widgetConfig.accentColor ?? null,
+    appearanceV2: widgetConfig.appearanceV2,
+  }
+  const effectiveColors = resolveEffectiveColors(colorInput, entitlements)
+  // Check if the tenant has an explicit V2 color selection OR is a paid plan
+  // with a stored V1 accent. If neither (e.g., Free with no V2 colors), do
+  // NOT include `colors` in the public response — the widget uses its
+  // hardcoded pre-V2 colors (preserving existing appearance for tenants
+  // who haven't adopted V2 colors).
+  const storedColorTheme = getStoredColorTheme(colorInput)
+  const hasV2ColorSelection = storedColorTheme !== null
+  const isPaidPlan = entitlements?.legacyCustomizationUnlocked ?? false
+  const hasStoredV1Accent = !!(widgetConfig.accentColor && /^#[0-9a-fA-F]{6}$/.test(widgetConfig.accentColor))
+  const shouldExposeColors = hasV2ColorSelection || (isPaidPlan && hasStoredV1Accent)
 
-  // Additive: the safe public access-policy fields. Existing clients continue
-  // working (additive top-level fields). NEVER expose the raw integration
-  // secret, integrationSecretHash, or any server-only credential — only the
-  // explicitly safe policy fields selected above.
-  return widgetHeaders(NextResponse.json({
+  // Derive the V1 `accentColor` for legacy consumers.
+  // When V2 colors ARE exposed: use the V2 effective accent.
+  // When V2 colors are NOT exposed: use `config.accentColor` from
+  // getEffectiveWidgetConfig() — this is the AUTHORIZED effective accent
+  // that respects the plan lock. For Free, it returns '#E09A2B' (Sukhan
+  // default), NOT the raw stored V1 accent from a previous paid period.
+  // For paid without V2, it returns the stored accent. For unknown plans,
+  // it returns the locked default. The raw `widgetConfig.accentColor` is
+  // NEVER directly exposed to unauthorized plans.
+  const legacyAccent = shouldExposeColors
+    ? effectiveColors.tokens.accent
+    : config.accentColor
+  const configWithPosition = { ...config, position: legacyPosition, accentColor: legacyAccent }
+
+  // Build the response — conditionally include `colors` only when the tenant
+  // has an explicit V2 color selection or a paid V1 accent. This preserves
+  // the pre-V2 widget appearance for Free tenants who haven't adopted V2.
+  const responseBody: Record<string, unknown> = {
     slug,
     name: tenant.name,
     ...configWithPosition,
     ...publicPolicy,
     realtime,
-    // V2 positioning (additive — older clients ignore this field).
     positioning: {
       desktop: effectivePos.desktop,
       mobile: effectivePos.mobile,
     },
-  }))
+  }
+  if (shouldExposeColors) {
+    responseBody.colors = effectiveColors
+  }
+
+  // Additive: the safe public access-policy fields. Existing clients continue
+  // working (additive top-level fields). NEVER expose the raw integration
+  // secret, integrationSecretHash, or any server-only credential — only the
+  // explicitly safe policy fields selected above.
+  return widgetHeaders(NextResponse.json(responseBody))
 }
