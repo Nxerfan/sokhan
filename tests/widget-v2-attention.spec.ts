@@ -92,7 +92,13 @@ async function serve(html: string, npm = false) {
   if (!addr || typeof addr === 'string') throw new Error('No local HTTP address')
   return {
     url: 'http://127.0.0.1:' + addr.port,
-    close: () => new Promise<void>(resolveClose => server.close(() => resolveClose())),
+    close: () => new Promise<void>((resolveClose, rejectClose) => {
+      // The page is already closed before this runs. Explicitly drain any
+      // remaining keep-alive HTTP connections so teardown cannot hide a real
+      // assertion failure behind Playwright's 60s test timeout.
+      server.closeAllConnections()
+      server.close(error => error ? rejectClose(error) : resolveClose())
+    }),
   }
 }
 
@@ -109,7 +115,8 @@ async function verifyRender(ctx: BrowserContext, slug: string, animation: Animat
   const site = await serve(html, surface === 'npm')
   try {
     const page = await ctx.newPage()
-    await page.goto(site.url + '/customer.html', { waitUntil: 'domcontentloaded' })
+    try {
+      await page.goto(site.url + '/customer.html', { waitUntil: 'domcontentloaded' })
     if (surface === 'npm') {
       await page.evaluate(async (args) => {
         const mod = await import(window.location.origin + '/index.js')
@@ -130,7 +137,11 @@ async function verifyRender(ctx: BrowserContext, slug: string, animation: Animat
       expect(css.name).toContain('sk-attention-' + animation)
       expect(times.some(x => x > 0)).toBe(true)
     }
-    await page.close()
+    } finally {
+      // Do this even when an assertion fails, otherwise a live page can
+      // keep an HTTP request open and block the fixture server's close().
+      await page.close()
+    }
   } finally {
     await site.close()
   }
@@ -420,8 +431,12 @@ test.describe('Widget V2 Attention Animations — PR #19 only', () => {
       expect((await publicConfig(page, slug)).attention.animation).toBe('shake')
       const reduceCtx = await browser.newContext({ reducedMotion: 'reduce' })
       try {
-        await verifyRender(reduceCtx, slug, 'shake', 'slug', true)
-        await verifyRender(reduceCtx, slug, 'shake', 'npm', true)
+        await test.step('slug runtime: reduced-motion CSS', async () => {
+          await verifyRender(reduceCtx, slug, 'shake', 'slug', true)
+        })
+        await test.step('NPM runtime: reduced-motion CSS', async () => {
+          await verifyRender(reduceCtx, slug, 'shake', 'npm', true)
+        })
       } finally {
         await reduceCtx.close()
       }
