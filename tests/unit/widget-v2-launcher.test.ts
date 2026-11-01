@@ -129,6 +129,24 @@ describe('paid launcher downgrade/upgrade restoration', () => {
     const changed = mergeLauncherPatch(free, { shape: 'tab' }, PRO)
     expect(resolveEffectiveLauncher({ appearanceV2: changed }, PRO).shape).toBe('tab')
   })
+  test('Pro explicitly selecting the SAME stored Free shape clears stale paidShape', () => {
+    const free = mergeLauncherPatch(original, { shape: 'rounded' }, FREE)
+    expect(free.launcher).toEqual({ shape: 'rounded', paidShape: 'pill' })
+    // Free idempotent save must keep the saved Pro preference.
+    const freeAgain = mergeLauncherPatch(free, { shape: 'rounded' }, FREE)
+    expect(freeAgain.launcher).toEqual({ shape: 'rounded', paidShape: 'pill' })
+    expect(resolveEffectiveLauncher({ appearanceV2: freeAgain }, PRO).shape).toBe('pill')
+
+    // After upgrading, an explicit Pro save of rounded must override pill.
+    // Regression: old equality early-return retained paidShape='pill'.
+    const chosen = mergeLauncherPatch(freeAgain, { shape: 'rounded' }, PRO)
+    expect(chosen.launcher).toEqual({ shape: 'rounded' })
+    expect(resolveEffectiveLauncher({ appearanceV2: chosen }, PRO).shape).toBe('rounded')
+    expect(chosen.colors).toEqual(original.colors)
+    expect(chosen.desktop).toEqual(original.desktop)
+    expect(chosen.mobile).toEqual(original.mobile)
+    expect(parseAppearanceV2(chosen)).not.toBeNull()
+  })
 })
 
 describe('appearance parsing boundaries', () => {

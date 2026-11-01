@@ -211,6 +211,23 @@ test.describe('Widget V2 Launcher Styles — PR #18 only', () => {
       await page.reload()
       await openLauncherPanel(page)
       await expect(page.getByTestId('launcher-shape-pill')).toHaveAttribute('aria-pressed', 'true')
+      await expect(page.getByTestId('launcher-discard')).toBeDisabled()
+
+      // Critical Pro override: rounded is already the STORED Free shape, but
+      // pill is the restored EFFECTIVE paid shape. Selecting rounded in the
+      // actual dashboard must clear stale paidShape and persist the override.
+      await page.getByTestId('launcher-shape-rounded').click()
+      await expect(page.getByTestId('launcher-save')).toBeEnabled()
+      await page.getByTestId('launcher-save').click()
+      await expect.poll(async () => (await publicConfig(page, slug)).launcher.shape).toBe('rounded')
+      const saved = await dashboardConfig(page)
+      expect(saved.launcher.stored).toBe('rounded')
+      expect(saved.launcher.effective.shape).toBe('rounded')
+      expect(saved.stored.appearanceV2.launcher).toEqual({ shape: 'rounded' })
+      await page.reload()
+      await openLauncherPanel(page)
+      await expect(page.getByTestId('launcher-shape-rounded')).toHaveAttribute('aria-pressed', 'true')
+      await expect(page.getByTestId('launcher-discard')).toBeDisabled()
     } finally {
       await ctx.close()
     }
