@@ -322,7 +322,7 @@ test.describe('Widget V2 Quick Replies — Feature 6 only', () => {
           res.request().method() === 'POST' &&
           res.url().includes(urlPart) &&
           res.status() === 200, { timeout: 20_000 })
-        releaseContact()
+        releaseContact?.()
         releaseContact = undefined
         const ready = await responseReady
         await ready.finished()
