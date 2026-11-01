@@ -220,6 +220,7 @@ export function mergeAttentionPatch(
     ...(base.colors ? { colors: base.colors } : {}),
     ...(base.launcher ? { launcher: base.launcher } : {}),
     ...(base.messagePreview ? { messagePreview: base.messagePreview } : {}),
+    ...(base.quickReplies ? { quickReplies: base.quickReplies } : {}),
   }
 }
 

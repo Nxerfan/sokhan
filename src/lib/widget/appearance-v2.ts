@@ -139,6 +139,23 @@ export interface MessagePreviewConfig {
   enabled: boolean
 }
 
+/**
+ * Quick Replies configuration (Phase 2 / Feature 6). Additive — null = no
+ * suggested replies (legacy behavior).
+ * - `items`: the active quick-reply labels (1–80 Unicode code points each,
+ *   no duplicates, within the plan's max).
+ * - `paidItems`: preserved paid selection for downgrade/upgrade restore.
+ *   When a paid tenant configures 10 items then downgrades to Free, the
+ *   active `items` become the first 2, and the full 10 are stored in
+ *   `paidItems` for restoration on upgrade. Must contain at least one item
+ *   not in `items` (not a useless subset).
+ */
+export interface QuickRepliesConfig {
+  items: string[]
+  /** Preserved paid selection for upgrade restore. */
+  paidItems?: string[]
+}
+
 /** The versioned appearance configuration. */
 export interface AppearanceV2 {
   version: typeof APPEARANCE_V2_VERSION
@@ -152,6 +169,8 @@ export interface AppearanceV2 {
   attention?: AttentionConfig
   /** Message Preview preference (Phase 2 / Feature 5). Additive — null = default OFF. */
   messagePreview?: MessagePreviewConfig
+  /** Quick Replies (Phase 2 / Feature 6). Additive — null = no suggested replies. */
+  quickReplies?: QuickRepliesConfig
 }
 
 /** The canonical default appearance (V2). */
@@ -196,7 +215,7 @@ export const DEFAULT_APPEARANCE_V2: AppearanceV2 = {
  */
 
 /** Allowed top-level keys in an AppearanceV2 object. */
-const ALLOWED_TOP_LEVEL_KEYS = new Set(['version', 'desktop', 'mobile', 'colors', 'launcher', 'attention', 'messagePreview'])
+const ALLOWED_TOP_LEVEL_KEYS = new Set(['version', 'desktop', 'mobile', 'colors', 'launcher', 'attention', 'messagePreview', 'quickReplies'])
 
 /**
  * Check if a value is a plain JSON-compatible object — prototype is exactly
@@ -402,6 +421,27 @@ export function parseAppearanceV2(value: unknown): AppearanceV2 | null {
   }
   if (messagePreview !== null && messagePreview !== undefined) {
     result.messagePreview = messagePreview
+  }
+
+  // Parse quickReplies if present (read from descriptor to bypass Proxy get).
+  const quickRepliesDesc = getOwnDataDescriptor(value, 'quickReplies')
+  let quickRepliesValue: unknown = undefined
+  if (quickRepliesDesc !== null) {
+    quickRepliesValue = quickRepliesDesc.value
+  } else {
+    try {
+      if (Object.prototype.hasOwnProperty.call(value, 'quickReplies')) return null
+    } catch {
+      return null
+    }
+  }
+  let quickReplies: QuickRepliesConfig | null | undefined = undefined
+  if (quickRepliesValue !== undefined) {
+    quickReplies = parseQuickRepliesConfig(quickRepliesValue)
+    if (quickReplies === undefined) return null // malformed → fail closed
+  }
+  if (quickReplies !== null && quickReplies !== undefined) {
+    result.quickReplies = quickReplies
   }
   return result
 }
@@ -747,6 +787,108 @@ function parseMessagePreviewConfig(value: unknown): MessagePreviewConfig | null 
   if (typeof enabledValue !== 'boolean') return undefined
 
   return { enabled: enabledValue }
+}
+
+/** Allowed keys inside a quick-replies config object. */
+const ALLOWED_QUICK_REPLIES_KEYS = new Set(['items', 'paidItems'])
+
+/** Maximum items in a stored quick-replies config (defensive cap). */
+const QUICK_REPLIES_MAX_STORED = 50
+
+/**
+ * Parse a quick-replies config object. Returns:
+ *   - undefined → malformed (caller fails closed).
+ *   - null → absent (quickReplies is null/undefined).
+ *   - QuickRepliesConfig → valid (canonical object).
+ *
+ * Validates:
+ *   - `items` is a non-empty array of valid strings (1–80 code points,
+ *     non-blank, single-line, no case-insensitive duplicates).
+ *   - `paidItems` (optional): if present, must be a non-empty array of valid
+ *     strings with no duplicates, AND must contain at least one item not in
+ *     `items` (not a useless subset). An empty paidItems or one identical to
+ *     items is rejected as contradictory.
+ *   - No unexpected keys.
+ *   - No arrays, inherited properties, or getter-based malformed objects.
+ */
+function parseQuickRepliesConfig(value: unknown): QuickRepliesConfig | null | undefined {
+  if (value === undefined) return null // absent (key not present)
+  if (value === null) return undefined // malformed (explicit null is not valid)
+  if (!isPlainObject(value)) return undefined // malformed
+  const keys = safeOwnKeys(value)
+  if (keys === null) return undefined
+  for (const key of keys) {
+    if (typeof key !== 'string' || !ALLOWED_QUICK_REPLIES_KEYS.has(key)) return undefined
+  }
+
+  // items — required, must be an array of valid strings.
+  const itemsDesc = getOwnDataDescriptor(value, 'items')
+  if (!itemsDesc) return undefined
+  const itemsValue = itemsDesc.value
+  if (!Array.isArray(itemsValue)) return undefined
+  if (itemsValue.length > QUICK_REPLIES_MAX_STORED) return undefined
+  // Note: empty items is accepted (the merge can produce { items: [], paidItems: [...] }
+  // when Free clears suggestions while preserving paid selection). The resolver
+  // returns [] for empty items.
+
+  const items: string[] = []
+  const itemsLower = new Set<string>()
+  for (const raw of itemsValue) {
+    if (typeof raw !== 'string') return undefined
+    // Reject blank (whitespace-only).
+    if (raw.trim() === '') return undefined
+    // Reject whitespace-padded (leading or trailing whitespace).
+    if (raw !== raw.trim()) return undefined
+    // Reject multiline.
+    if (raw.indexOf('\n') !== -1 || raw.indexOf('\r') !== -1) return undefined
+    const codePoints = Array.from(raw).length
+    if (codePoints < 1 || codePoints > 80) return undefined
+    const lower = raw.toLowerCase()
+    if (itemsLower.has(lower)) return undefined // duplicate
+    itemsLower.add(lower)
+    items.push(raw)
+  }
+
+  const result: QuickRepliesConfig = { items }
+
+  // paidItems — optional. If present, must be non-empty, valid, no duplicates,
+  // and contain at least one item NOT in items (not a useless subset).
+  const paidItemsDesc = getOwnDataDescriptor(value, 'paidItems')
+  if (paidItemsDesc !== null) {
+    const v = paidItemsDesc.value
+    if (v !== undefined && v !== null) {
+      if (!Array.isArray(v)) return undefined
+      if (v.length === 0) return undefined // useless empty paidItems
+      if (v.length > QUICK_REPLIES_MAX_STORED) return undefined
+      const paidItems: string[] = []
+      const paidLower = new Set<string>()
+      let hasNewItem = false
+      for (const raw of v) {
+        if (typeof raw !== 'string') return undefined
+        if (raw.trim() === '') return undefined
+        if (raw !== raw.trim()) return undefined
+        if (raw.indexOf('\n') !== -1 || raw.indexOf('\r') !== -1) return undefined
+        const codePoints = Array.from(raw).length
+        if (codePoints < 1 || codePoints > 80) return undefined
+        const lower = raw.toLowerCase()
+        if (paidLower.has(lower)) return undefined // duplicate within paidItems
+        paidLower.add(lower)
+        if (!itemsLower.has(lower)) hasNewItem = true
+        paidItems.push(raw)
+      }
+      // paidItems must provide at least one item not in items (not a subset).
+      if (!hasNewItem) return undefined
+      result.paidItems = paidItems
+    }
+  } else {
+    try {
+      if (Object.prototype.hasOwnProperty.call(value, 'paidItems')) return undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  return result
 }
 
 /**

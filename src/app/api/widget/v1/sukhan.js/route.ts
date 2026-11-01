@@ -134,6 +134,9 @@ ${POSITIONING_FN_SOURCE}
     previewEl: null,       // .sk-message-preview DOM element
     previewVisible: false,
     seenMessageIds: [],    // dedup across socket + poll + history
+    // V2 quick replies state.
+    quickRepliesItems: [],  // effective items from public config
+    quickRepliesEl: null,   // .sk-quick-replies DOM element
   };
 
   // ============================================================
@@ -511,6 +514,36 @@ ${POSITIONING_FN_SOURCE}
     typingEl.innerHTML = '<span style="display:inline-flex;gap:3px"><span class="sk-dot"></span><span class="sk-dot"></span><span class="sk-dot"></span></span>';
     bodyEl.appendChild(typingEl);
 
+    // V2 quick replies: suggestion buttons inside the open panel.
+    // Shown only when the panel is open + visitor authorized + NO visitor
+    // message has been persisted yet (including from history on reload).
+    var qrItems = (config.quickReplies && config.quickReplies.items) || [];
+    state.quickRepliesItems = qrItems;
+    var quickRepliesEl = el('div', 'sk-quick-replies');
+    css(quickRepliesEl, {
+      display: 'none', flexWrap: 'wrap', gap: '6px', padding: '8px 12px',
+      background: '#fff', borderTop: '1px solid #eee', flexShrink: '0',
+    });
+    for (var qi = 0; qi < qrItems.length; qi++) {
+      var qrBtn = el('button', 'sk-quick-reply');
+      qrBtn.textContent = qrItems[qi]; // XSS-safe: textContent, never innerHTML
+      css(qrBtn, {
+        border: '1px solid #ddd', background: '#f7f5f1', color: '#0E1116',
+        borderRadius: '16px', padding: '6px 14px', fontSize: '13px',
+        cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap',
+        maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis',
+      });
+      qrBtn.setAttribute('type', 'button');
+      qrBtn.onclick = (function(text) {
+        return function() {
+          inputEl.value = text;
+          sendMessage();
+        };
+      })(qrItems[qi]);
+      quickRepliesEl.appendChild(qrBtn);
+    }
+    state.quickRepliesEl = quickRepliesEl;
+
     // Input bar
     var inputBar = el('div', 'sk-input');
     css(inputBar, { display:'flex', padding:'10px 12px', background:'#fff', borderTop:'1px solid #eee', gap:'8px', flexShrink:'0' });
@@ -537,6 +570,7 @@ ${POSITIONING_FN_SOURCE}
     inputBar.appendChild(inputEl); inputBar.appendChild(sendBtn);
 
     panel.appendChild(header); panel.appendChild(bodyEl);
+    if (state.quickRepliesEl) panel.appendChild(state.quickRepliesEl);
 
     // Free-plan "Powered by" badge (CUST-F): the old condition
     // (!config.plan || config.plan === 'free') was ALWAYS true — the
@@ -577,11 +611,31 @@ ${POSITIONING_FN_SOURCE}
       applyPanelTransform();
       hidePreview(); // opening the conversation hides the preview
       pulseDot.style.display = 'none';
+      updateQuickReplies();
       setTimeout(function(){ inputEl && inputEl.focus(); }, 200);
     } else {
       css(panel, { opacity:'0', pointerEvents:'none' });
       applyPanelTransform();
+      updateQuickReplies();
     }
+  }
+
+  // V2 quick replies: show suggestion buttons only when the panel is open,
+  // the visitor is authorized, and NO visitor message has been persisted yet
+  // (including from history on reload). After the first visitor message,
+  // suggestions are permanently hidden.
+  function updateQuickReplies(){
+    if (!state.quickRepliesEl) return;
+    var hasVisitorMsg = false;
+    if (state.messages && state.messages.length > 0) {
+      for (var i = 0; i < state.messages.length; i++) {
+        if (state.messages[i] && state.messages[i].senderType === 'contact') {
+          hasVisitorMsg = true; break;
+        }
+      }
+    }
+    var show = state.open && state.quickRepliesItems.length > 0 && !hasVisitorMsg;
+    state.quickRepliesEl.style.display = show ? 'flex' : 'none';
   }
 
   // ---- V2 Message Preview helpers ----
@@ -917,6 +971,7 @@ ${POSITIONING_FN_SOURCE}
       bodyEl.insertBefore(bubble, typingEl);
     }
     scrollBody();
+    updateQuickReplies(); // hide suggestions after the first visitor message
   }
 
   function scrollBody(){ if (bodyEl) bodyEl.scrollTop = bodyEl.scrollHeight; }
@@ -1023,7 +1078,11 @@ ${POSITIONING_FN_SOURCE}
       // V2 message preview — bubble adjacent to the launcher.
       + '.sk-message-preview{box-sizing:border-box;}'
       + '.sk-message-preview-text{box-sizing:border-box;padding-right:20px;}'
-      + '.sk-message-preview-dismiss:hover{color:#0E1116;background:rgba(0,0,0,0.06);}';
+      + '.sk-message-preview-dismiss:hover{color:#0E1116;background:rgba(0,0,0,0.06);}'
+      // V2 quick replies — suggestion buttons inside the open panel.
+      + '.sk-quick-replies{box-sizing:border-box;}'
+      + '.sk-quick-reply{box-sizing:border-box;transition:background .15s ease;}'
+      + '.sk-quick-reply:hover{background:#e8e4dc;}';
     document.head.appendChild(style);
   }
 

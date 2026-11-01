@@ -19,6 +19,7 @@ import { WidgetColorsPanel } from './widget-colors-panel'
 import { WidgetLauncherPanel } from './widget-launcher-panel'
 import { WidgetAttentionPanel } from './widget-attention-panel'
 import { WidgetMessagePreviewPanel } from './widget-message-preview-panel'
+import { WidgetQuickRepliesPanel } from './widget-quick-replies-panel'
 
 type WidgetConfig = {
   accentColor: string
@@ -126,6 +127,12 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
     effective: { enabled: boolean }
     stored: { enabled: boolean } | null
   } | null>(null)
+  // V2 quick replies data (from GET /api/widget-config `quickReplies` field).
+  const [quickReplies, setQuickReplies] = useState<{
+    entitlements: { max: number }
+    effective: { items: string[] }
+    stored: { items: string[]; paidItems?: string[] } | null
+  } | null>(null)
 
   const apiUrl = typeof window !== 'undefined' ? window.location.origin : HOSTED_API_URL
 
@@ -160,6 +167,8 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
     if (cfgData.attention) setAttention(cfgData.attention)
     // V2 message preview data.
     if (cfgData.messagePreview) setMessagePreview(cfgData.messagePreview)
+    // V2 quick replies data.
+    if (cfgData.quickReplies) setQuickReplies(cfgData.quickReplies)
     const domData = await domRes.json()
     setDomains(domData.domains ?? [])
     setDomainLimit(domData.limit ?? 0)
@@ -681,6 +690,13 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
           <WidgetMessagePreviewPanel
             slug={slug}
             messagePreview={messagePreview}
+            defaultDirection={(config.defaultLocale === 'fa' ? 'rtl' : 'ltr') as 'rtl' | 'ltr'}
+            onReload={load}
+          />
+          {/* V2 Quick Replies — suggestion buttons inside the chat panel. */}
+          <WidgetQuickRepliesPanel
+            slug={slug}
+            quickReplies={quickReplies}
             defaultDirection={(config.defaultLocale === 'fa' ? 'rtl' : 'ltr') as 'rtl' | 'ltr'}
             onReload={load}
           />

@@ -62,6 +62,17 @@ import {
   hasMessagePreviewField,
   type MessagePreviewPatchData,
 } from '@/lib/widget/message-preview-patch'
+import {
+  resolveEffectiveQuickReplies,
+  getStoredQuickReplies,
+  type StoredQuickRepliesInput,
+} from '@/lib/widget/effective-quick-replies'
+import {
+  validateQuickRepliesPatch,
+  mergeQuickRepliesPatch,
+  hasQuickRepliesField,
+  type QuickRepliesPatchData,
+} from '@/lib/widget/quick-replies-patch'
 
 /**
  * GET /api/widget-config — dashboard widget configuration.
@@ -132,6 +143,13 @@ export async function GET() {
     }
     const effectiveMessagePreview = resolveEffectiveMessagePreview(messagePreviewInput, entitlements)
     const storedMessagePreview = getStoredMessagePreview(messagePreviewInput)
+
+    // V2 quick replies: resolve effective + stored.
+    const quickRepliesInput: StoredQuickRepliesInput = {
+      appearanceV2: stored?.appearanceV2,
+    }
+    const effectiveQuickReplies = resolveEffectiveQuickReplies(quickRepliesInput, entitlements)
+    const storedQuickReplies = getStoredQuickReplies(quickRepliesInput)
 
     return {
       stored,
@@ -211,6 +229,17 @@ export async function GET() {
         effective: effectiveMessagePreview,
         stored: storedMessagePreview,
       },
+      // V2 quick replies: resolve effective + stored.
+      // The dashboard `effective` must match the public widget. The raw stored
+      // `paidItems` is exposed ONLY via `stored` (for restore-on-upgrade),
+      // NEVER as `effective` for Free (the resolver truncates to the plan max).
+      quickReplies: {
+        entitlements: {
+          max: entitlements?.quickReplies ?? 0,
+        },
+        effective: effectiveQuickReplies,
+        stored: storedQuickReplies,
+      },
     } as const
   })
   if (!result) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
@@ -223,6 +252,7 @@ export async function GET() {
     launcher: result.result.launcher,
     attention: result.result.attention,
     messagePreview: result.result.messagePreview,
+    quickReplies: result.result.quickReplies,
   })
 }
 
@@ -305,13 +335,26 @@ const ATTENTION_ERROR_STATUS: Record<string, number> = {
 
 /** Message-preview-specific error codes → HTTP status mapping. */
 const MESSAGE_PREVIEW_ERROR_STATUS: Record<string, number> = {
-  message_preview_not_authorized: 403,  // unknown plan / no messagePreview capability
+  message_preview_not_authorized: 403,
   message_preview_not_object: 400,
   message_preview_enabled_missing: 400,
   message_preview_enabled_invalid: 400,
-  message_preview_not_allowed: 403,     // Free attempting any messagePreview PATCH → 403
+  message_preview_not_allowed: 403,
   message_preview_unexpected_key: 400,
   message_preview_no_fields: 400,
+}
+
+/** Quick-replies-specific error codes → HTTP status mapping. */
+const QUICK_REPLIES_ERROR_STATUS: Record<string, number> = {
+  quick_replies_not_authorized: 403,
+  quick_replies_not_object: 400,
+  quick_replies_items_missing: 400,
+  quick_replies_items_not_array: 400,
+  quick_replies_item_invalid: 400,
+  quick_replies_limit_exceeded: 403, // exceeding plan max → 403
+  quick_replies_duplicate: 400,
+  quick_replies_unexpected_key: 400,
+  quick_replies_no_fields: 400,
 }
 
 /**
@@ -366,11 +409,12 @@ export async function PATCH(req: NextRequest) {
     const hasLauncher = hasLauncherField(body)
     const hasAttention = hasAttentionField(body)
     const hasMessagePreview = hasMessagePreviewField(body)
+    const hasQuickReplies = hasQuickRepliesField(body)
     const hasOtherFields = hasOtherCustomizationFields(body)
 
     // Reject unrecognized top-level fields when the request contains
-    // positioning, colors, launcher, attention, or messagePreview (isolated contracts).
-    if ((hasPositioning || hasColors || hasLauncher || hasAttention || hasMessagePreview) && hasUnrecognizedFields(body)) {
+    // positioning, colors, launcher, attention, messagePreview, or quickReplies.
+    if ((hasPositioning || hasColors || hasLauncher || hasAttention || hasMessagePreview || hasQuickReplies) && hasUnrecognizedFields(body)) {
       return { badRequest: true as const, code: 'unrecognized_field' }
     }
 
@@ -428,6 +472,16 @@ export async function PATCH(req: NextRequest) {
         return { messagePreviewError: true as const, code: mpResult.code }
       }
       messagePreviewPatch = mpResult.data
+    }
+
+    // ---- Validate quick replies (if present) ----
+    let quickRepliesPatch: QuickRepliesPatchData | null = null
+    if (hasQuickReplies) {
+      const qrResult = validateQuickRepliesPatch({ quickReplies: body.quickReplies }, entitlements)
+      if (!qrResult.ok) {
+        return { quickRepliesError: true as const, code: qrResult.code }
+      }
+      quickRepliesPatch = qrResult.data
     }
 
     // ---- Validate + collect other customization fields (paid only) ----
@@ -575,6 +629,20 @@ export async function PATCH(req: NextRequest) {
       data.appearanceV2 = mergedMessagePreview as unknown as string // Prisma Json field
     }
 
+    // ---- Apply quick replies patch (if validated) ----
+    if (quickRepliesPatch) {
+      let baseAppearanceV2: unknown = data.appearanceV2 ?? undefined
+      if (baseAppearanceV2 === undefined) {
+        const existing = await db.widgetConfig.findUnique({
+          where: { tenantId: tid },
+          select: { appearanceV2: true },
+        })
+        baseAppearanceV2 = existing?.appearanceV2
+      }
+      const mergedQuickReplies = mergeQuickRepliesPatch(baseAppearanceV2, quickRepliesPatch, entitlements)
+      data.appearanceV2 = mergedQuickReplies as unknown as string // Prisma Json field
+    }
+
     if (Object.keys(data).length === 0) {
       return { badRequest: true as const, code: 'no_fields' }
     }
@@ -613,6 +681,10 @@ export async function PATCH(req: NextRequest) {
   }
   if ('messagePreviewError' in r) {
     const status = MESSAGE_PREVIEW_ERROR_STATUS[r.code as string] ?? 400
+    return NextResponse.json({ error: r.code }, { status })
+  }
+  if ('quickRepliesError' in r) {
+    const status = QUICK_REPLIES_ERROR_STATUS[r.code as string] ?? 400
     return NextResponse.json({ error: r.code }, { status })
   }
   if ('badRequest' in r) return NextResponse.json({ error: r.code }, { status: 400 })

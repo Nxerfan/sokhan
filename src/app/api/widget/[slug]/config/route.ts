@@ -28,6 +28,10 @@ import {
   resolveEffectiveMessagePreview,
   type StoredMessagePreviewInput,
 } from '@/lib/widget/effective-message-preview'
+import {
+  resolveEffectiveQuickReplies,
+  type StoredQuickRepliesInput,
+} from '@/lib/widget/effective-quick-replies'
 
 /** CORS headers for widget API responses. */
 function widgetHeaders(res: NextResponse): NextResponse {
@@ -202,6 +206,14 @@ export async function GET(
   }
   const effectiveMessagePreview = resolveEffectiveMessagePreview(messagePreviewInput, entitlements)
 
+  // V2 quick replies: resolve effective items from stored V2 + entitlements.
+  // The public config exposes ONLY the effective authorized items — never
+  // paidItems. Free with stored paid-only items exposes only the first `max`.
+  const quickRepliesInput: StoredQuickRepliesInput = {
+    appearanceV2: widgetConfig.appearanceV2,
+  }
+  const effectiveQuickReplies = resolveEffectiveQuickReplies(quickRepliesInput, entitlements)
+
   const configWithPosition = { ...config, position: legacyPosition, accentColor: legacyAccent, launcherShape: legacyLauncherShape }
 
   // Build the response — conditionally include `colors` only when the tenant
@@ -231,6 +243,10 @@ export async function GET(
   // `false` for Free / unknown / no-V2-selection. Older consumers ignore
   // the field. Never contains message text or conversation history.
   responseBody.messagePreview = effectiveMessagePreview
+  // V2 quick replies (additive — always present as { items }).
+  // Empty array for Free / unknown / no-V2-selection. Older consumers ignore
+  // the field. Never exposes paidItems.
+  responseBody.quickReplies = effectiveQuickReplies
 
   // Additive: the safe public access-policy fields. Existing clients continue
   // working (additive top-level fields). NEVER expose the raw integration
