@@ -53,6 +53,12 @@ export interface LauncherPositionInput {
   launcherHeight: number
   safeAreaBottom: number
   baseMargin: number
+  /**
+   * Effective V2 attention animation. When set, the clamp reserves a
+   * motion-aware safety inset so the animated launcher's transform never
+   * escapes the viewport. Undefined / 'none' / 'glow' → 0 inset.
+   */
+  attentionAnimation?: string
 }
 
 export interface LauncherPositionOutput {
@@ -142,6 +148,30 @@ export function computePanelHorizontalPosition(opts: PanelHorizontalInput): Pane
   return { left: clampedPanelLeft, width: clampedWidth }
 }
 
+/**
+ * The maximum visual displacement (in px) of each V2 attention animation
+ * in each direction. Used to inset the positioning clamp so the animated
+ * launcher's CSS transform never escapes the viewport.
+ *   - shake: translateX(±3px) → horizontal ±3px.
+ *   - bounce: translateY(-6px) → vertical up 6px.
+ *   - pulse: scale(1.06) → symmetric expansion of dim * 0.03 on each side.
+ *   - none / glow / undefined → 0.
+ */
+export function computeAttentionMotion(
+  animation: string | undefined,
+  launcherWidth: number,
+  launcherHeight: number,
+): { left: number; right: number; up: number; down: number } {
+  if (animation === 'shake') return { left: 3, right: 3, up: 0, down: 0 }
+  if (animation === 'bounce') return { left: 0, right: 0, up: 6, down: 0 }
+  if (animation === 'pulse') {
+    const px = Math.ceil(launcherWidth * 0.03)
+    const py = Math.ceil(launcherHeight * 0.03)
+    return { left: px, right: px, up: py, down: py }
+  }
+  return { left: 0, right: 0, up: 0, down: 0 }
+}
+
 export function computeLauncherPosition(opts: LauncherPositionInput): LauncherPositionOutput {
   const {
     anchor,
@@ -154,6 +184,7 @@ export function computeLauncherPosition(opts: LauncherPositionInput): LauncherPo
     launcherHeight,
     safeAreaBottom,
     baseMargin,
+    attentionAnimation,
   } = opts
 
   let baseLeft: number
@@ -172,11 +203,15 @@ export function computeLauncherPosition(opts: LauncherPositionInput): LauncherPo
   let left = baseLeft + offsetX
   let bottom = baseMargin + offsetY + safeAreaBottom
 
-  const maxLeft = Math.max(0, viewportWidth - launcherWidth)
-  left = Math.max(0, Math.min(left, maxLeft))
+  // Motion-aware safety inset — reserve space for the attention animation's
+  // maximum transform displacement so the animated launcher stays in bounds.
+  const motion = computeAttentionMotion(attentionAnimation, launcherWidth, launcherHeight)
 
-  const minBottom = safeAreaBottom
-  const maxBottom = Math.max(minBottom, viewportHeight - launcherHeight - safeAreaBottom)
+  const maxLeft = Math.max(motion.left, viewportWidth - launcherWidth - motion.right)
+  left = Math.max(motion.left, Math.min(left, maxLeft))
+
+  const minBottom = Math.max(safeAreaBottom, motion.down)
+  const maxBottom = Math.max(minBottom, viewportHeight - launcherHeight - safeAreaBottom - motion.up)
   bottom = Math.max(minBottom, Math.min(bottom, maxBottom))
 
   let panelSide: 'left' | 'right' | 'center'

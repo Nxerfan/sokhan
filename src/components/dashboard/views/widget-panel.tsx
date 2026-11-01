@@ -17,6 +17,7 @@ import { WidgetAccessIdentity } from './widget-access-identity'
 import { WidgetPositioningPanel } from './widget-positioning-panel'
 import { WidgetColorsPanel } from './widget-colors-panel'
 import { WidgetLauncherPanel } from './widget-launcher-panel'
+import { WidgetAttentionPanel } from './widget-attention-panel'
 
 type WidgetConfig = {
   accentColor: string
@@ -112,6 +113,12 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
     effective: { shape: 'tab' | 'rounded' | 'pill' }  // always non-null (server resolves V1 fallback)
     stored: 'tab' | 'rounded' | 'pill' | null
   } | null>(null)
+  // V2 attention data (from GET /api/widget-config `attention` field).
+  const [attention, setAttention] = useState<{
+    entitlements: { attentionAnimations: 'basic' | 'advanced' }
+    effective: { animation: 'none' | 'pulse' | 'bounce' | 'shake' | 'glow' }
+    stored: { animation: 'none' | 'pulse' | 'bounce' | 'shake' | 'glow'; paidAnimation?: 'bounce' | 'shake' | 'glow' } | null
+  } | null>(null)
 
   const apiUrl = typeof window !== 'undefined' ? window.location.origin : HOSTED_API_URL
 
@@ -142,6 +149,8 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
     if (cfgData.colors) setColors(cfgData.colors)
     // V2 launcher data.
     if (cfgData.launcher) setLauncher(cfgData.launcher)
+    // V2 attention data.
+    if (cfgData.attention) setAttention(cfgData.attention)
     const domData = await domRes.json()
     setDomains(domData.domains ?? [])
     setDomainLimit(domData.limit ?? 0)
@@ -650,6 +659,14 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
             launcher={launcher}
             defaultDirection={(config.defaultLocale === 'fa' ? 'rtl' : 'ltr') as 'rtl' | 'ltr'}
             onReload={load}
+          />
+          {/* V2 Attention — none + pulse for all plans, bounce/shake/glow for paid plans. */}
+          <WidgetAttentionPanel
+            slug={slug}
+            attention={attention}
+            defaultDirection={(config.defaultLocale === 'fa' ? 'rtl' : 'ltr') as 'rtl' | 'ltr'}
+            onReload={load}
+            effectiveAccent={colors?.effective?.tokens?.accent ?? effective?.accentColor ?? '#E09A2B'}
           />
         <div className="grid gap-4 lg:grid-cols-2">
           <div className="flex flex-col gap-4">

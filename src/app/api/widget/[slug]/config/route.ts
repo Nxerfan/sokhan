@@ -20,6 +20,10 @@ import {
   resolveEffectiveLauncher,
   type StoredLauncherInput,
 } from '@/lib/widget/effective-launcher'
+import {
+  resolveEffectiveAttention,
+  type StoredAttentionInput,
+} from '@/lib/widget/effective-attention'
 
 /** CORS headers for widget API responses. */
 function widgetHeaders(res: NextResponse): NextResponse {
@@ -173,6 +177,17 @@ export async function GET(
   // Derive the V1 `launcherShape` for legacy consumers from the effective launcher.
   const legacyLauncherShape = effectiveLauncher.shape
 
+  // V2 attention: resolve effective attention from stored V2 + entitlements.
+  // The public config exposes ONLY the effective authorized animation —
+  // never the raw stored paidAnimation. For Free with a stored paid-only
+  // animation (and no basic selection), the resolver returns 'none' so the
+  // launcher never renders an unauthorized paid motion. When no V2 attention
+  // selection exists, the resolver returns 'none' (legacy unanimated).
+  const attentionInput: StoredAttentionInput = {
+    appearanceV2: widgetConfig.appearanceV2,
+  }
+  const effectiveAttention = resolveEffectiveAttention(attentionInput, entitlements)
+
   const configWithPosition = { ...config, position: legacyPosition, accentColor: legacyAccent, launcherShape: legacyLauncherShape }
 
   // Build the response — conditionally include `colors` only when the tenant
@@ -194,6 +209,10 @@ export async function GET(
   }
   // V2 launcher (additive — older clients use the legacy `launcherShape` field).
   responseBody.launcher = effectiveLauncher
+  // V2 attention (additive — always present as { animation }).
+  // 'none' preserves the legacy unanimated launcher for tenants who haven't
+  // adopted V2 attention. Older consumers ignore the field.
+  responseBody.attention = effectiveAttention
 
   // Additive: the safe public access-policy fields. Existing clients continue
   // working (additive top-level fields). NEVER expose the raw integration

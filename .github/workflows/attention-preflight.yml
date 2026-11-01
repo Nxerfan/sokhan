@@ -1,0 +1,45 @@
+name: Attention Animations — test harness preflight
+on:
+  push:
+    branches:
+      - feat/widget-v2-attention-animations
+    paths:
+      - tests/unit/widget-v2-attention.test.ts
+      - tests/widget-v2-attention.spec.ts
+      - .github/workflows/attention-preflight.yml
+
+jobs:
+  test-harness-preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+      - name: Parse both CI test files with TypeScript
+        run: |
+          node --input-type=module <<'NODE'
+          import ts from 'typescript'
+          import { readFileSync } from 'node:fs'
+          const files = [
+            'tests/unit/widget-v2-attention.test.ts',
+            'tests/widget-v2-attention.spec.ts',
+          ]
+          for (const file of files) {
+            const text = readFileSync(file, 'utf8')
+            const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+            const errors = source.parseDiagnostics
+            if (errors.length) {
+              for (const error of errors) {
+                console.error(ts.flattenDiagnosticMessageText(error.messageText, '\n'))
+              }
+              throw new Error(file + ' has TypeScript syntax errors')
+            }
+            console.log('Syntax OK: ' + file)
+          }
+          NODE
+      - name: Playwright fixture discovery (no browser, DB, Docker, or product feature)
+        run: |
+          bunx playwright test tests/widget-v2-attention.spec.ts --list

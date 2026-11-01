@@ -196,8 +196,9 @@ export function mergeLauncherPatch(
     desktop: { ...(base.desktop ?? {}) },
     mobile: { ...(base.mobile ?? {}) },
     launcher: launcherConfig,
-    // BLOCKER 1: Preserve colors + any other existing V2 fields.
+    // Preserve colors + attention + any other existing V2 fields.
     ...(base.colors ? { colors: base.colors } : {}),
+    ...(base.attention ? { attention: base.attention } : {}),
   }
 }
 

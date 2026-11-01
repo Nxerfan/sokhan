@@ -39,6 +39,11 @@ import {
   isPaidOnlyLauncherShape,
   type LauncherShape,
 } from './launcher-types'
+import {
+  isValidAttentionAnimation,
+  isAdvancedOnlyAttentionAnimation,
+  type AttentionAnimation,
+} from './attention-types'
 
 /** The appearance schema version. Currently 1. */
 export const APPEARANCE_V2_VERSION = 1 as const
@@ -106,6 +111,24 @@ export interface LauncherConfig {
   paidShape?: LauncherShape
 }
 
+/**
+ * Global attention animation selection (not device-specific).
+ *
+ * - `animation`: the active attention animation ('none', 'pulse', 'bounce',
+ *   'shake', 'glow'). 'none' preserves the legacy unanimated launcher.
+ * - `paidAnimation`: preserved advanced-only animation for downgrade/upgrade
+ *   restore. When a paid tenant selects 'glow' then downgrades to Free, the
+ *   active animation becomes a basic one (e.g. 'pulse' or 'none'), but
+ *   'glow' is stored in `paidAnimation` so it can be restored on upgrade.
+ *   Only advanced-only animations (bounce/shake/glow) are valid here —
+ *   'none' and 'pulse' are basic and contradictory as a paid preference.
+ */
+export interface AttentionConfig {
+  animation: AttentionAnimation
+  /** Preserved advanced-only animation for upgrade restore. */
+  paidAnimation?: AttentionAnimation
+}
+
 /** The versioned appearance configuration. */
 export interface AppearanceV2 {
   version: typeof APPEARANCE_V2_VERSION
@@ -115,6 +138,8 @@ export interface AppearanceV2 {
   colors?: ColorTheme
   /** Global launcher style (Phase 2 / Feature 3). Additive — null = V1 behavior. */
   launcher?: LauncherConfig
+  /** Global attention animation (Phase 2 / Feature 4). Additive — null = legacy (unanimated). */
+  attention?: AttentionConfig
 }
 
 /** The canonical default appearance (V2). */
@@ -159,7 +184,7 @@ export const DEFAULT_APPEARANCE_V2: AppearanceV2 = {
  */
 
 /** Allowed top-level keys in an AppearanceV2 object. */
-const ALLOWED_TOP_LEVEL_KEYS = new Set(['version', 'desktop', 'mobile', 'colors', 'launcher'])
+const ALLOWED_TOP_LEVEL_KEYS = new Set(['version', 'desktop', 'mobile', 'colors', 'launcher', 'attention'])
 
 /**
  * Check if a value is a plain JSON-compatible object — prototype is exactly
@@ -311,6 +336,24 @@ export function parseAppearanceV2(value: unknown): AppearanceV2 | null {
     if (launcher === undefined) return null // malformed → fail closed
   }
 
+  // Parse attention if present (read from descriptor to bypass Proxy get).
+  const attentionDesc = getOwnDataDescriptor(value, 'attention')
+  let attentionValue: unknown = undefined
+  if (attentionDesc !== null) {
+    attentionValue = attentionDesc.value
+  } else {
+    try {
+      if (Object.prototype.hasOwnProperty.call(value, 'attention')) return null
+    } catch {
+      return null
+    }
+  }
+  let attention: AttentionConfig | null | undefined = undefined
+  if (attentionValue !== undefined) {
+    attention = parseAttentionConfig(attentionValue)
+    if (attention === undefined) return null // malformed → fail closed
+  }
+
   // Return a CANONICAL object (not the raw input reference) so callers
   // never hold an unvalidated object.
   const result: AppearanceV2 = {
@@ -323,6 +366,9 @@ export function parseAppearanceV2(value: unknown): AppearanceV2 | null {
   }
   if (launcher !== null && launcher !== undefined) {
     result.launcher = launcher
+  }
+  if (attention !== null && attention !== undefined) {
+    result.attention = attention
   }
   return result
 }
@@ -575,6 +621,63 @@ function parseLauncherConfig(value: unknown): LauncherConfig | null | undefined 
   } else {
     try {
       if (Object.prototype.hasOwnProperty.call(value, 'paidShape')) return undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  return result
+}
+
+/** Allowed keys inside an attention config object. */
+const ALLOWED_ATTENTION_KEYS = new Set(['animation', 'paidAnimation'])
+
+/**
+ * Parse an attention config object. Returns:
+ *   - undefined → malformed (caller fails closed).
+ *   - null → absent (attention is null/undefined).
+ *   - AttentionConfig → valid (canonical object).
+ *
+ * Validates: animation is a valid attention animation; paidAnimation
+ * (optional) is a valid ADVANCED-ONLY animation (bounce/shake/glow) —
+ * 'none' and 'pulse' are basic and contradictory as a paid preference,
+ * so they are rejected; no unexpected keys; no arbitrary CSS or
+ * executable text (animation is an enum, never a free string).
+ *
+ * Getter-based malformed objects are caught (never escape).
+ */
+function parseAttentionConfig(value: unknown): AttentionConfig | null | undefined {
+  if (value === null || value === undefined) return null
+  if (!isPlainObject(value)) return undefined // malformed
+  const keys = safeOwnKeys(value)
+  if (keys === null) return undefined
+  for (const key of keys) {
+    if (typeof key !== 'string' || !ALLOWED_ATTENTION_KEYS.has(key)) return undefined
+  }
+
+  // animation — required, must be a valid attention animation.
+  const animationDesc = getOwnDataDescriptor(value, 'animation')
+  if (!animationDesc) return undefined
+  const animationValue = animationDesc.value
+  if (!isValidAttentionAnimation(animationValue)) return undefined
+
+  const result: AttentionConfig = { animation: animationValue as AttentionAnimation }
+
+  // paidAnimation — optional, must be a valid ADVANCED-ONLY animation.
+  // Only bounce/shake/glow are semantically valid as preserved paid
+  // preferences. 'none' and 'pulse' are basic (available to Free) and
+  // contradictory as a paid preference — rejected.
+  const paidAnimationDesc = getOwnDataDescriptor(value, 'paidAnimation')
+  if (paidAnimationDesc !== null) {
+    const v = paidAnimationDesc.value
+    if (v !== undefined && v !== null) {
+      if (!isValidAttentionAnimation(v)) return undefined
+      if (!isAdvancedOnlyAttentionAnimation(v as AttentionAnimation)) return undefined
+      result.paidAnimation = v as AttentionAnimation
+    }
+  } else {
+    try {
+      if (Object.prototype.hasOwnProperty.call(value, 'paidAnimation')) return undefined
     } catch {
       return undefined
     }
