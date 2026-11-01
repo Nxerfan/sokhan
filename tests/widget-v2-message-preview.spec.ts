@@ -131,11 +131,25 @@ async function sendVisitor(page: Page, text: string) {
   const input = page.locator('.sk-panel input').first()
   await expect(input).toBeVisible({ timeout: 15_000 })
   await input.fill(text)
+  // A disappearing .sk-pending placeholder does NOT prove persistence:
+  // slug-script also clears pending on a failed 401/403 POST and paints
+  // .sk-failed. Require the real visitor POST to succeed before checking
+  // the Inbox. This makes bootstrap/auth failures visible at their source.
+  const sent = page.waitForResponse(res =>
+    res.request().method() === 'POST' &&
+    /\/api\/widget\/[^/]+\/messages(?:\?|$)/.test(res.url()),
+    { timeout: 20_000 },
+  )
   await input.press('Enter')
+  const reply = await sent
+  expect(reply.status(), 'visitor POST must persist before agent can reply: ' +
+    (await reply.text())).toBe(200)
   await expect(page.locator('.sk-msg.sk-vis p').filter({ hasText: text }))
     .toHaveCount(1, { timeout: 15_000 })
   await expect(page.locator('.sk-msg.sk-vis.sk-pending p').filter({ hasText: text }))
     .toHaveCount(0, { timeout: 20_000 })
+  await expect(page.locator('.sk-msg.sk-vis.sk-failed p').filter({ hasText: text }))
+    .toHaveCount(0)
   // Close before the agent replies, so the preview is eligible.
   await page.locator('.sk-launcher').click()
   await expect(page.locator('.sk-panel')).toHaveCSS('pointer-events', 'none')
