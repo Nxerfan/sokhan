@@ -129,6 +129,16 @@ export interface AttentionConfig {
   paidAnimation?: AttentionAnimation
 }
 
+/**
+ * Message Preview preference (Phase 2 / Feature 5). Additive — null =
+ * default OFF. A plain `{ enabled: boolean }` — no paid-preservation
+ * field is needed (the resolver enforces the entitlement, so a stored
+ * `true` is simply ignored on Free and restored on upgrade).
+ */
+export interface MessagePreviewConfig {
+  enabled: boolean
+}
+
 /** The versioned appearance configuration. */
 export interface AppearanceV2 {
   version: typeof APPEARANCE_V2_VERSION
@@ -140,6 +150,8 @@ export interface AppearanceV2 {
   launcher?: LauncherConfig
   /** Global attention animation (Phase 2 / Feature 4). Additive — null = legacy (unanimated). */
   attention?: AttentionConfig
+  /** Message Preview preference (Phase 2 / Feature 5). Additive — null = default OFF. */
+  messagePreview?: MessagePreviewConfig
 }
 
 /** The canonical default appearance (V2). */
@@ -184,7 +196,7 @@ export const DEFAULT_APPEARANCE_V2: AppearanceV2 = {
  */
 
 /** Allowed top-level keys in an AppearanceV2 object. */
-const ALLOWED_TOP_LEVEL_KEYS = new Set(['version', 'desktop', 'mobile', 'colors', 'launcher', 'attention'])
+const ALLOWED_TOP_LEVEL_KEYS = new Set(['version', 'desktop', 'mobile', 'colors', 'launcher', 'attention', 'messagePreview'])
 
 /**
  * Check if a value is a plain JSON-compatible object — prototype is exactly
@@ -354,6 +366,24 @@ export function parseAppearanceV2(value: unknown): AppearanceV2 | null {
     if (attention === undefined) return null // malformed → fail closed
   }
 
+  // Parse messagePreview if present (read from descriptor to bypass Proxy get).
+  const messagePreviewDesc = getOwnDataDescriptor(value, 'messagePreview')
+  let messagePreviewValue: unknown = undefined
+  if (messagePreviewDesc !== null) {
+    messagePreviewValue = messagePreviewDesc.value
+  } else {
+    try {
+      if (Object.prototype.hasOwnProperty.call(value, 'messagePreview')) return null
+    } catch {
+      return null
+    }
+  }
+  let messagePreview: MessagePreviewConfig | null | undefined = undefined
+  if (messagePreviewValue !== undefined) {
+    messagePreview = parseMessagePreviewConfig(messagePreviewValue)
+    if (messagePreview === undefined) return null // malformed → fail closed
+  }
+
   // Return a CANONICAL object (not the raw input reference) so callers
   // never hold an unvalidated object.
   const result: AppearanceV2 = {
@@ -369,6 +399,9 @@ export function parseAppearanceV2(value: unknown): AppearanceV2 | null {
   }
   if (attention !== null && attention !== undefined) {
     result.attention = attention
+  }
+  if (messagePreview !== null && messagePreview !== undefined) {
+    result.messagePreview = messagePreview
   }
   return result
 }
@@ -684,6 +717,36 @@ function parseAttentionConfig(value: unknown): AttentionConfig | null | undefine
   }
 
   return result
+}
+
+/** Allowed keys inside a message preview config object. */
+const ALLOWED_MESSAGE_PREVIEW_KEYS = new Set(['enabled'])
+
+/**
+ * Parse a message-preview config object. Returns:
+ *   - undefined → malformed (caller fails closed).
+ *   - null → absent (messagePreview is null/undefined).
+ *   - MessagePreviewConfig → valid (canonical object).
+ *
+ * Validates: `enabled` is a strict boolean; no unexpected keys; no arrays,
+ * inherited properties, or getter-based malformed objects.
+ */
+function parseMessagePreviewConfig(value: unknown): MessagePreviewConfig | null | undefined {
+  if (value === null || value === undefined) return null
+  if (!isPlainObject(value)) return undefined // malformed
+  const keys = safeOwnKeys(value)
+  if (keys === null) return undefined
+  for (const key of keys) {
+    if (typeof key !== 'string' || !ALLOWED_MESSAGE_PREVIEW_KEYS.has(key)) return undefined
+  }
+
+  // enabled — required, must be a strict boolean (reject 'true', 1, etc.).
+  const enabledDesc = getOwnDataDescriptor(value, 'enabled')
+  if (!enabledDesc) return undefined
+  const enabledValue = enabledDesc.value
+  if (typeof enabledValue !== 'boolean') return undefined
+
+  return { enabled: enabledValue }
 }
 
 /**

@@ -199,6 +199,7 @@ export function mergeLauncherPatch(
     // Preserve colors + attention + any other existing V2 fields.
     ...(base.colors ? { colors: base.colors } : {}),
     ...(base.attention ? { attention: base.attention } : {}),
+    ...(base.messagePreview ? { messagePreview: base.messagePreview } : {}),
   }
 }
 

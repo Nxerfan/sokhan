@@ -214,6 +214,19 @@
       "previewLabel": "Open chat",
       "preservedHint": "Saved paid motion will restore on upgrade."
     },
+    "messagePreview": {
+      "title": "Message Preview",
+      "hint": "Show a preview of new agent replies beside the launcher when the widget is closed.",
+      "enable": "Enable message preview",
+      "enableHint": "Visitors see a brief preview of new agent replies next to the launcher.",
+      "upgradeHint": "Message Preview is available on paid plans.",
+      "locked": "Message Preview is a paid-plan feature. Your saved preference is preserved and will restore on upgrade.",
+      "save": "Save preference",
+      "discard": "Discard changes",
+      "dirty": "Unsaved changes",
+      "saveSuccess": "Preference saved",
+      "saveFail": "Failed to save preference"
+    },
     "avatarUrl": "Agent avatar URL",
     "logoUrl": "Logo URL",
     "greetingFa": "Greeting (Persian)",

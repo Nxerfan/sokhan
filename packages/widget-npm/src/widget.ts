@@ -303,6 +303,13 @@ interface WidgetInternalState {
   effectivePositioning: EffectivePositioning | null
   /** V2 attention animation — for motion-aware positioning clamp. */
   effectiveAttention: string
+  /** V2 message preview — effective server-authoritative entitlement. */
+  messagePreviewEnabled: boolean
+  /** Preview bubble DOM element. */
+  previewEl: HTMLElement | null
+  previewVisible: boolean
+  /** Dedup set across socket + poll + history. */
+  seenMessageIds: string[]
   /** The current panel side (left/right/center) from the geometry function. */
   panelSide: 'left' | 'right' | 'center'
   /** Resize listener reference (for cleanup on destroy). */
@@ -378,6 +385,10 @@ export class SukhanWidget implements SukhanInstance {
     dir: 'rtl',
     effectivePositioning: null,
     effectiveAttention: 'none',
+    messagePreviewEnabled: false,
+    previewEl: null,
+    previewVisible: false,
+    seenMessageIds: [],
     panelSide: 'right',
     resizeHandler: null,
   }
@@ -473,6 +484,41 @@ export class SukhanWidget implements SukhanInstance {
     this.clientScriptUrl = buildSocketIoScriptUrl(this.api.apiUrl)
   }
 
+  // V2 Message Preview — pure eligibility + text policy (inlined mirror of
+  // src/lib/widget/message-preview-policy.ts). Returns safe plain text or null.
+  // Only new agent text messages from 'live' or 'poll' may produce a preview.
+  private __skGetMessagePreviewText(o: {
+    enabled: boolean
+    panelOpen: boolean
+    authorized: boolean
+    conversationId: string | null
+    source: 'history' | 'live' | 'poll'
+    message: Message | null | undefined
+    seenIds: string[]
+  }): string | null {
+    if (!o) return null
+    if (!o.enabled) return null
+    if (o.panelOpen) return null
+    if (!o.authorized) return null
+    if (!o.conversationId) return null
+    if (o.source !== 'live' && o.source !== 'poll') return null
+    const m = o.message
+    if (!m || typeof m !== 'object') return null
+    if (m.conversationId !== o.conversationId) return null
+    if (m.senderType !== 'agent') return null
+    if (m.contentType !== 'text') return null
+    const id = m.id
+    if (typeof id !== 'string' || id === '') return null
+    if (o.seenIds && o.seenIds.indexOf(id) !== -1) return null
+    const raw = m.content?.text
+    if (typeof raw !== 'string') return null
+    const text = raw.trim().replace(/\s+/g, ' ')
+    if (text === '') return null
+    const chars = Array.from(text)
+    if (chars.length > 120) return chars.slice(0, 120).join('') + '\u2026'
+    return text
+  }
+
   /** Mount the launcher + panel onto the page. Does NOT bootstrap identity. */
   private mount(config: WidgetConfig): void {
     this.state.config = config
@@ -501,6 +547,11 @@ export class SukhanWidget implements SukhanInstance {
     const effectiveAttention = config.attention?.animation || 'none'
     root.setAttribute('data-sk-attention-animation', effectiveAttention)
     this.state.effectiveAttention = effectiveAttention
+    // V2 message preview: read the effective server-authoritative entitlement.
+    // Free / unknown plans expose { enabled: false } — the preview never
+    // appears. The preview DOM is always created (so the class contract is
+    // stable) but remains hidden when disabled.
+    this.state.messagePreviewEnabled = !!(config.messagePreview?.enabled)
     const attentionClass = effectiveAttention !== 'none' ? ' sk-attention-' + effectiveAttention : ''
     const launcher = el('button', 'sk-launcher ' + shapeClass(effectiveShape) + attentionClass) as HTMLButtonElement
     launcher.setAttribute('aria-label', this.state.locale === 'fa' ? 'گفت‌وگو' : 'Open chat')
@@ -562,6 +613,77 @@ export class SukhanWidget implements SukhanInstance {
     // Position application is deferred to after the panel + launcher are
     // appended to the root (the panel side cannot be set before the panel
     // DOM element exists). See applyPosition() at the end of mount().
+
+    // Build the preview bubble (.sk-message-preview). Positioned adjacent to
+    // the launcher by positionPreview(). Hidden by default.
+    const previewEl = el('div', 'sk-message-preview') as HTMLElement
+    css(previewEl, {
+      position: 'absolute',
+      bottom: '64px',
+      left: '0',
+      maxWidth: '280px',
+      background: '#fff',
+      borderRadius: '12px',
+      boxShadow: '0 8px 24px rgba(0,0,0,0.18)',
+      padding: '10px 12px',
+      display: 'none',
+      flexDirection: 'column',
+      gap: '4px',
+      fontFamily: 'Vazirmatn,system-ui,sans-serif',
+      zIndex: '2147483001',
+    })
+    const previewText = el('div', 'sk-message-preview-text')
+    css(previewText, {
+      fontSize: '13px',
+      lineHeight: '1.4',
+      color: '#0E1116',
+      cursor: 'pointer',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap',
+      maxWidth: '100%',
+    })
+    previewText.setAttribute('role', 'button')
+    previewText.setAttribute('tabindex', '0')
+    const previewDismiss = el('button', 'sk-message-preview-dismiss') as HTMLButtonElement
+    css(previewDismiss, {
+      position: 'absolute',
+      top: '2px',
+      insetInlineEnd: '2px',
+      width: '20px',
+      height: '20px',
+      border: 'none',
+      background: 'transparent',
+      color: '#888',
+      cursor: 'pointer',
+      fontSize: '16px',
+      lineHeight: '1',
+      borderRadius: '4px',
+      padding: '0',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+    })
+    previewDismiss.setAttribute('aria-label', this.state.locale === 'fa' ? 'بستن' : 'Dismiss')
+    previewDismiss.textContent = '\u00d7'
+    previewText.onclick = () => {
+      this.hidePreview()
+      this.toggle()
+    }
+    previewText.onkeydown = (e: KeyboardEvent) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault()
+        this.hidePreview()
+        this.toggle()
+      }
+    }
+    previewDismiss.onclick = (e: MouseEvent) => {
+      e.stopPropagation()
+      this.hidePreview()
+    }
+    previewEl.appendChild(previewText)
+    previewEl.appendChild(previewDismiss)
+    this.state.previewEl = previewEl
 
     const header = el('div', 'sk-header')
     css(header, {
@@ -755,6 +877,7 @@ export class SukhanWidget implements SukhanInstance {
     panel.appendChild(inputBar)
     root.appendChild(panel)
     root.appendChild(launcher)
+    if (this.state.previewEl) root.appendChild(this.state.previewEl)
     this.container.appendChild(root)
 
     // Apply the computed position NOW that the panel exists (the panel side
@@ -1553,6 +1676,7 @@ export class SukhanWidget implements SukhanInstance {
   }
   open(): void {
     this.state.open = true
+    this.hidePreview() // opening the conversation hides the preview
     css(this.panel, {
       opacity: '1',
       pointerEvents: 'auto',
@@ -1570,6 +1694,77 @@ export class SukhanWidget implements SukhanInstance {
     this.applyPanelTransform()
   }
 
+  // ---- V2 Message Preview helpers ----
+  // showPreview: render the safe plain text via textContent (never innerHTML)
+  // and reveal the bubble adjacent to the launcher.
+  private showPreview(text: string): void {
+    if (!this.state.previewEl) return
+    const pt = this.state.previewEl.querySelector('.sk-message-preview-text')
+    if (pt) pt.textContent = text // XSS-safe: textContent, never innerHTML
+    this.state.previewEl.style.display = 'flex'
+    this.state.previewVisible = true
+    this.positionPreview()
+  }
+
+  // hidePreview: hide the bubble without opening the conversation.
+  private hidePreview(): void {
+    if (!this.state.previewEl) return
+    this.state.previewEl.style.display = 'none'
+    this.state.previewVisible = false
+  }
+
+  // positionPreview: keep the bubble within the viewport (320px mobile safe).
+  // Aligns with the launcher's left edge, clamped to [margin, vw - margin - width].
+  private positionPreview(): void {
+    if (!this.state.previewEl || !this.state.previewVisible) return
+    const vw = window.innerWidth
+    const margin = 8
+    const maxW = Math.min(280, vw - margin * 2)
+    this.state.previewEl.style.maxWidth = maxW + 'px'
+    // The root's left is the launcher's left (set by applyPosition). The
+    // preview aligns with the root's left edge, clamped to stay in bounds.
+    const rootLeft = this.rootEl ? parseFloat(this.rootEl.style.left) || 0 : 0
+    const previewW = this.state.previewEl.offsetWidth || maxW
+    let left = rootLeft
+    if (left + previewW > vw - margin) left = vw - margin - previewW
+    if (left < margin) left = margin
+    this.state.previewEl.style.left = left + 'px'
+  }
+
+  // processMessageForPreview: check a newly ingested message against the pure
+  // eligibility policy. Deduped by message id across socket + poll + history.
+  private processMessageForPreview(msg: Message | null | undefined, source: 'history' | 'live' | 'poll'): void {
+    if (!msg || typeof msg !== 'object') return
+    const id = msg.id
+    if (typeof id !== 'string' || id === '') return
+    // Dedup: skip if already processed (prevents socket+poll double-delivery
+    // and history replay from producing a stale preview).
+    if (this.state.seenMessageIds.indexOf(id) !== -1) return
+    // Check the pure policy.
+    const text = this.__skGetMessagePreviewText({
+      enabled: this.state.messagePreviewEnabled,
+      panelOpen: this.state.open,
+      authorized: !!this.state.conversationId,
+      conversationId: this.state.conversationId,
+      source,
+      message: msg,
+      seenIds: this.state.seenMessageIds,
+    })
+    // Mark as seen regardless of whether it produced a preview (so history
+    // and duplicates never trigger a future preview).
+    this.state.seenMessageIds.push(id)
+    if (text !== null && text !== undefined) {
+      this.showPreview(text)
+    }
+  }
+
+  // clearMessagePreviewState: reset on identity switch, conversation change,
+  // authorization recovery, logout, or teardown.
+  private clearMessagePreviewState(): void {
+    this.hidePreview()
+    this.state.seenMessageIds = []
+  }
+
   private loadMessages(): void {
     if (this.destroyed) return
     if (!this.state.conversationId || !this.state.token) return
@@ -1578,6 +1773,12 @@ export class SukhanWidget implements SukhanInstance {
       // Central merge: dedup by id, stable chronological order.
       this.state.messages = mergeMessages(this.state.messages, messages)
       this.renderMessages()
+      // History messages are tagged 'history' — the policy never previews
+      // them, but they're added to seenIds so a re-delivery (socket/poll)
+      // never replays a stale preview.
+      for (let hi = 0; hi < messages.length; hi++) {
+        this.processMessageForPreview(messages[hi], 'history')
+      }
     })
   }
 
@@ -1655,7 +1856,10 @@ export class SukhanWidget implements SukhanInstance {
     })
     this.socket.on('message:new', (msg) => {
       if (this.destroyed || gen !== this.generation) return
-      this.ingestMessage(msg as Message)
+      const normalized = msg as Message
+      this.ingestMessage(normalized)
+      // V2 message preview: check the new realtime message (source='live').
+      this.processMessageForPreview(normalized, 'live')
     })
     this.socket.on('conversation:updated', (data) => {
       if (this.destroyed || gen !== this.generation) return
@@ -1843,6 +2047,7 @@ export class SukhanWidget implements SukhanInstance {
           this.ingestMessage(data.message)
         }
         if (data.conversationId && data.conversationId !== this.state.conversationId) {
+          this.clearMessagePreviewState()
           this.state.conversationId = data.conversationId
           if (this.socket && this.socket.isConnected()) {
             this.socket.send('conversation:join', this.state.conversationId)
@@ -1920,6 +2125,11 @@ export class SukhanWidget implements SukhanInstance {
         if (this.destroyed) return
         this.state.messages = mergeMessages(this.state.messages, messages)
         this.renderMessages()
+        // V2 message preview: check polled messages (source='poll').
+        // The policy deduplicates against seenIds (history + prior deliveries).
+        for (let pi = 0; pi < messages.length; pi++) {
+          this.processMessageForPreview(messages[pi], 'poll')
+        }
         if (!this.state.open && this.pulseDot) {
           this.pulseDot.style.display = 'block'
         }
@@ -2249,6 +2459,8 @@ export class SukhanWidget implements SukhanInstance {
       this.panel.style.bottom = panelPos.bottom + 'px'
       this.panel.style.maxHeight = panelPos.maxHeight + 'px'
     }
+    // Reposition the preview bubble if it's visible (stays in viewport on resize).
+    this.positionPreview()
   }
 
   /** Apply the panel horizontal position (clamped to viewport). */
@@ -2365,7 +2577,11 @@ export class SukhanWidget implements SukhanInstance {
       ';}50%{box-shadow:0 8px 24px rgba(0,0,0,0.18),0 0 14px 2px ' +
       hexA(accent, 0.45) +
       ';}}' +
-      '@media (prefers-reduced-motion:reduce){.sk-launcher.sk-attention-pulse,.sk-launcher.sk-attention-bounce,.sk-launcher.sk-attention-shake,.sk-launcher.sk-attention-glow{animation:none !important;}}'
+      '@media (prefers-reduced-motion:reduce){.sk-launcher.sk-attention-pulse,.sk-launcher.sk-attention-bounce,.sk-launcher.sk-attention-shake,.sk-launcher.sk-attention-glow{animation:none !important;}}' +
+      // V2 message preview — bubble adjacent to the launcher.
+      '.sk-message-preview{box-sizing:border-box;}' +
+      '.sk-message-preview-text{box-sizing:border-box;padding-right:20px;}' +
+      '.sk-message-preview-dismiss:hover{color:#0E1116;background:rgba(0,0,0,0.06);}'
     document.head.appendChild(style)
   }
 
@@ -2386,6 +2602,8 @@ export class SukhanWidget implements SukhanInstance {
   destroy(): void {
     if (this.destroyed) return // idempotent: calling twice is a no-op
     this.destroyed = true
+    // Clear V2 message preview state (hide bubble + reset dedup set).
+    this.clearMessagePreviewState()
     this.clearIdentityState()
     // 0. Remove resize/orientation listener
     this.teardownResizeListener()

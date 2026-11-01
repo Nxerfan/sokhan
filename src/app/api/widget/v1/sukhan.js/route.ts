@@ -129,6 +129,11 @@ ${POSITIONING_FN_SOURCE}
     rootEl: null,
     resizeHandler: null,
     colorTokens: null,
+    // V2 message preview state.
+    messagePreviewEnabled: false, // effective server-authoritative entitlement
+    previewEl: null,       // .sk-message-preview DOM element
+    previewVisible: false,
+    seenMessageIds: [],    // dedup across socket + poll + history
   };
 
   // ============================================================
@@ -186,6 +191,8 @@ ${POSITIONING_FN_SOURCE}
       panel.style.bottom = pv.bottom + 'px';
       panel.style.maxHeight = pv.maxHeight + 'px';
     }
+    // Reposition the preview bubble if it's visible (stays in viewport on resize).
+    positionPreview();
   }
 
   function applyPanelSide(side) {
@@ -306,6 +313,33 @@ ${POSITIONING_FN_SOURCE}
     return 'sk-tab';
   }
 
+  // V2 Message Preview — pure eligibility + text policy (inlined mirror of
+  // src/lib/widget/message-preview-policy.ts). Returns safe plain text or null.
+  // Only new agent text messages from 'live' or 'poll' may produce a preview.
+  function __skGetMessagePreviewText(o){
+    if (!o) return null;
+    if (!o.enabled) return null;
+    if (o.panelOpen) return null;
+    if (!o.authorized) return null;
+    if (!o.conversationId) return null;
+    if (o.source !== 'live' && o.source !== 'poll') return null;
+    var m = o.message;
+    if (!m || typeof m !== 'object') return null;
+    if (m.conversationId !== o.conversationId) return null;
+    if (m.senderType !== 'agent') return null;
+    if (m.contentType !== 'text') return null;
+    var id = m.id;
+    if (typeof id !== 'string' || id === '') return null;
+    if (o.seenIds && o.seenIds.indexOf(id) !== -1) return null;
+    var raw = (m.content && m.content.text);
+    if (typeof raw !== 'string') return null;
+    var text = raw.trim().replace(/\\s+/g, ' ');
+    if (text === '') return null;
+    var chars = Array.from(text);
+    if (chars.length > 120) return chars.slice(0, 120).join('') + '\u2026';
+    return text;
+  }
+
   // ---- DOM refs (created in mount) ----
   var bodyEl, inputEl, sendBtn, typingEl, launcher, panel, pulseDot;
 
@@ -366,6 +400,47 @@ ${POSITIONING_FN_SOURCE}
       transition: 'opacity .18s ease, transform .18s ease'
     });
     // Panel side is applied by applyPosition() via applyPanelSide().
+
+    // V2 message preview: read the effective server-authoritative entitlement.
+    // Free / unknown plans expose { enabled: false } — the preview never
+    // appears. The preview DOM is always created (so the class contract is
+    // stable) but remains hidden when disabled.
+    state.messagePreviewEnabled = !!(config.messagePreview && config.messagePreview.enabled);
+
+    // Build the preview bubble (.sk-message-preview). Positioned adjacent to
+    // the launcher by positionPreview(). Hidden by default.
+    var previewEl = el('div', 'sk-message-preview');
+    css(previewEl, {
+      position: 'absolute', bottom: '64px', left: '0',
+      maxWidth: '280px', background: '#fff', borderRadius: '12px',
+      boxShadow: '0 8px 24px rgba(0,0,0,0.18)', padding: '10px 12px',
+      display: 'none', flexDirection: 'column', gap: '4px',
+      fontFamily: 'Vazirmatn,system-ui,sans-serif', zIndex: '2147483001',
+    });
+    var previewText = el('div', 'sk-message-preview-text');
+    css(previewText, {
+      fontSize: '13px', lineHeight: '1.4', color: '#0E1116', cursor: 'pointer',
+      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+      maxWidth: '100%',
+    });
+    previewText.setAttribute('role', 'button');
+    previewText.setAttribute('tabindex', '0');
+    var previewDismiss = el('button', 'sk-message-preview-dismiss');
+    css(previewDismiss, {
+      position: 'absolute', top: '2px', insetInlineEnd: '2px',
+      width: '20px', height: '20px', border: 'none', background: 'transparent',
+      color: '#888', cursor: 'pointer', fontSize: '16px', lineHeight: '1',
+      borderRadius: '4px', padding: '0', display: 'flex', alignItems: 'center',
+      justifyContent: 'center',
+    });
+    previewDismiss.setAttribute('aria-label', state.locale === 'fa' ? 'بستن' : 'Dismiss');
+    previewDismiss.textContent = '\u00d7';
+    previewText.onclick = function(){ hidePreview(); toggle(); };
+    previewText.onkeydown = function(e){ if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); hidePreview(); toggle(); } };
+    previewDismiss.onclick = function(e){ e.stopPropagation(); hidePreview(); };
+    previewEl.appendChild(previewText);
+    previewEl.appendChild(previewDismiss);
+    state.previewEl = previewEl;
 
     // Safe image URL check (CUST-B): only absolute http(s) URLs are ever
     // assigned to img.src. The backend validates these too — this is
@@ -479,7 +554,7 @@ ${POSITIONING_FN_SOURCE}
     }
 
     panel.appendChild(inputBar);
-    root.appendChild(panel); root.appendChild(launcher);
+    root.appendChild(panel); root.appendChild(launcher); root.appendChild(previewEl);
     document.body.appendChild(root);
 
     // Apply the computed position NOW that the panel exists (the panel side
@@ -500,12 +575,84 @@ ${POSITIONING_FN_SOURCE}
     if (state.open) {
       css(panel, { opacity:'1', pointerEvents:'auto' });
       applyPanelTransform();
+      hidePreview(); // opening the conversation hides the preview
       pulseDot.style.display = 'none';
       setTimeout(function(){ inputEl && inputEl.focus(); }, 200);
     } else {
       css(panel, { opacity:'0', pointerEvents:'none' });
       applyPanelTransform();
     }
+  }
+
+  // ---- V2 Message Preview helpers ----
+  // showPreview: render the safe plain text via textContent (never innerHTML)
+  // and reveal the bubble adjacent to the launcher.
+  function showPreview(text){
+    if (!state.previewEl) return;
+    var pt = state.previewEl.querySelector('.sk-message-preview-text');
+    if (pt) pt.textContent = text; // XSS-safe: textContent, never innerHTML
+    state.previewEl.style.display = 'flex';
+    state.previewVisible = true;
+    positionPreview();
+  }
+
+  // hidePreview: hide the bubble without opening the conversation.
+  function hidePreview(){
+    if (!state.previewEl) return;
+    state.previewEl.style.display = 'none';
+    state.previewVisible = false;
+  }
+
+  // positionPreview: keep the bubble within the viewport (320px mobile safe).
+  // Aligns with the launcher's left edge, clamped to [margin, vw - margin - width].
+  function positionPreview(){
+    if (!state.previewEl || !state.previewVisible) return;
+    var vw = window.innerWidth;
+    var margin = 8;
+    var maxW = Math.min(280, vw - margin * 2);
+    state.previewEl.style.maxWidth = maxW + 'px';
+    // The root's left is the launcher's left (set by applyPosition). The
+    // preview aligns with the root's left edge, clamped to stay in bounds.
+    var rootLeft = state.rootEl ? parseFloat(state.rootEl.style.left) || 0 : 0;
+    var previewW = state.previewEl.offsetWidth || maxW;
+    var left = rootLeft;
+    if (left + previewW > vw - margin) left = vw - margin - previewW;
+    if (left < margin) left = margin;
+    state.previewEl.style.left = left + 'px';
+  }
+
+  // processMessageForPreview: check a newly ingested message against the pure
+  // eligibility policy. Deduped by message id across socket + poll + history.
+  function processMessageForPreview(msg, source){
+    if (!msg || typeof msg !== 'object') return;
+    var id = msg.id;
+    if (typeof id !== 'string' || id === '') return;
+    // Dedup: skip if already processed (prevents socket+poll double-delivery
+    // and history replay from producing a stale preview).
+    if (state.seenMessageIds.indexOf(id) !== -1) return;
+    // Check the pure policy.
+    var text = __skGetMessagePreviewText({
+      enabled: state.messagePreviewEnabled,
+      panelOpen: state.open,
+      authorized: !!state.conversationId,
+      conversationId: state.conversationId,
+      source: source,
+      message: msg,
+      seenIds: state.seenMessageIds,
+    });
+    // Mark as seen regardless of whether it produced a preview (so history
+    // and duplicates never trigger a future preview).
+    state.seenMessageIds.push(id);
+    if (text !== null && text !== undefined) {
+      showPreview(text);
+    }
+  }
+
+  // clearMessagePreviewState: reset on identity switch, conversation change,
+  // authorization recovery, logout, or teardown.
+  function clearMessagePreviewState(){
+    hidePreview();
+    state.seenMessageIds = [];
   }
 
   function identifyVisitor(){
@@ -536,6 +683,12 @@ ${POSITIONING_FN_SOURCE}
       if (data.messages) {
         state.messages = data.messages;
         renderMessages();
+        // History messages are tagged 'history' — the policy never previews
+        // them, but they're added to seenIds so a re-delivery (socket/poll)
+        // never replays a stale preview.
+        for (var hi = 0; hi < data.messages.length; hi++) {
+          processMessageForPreview(data.messages[hi], 'history');
+        }
       }
     });
   }
@@ -615,6 +768,8 @@ ${POSITIONING_FN_SOURCE}
       state.socket.on('message:new', function(msg){
         state.messages.push(msg);
         renderMessages();
+        // V2 message preview: check the new realtime message (source='live').
+        processMessageForPreview(msg, 'live');
         if (!state.open) pulseDot.style.display = 'block';
         if (msg.senderType === 'system' && msg.content && msg.content.text &&
             (msg.content.text.indexOf('closed') >= 0 || msg.content.text.indexOf('بسته') >= 0 ||
@@ -665,6 +820,7 @@ ${POSITIONING_FN_SOURCE}
         renderMessages();
       }
       if (data.conversationId && data.conversationId !== state.conversationId) {
+        clearMessagePreviewState();
         state.conversationId = data.conversationId;
         if (state.socket && state.connected) {
           state.socket.emit('conversation:join', state.conversationId);
@@ -695,6 +851,11 @@ ${POSITIONING_FN_SOURCE}
             if (!exists) state.messages.push(newMsgs[i]);
           }
           renderMessages();
+          // V2 message preview: check polled messages (source='poll').
+          // The policy deduplicates against seenIds (history + prior deliveries).
+          for (var pi = 0; pi < data.messages.length; pi++) {
+            processMessageForPreview(data.messages[pi], 'poll');
+          }
           if (!state.open) pulseDot.style.display = 'block';
         }
       })
@@ -858,7 +1019,11 @@ ${POSITIONING_FN_SOURCE}
       + '@keyframes sk-attention-bounce{0%,100%{transform:translateY(0);}50%{transform:translateY(-6px);}}'
       + '@keyframes sk-attention-shake{0%,100%{transform:translateX(0);}25%{transform:translateX(-3px);}75%{transform:translateX(3px);}}'
       + '@keyframes sk-attention-glow{0%,100%{box-shadow:0 8px 24px rgba(0,0,0,0.18),0 0 0 0 ' + hexA(accent, 0) + ';}50%{box-shadow:0 8px 24px rgba(0,0,0,0.18),0 0 14px 2px ' + hexA(accent, 0.45) + ';}}'
-      + '@media (prefers-reduced-motion:reduce){.sk-launcher.sk-attention-pulse,.sk-launcher.sk-attention-bounce,.sk-launcher.sk-attention-shake,.sk-launcher.sk-attention-glow{animation:none !important;}}';
+      + '@media (prefers-reduced-motion:reduce){.sk-launcher.sk-attention-pulse,.sk-launcher.sk-attention-bounce,.sk-launcher.sk-attention-shake,.sk-launcher.sk-attention-glow{animation:none !important;}}'
+      // V2 message preview — bubble adjacent to the launcher.
+      + '.sk-message-preview{box-sizing:border-box;}'
+      + '.sk-message-preview-text{box-sizing:border-box;padding-right:20px;}'
+      + '.sk-message-preview-dismiss:hover{color:#0E1116;background:rgba(0,0,0,0.06);}';
     document.head.appendChild(style);
   }
 
