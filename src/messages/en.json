@@ -198,6 +198,22 @@
       "previewLabel": "Open chat",
       "legacyManagedHint": "Shape is managed by the V2 Launcher panel."
     },
+    "attention": {
+      "title": "Attention Animation",
+      "hint": "Choose a subtle motion for your chat launcher. Matches what visitors see on your site.",
+      "animation": "Animation",
+      "upgradeHint": "Bounce, shake, and glow are available on paid plans.",
+      "locked": "This animation is a paid-plan feature. Your saved selection is preserved and will restore on upgrade.",
+      "save": "Save animation",
+      "discard": "Discard changes",
+      "dirty": "Unsaved changes",
+      "saveSuccess": "Animation saved",
+      "saveFail": "Failed to save animation",
+      "invalidAnimation": "Animation must be none, pulse, bounce, shake, or glow.",
+      "preview": "Preview",
+      "previewLabel": "Open chat",
+      "preservedHint": "Saved paid motion will restore on upgrade."
+    },
     "avatarUrl": "Agent avatar URL",
     "logoUrl": "Logo URL",
     "greetingFa": "Greeting (Persian)",
@@ -211,6 +227,13 @@
       "tab": "Tab",
       "rounded": "Rounded square",
       "pill": "Pill"
+    },
+    "animations": {
+      "none": "None",
+      "pulse": "Pulse",
+      "bounce": "Bounce",
+      "shake": "Shake",
+      "glow": "Glow"
     },
     "inviteHint": "Create a one-time invite link and share it with your teammate.",
     "inviteLinkOnceHint": "This invite link is shown only once. Copy and share it now — you won't see it again.",

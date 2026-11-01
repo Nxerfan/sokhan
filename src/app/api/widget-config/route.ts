@@ -40,6 +40,17 @@ import {
   hasLauncherField,
   type LauncherPatchData,
 } from '@/lib/widget/launcher-patch'
+import {
+  resolveEffectiveAttention,
+  getStoredAttention,
+  type StoredAttentionInput,
+} from '@/lib/widget/effective-attention'
+import {
+  validateAttentionPatch,
+  mergeAttentionPatch,
+  hasAttentionField,
+  type AttentionPatchData,
+} from '@/lib/widget/attention-patch'
 
 /**
  * GET /api/widget-config — dashboard widget configuration.
@@ -97,6 +108,13 @@ export async function GET() {
     const effectiveLauncher = resolveEffectiveLauncher(launcherInput, entitlements)
     const storedLauncherShape = getStoredLauncherShape(launcherInput)
 
+    // V2 attention: resolve effective + stored.
+    const attentionInput: StoredAttentionInput = {
+      appearanceV2: stored?.appearanceV2,
+    }
+    const effectiveAttention = resolveEffectiveAttention(attentionInput, entitlements)
+    const storedAttention = getStoredAttention(attentionInput)
+
     return {
       stored,
       isLocked,
@@ -150,6 +168,19 @@ export async function GET() {
         effective: effectiveLauncher,
         stored: storedLauncherShape,
       },
+      // V2 attention: resolve effective + stored.
+      // The dashboard `effective` must match what the PUBLIC widget actually
+      // renders. The public config always exposes the effective attention
+      // (from resolveEffectiveAttention), so the dashboard must too. The raw
+      // stored paid preference is exposed ONLY via `stored` (for the dashboard
+      // to show "saved but locked / restore on upgrade"), NEVER as `effective`.
+      attention: {
+        entitlements: {
+          attentionAnimations: entitlements?.attentionAnimations ?? 'basic',
+        },
+        effective: effectiveAttention,
+        stored: storedAttention,
+      },
     } as const
   })
   if (!result) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
@@ -160,6 +191,7 @@ export async function GET() {
     positioning: result.result.positioning,
     colors: result.result.colors,
     launcher: result.result.launcher,
+    attention: result.result.attention,
   })
 }
 
@@ -229,6 +261,17 @@ const LAUNCHER_ERROR_STATUS: Record<string, number> = {
   launcher_no_fields: 400,
 }
 
+/** Attention-specific error codes → HTTP status mapping. */
+const ATTENTION_ERROR_STATUS: Record<string, number> = {
+  attention_not_authorized: 403,        // unknown plan / no attention entitlement
+  attention_not_object: 400,
+  attention_animation_missing: 400,
+  attention_animation_invalid: 400,
+  attention_animation_not_allowed: 403, // Free attempting advanced motion → 403
+  attention_unexpected_key: 400,
+  attention_no_fields: 400,
+}
+
 /**
  * PATCH /api/widget-config — update widget customization.
  *
@@ -279,11 +322,12 @@ export async function PATCH(req: NextRequest) {
     const hasPositioning = hasPositioningField(body)
     const hasColors = hasColorField(body)
     const hasLauncher = hasLauncherField(body)
+    const hasAttention = hasAttentionField(body)
     const hasOtherFields = hasOtherCustomizationFields(body)
 
     // Reject unrecognized top-level fields when the request contains
-    // positioning, colors, or launcher (isolated contracts).
-    if ((hasPositioning || hasColors || hasLauncher) && hasUnrecognizedFields(body)) {
+    // positioning, colors, launcher, or attention (isolated contracts).
+    if ((hasPositioning || hasColors || hasLauncher || hasAttention) && hasUnrecognizedFields(body)) {
       return { badRequest: true as const, code: 'unrecognized_field' }
     }
 
@@ -321,6 +365,16 @@ export async function PATCH(req: NextRequest) {
         return { launcherError: true as const, code: launcherResult.code }
       }
       launcherPatch = launcherResult.data
+    }
+
+    // ---- Validate attention (if present) ----
+    let attentionPatch: AttentionPatchData | null = null
+    if (hasAttention) {
+      const attentionResult = validateAttentionPatch({ attention: body.attention }, entitlements)
+      if (!attentionResult.ok) {
+        return { attentionError: true as const, code: attentionResult.code }
+      }
+      attentionPatch = attentionResult.data
     }
 
     // ---- Validate + collect other customization fields (paid only) ----
@@ -436,6 +490,22 @@ export async function PATCH(req: NextRequest) {
       data.appearanceV2 = mergedLauncher as unknown as string // Prisma Json field
     }
 
+    // ---- Apply attention patch (if validated) ----
+    // Reads the already-merged appearanceV2 (from positioning/color/launcher
+    // patches, if any) so all neighboring V2 capabilities are preserved.
+    if (attentionPatch) {
+      let baseAppearanceV2: unknown = data.appearanceV2 ?? undefined
+      if (baseAppearanceV2 === undefined) {
+        const existing = await db.widgetConfig.findUnique({
+          where: { tenantId: tid },
+          select: { appearanceV2: true },
+        })
+        baseAppearanceV2 = existing?.appearanceV2
+      }
+      const mergedAttention = mergeAttentionPatch(baseAppearanceV2, attentionPatch, entitlements)
+      data.appearanceV2 = mergedAttention as unknown as string // Prisma Json field
+    }
+
     if (Object.keys(data).length === 0) {
       return { badRequest: true as const, code: 'no_fields' }
     }
@@ -466,6 +536,10 @@ export async function PATCH(req: NextRequest) {
   }
   if ('launcherError' in r) {
     const status = LAUNCHER_ERROR_STATUS[r.code as string] ?? 400
+    return NextResponse.json({ error: r.code }, { status })
+  }
+  if ('attentionError' in r) {
+    const status = ATTENTION_ERROR_STATUS[r.code as string] ?? 400
     return NextResponse.json({ error: r.code }, { status })
   }
   if ('badRequest' in r) return NextResponse.json({ error: r.code }, { status: 400 })

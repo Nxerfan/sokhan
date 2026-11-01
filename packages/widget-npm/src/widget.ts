@@ -493,7 +493,12 @@ export class SukhanWidget implements SukhanInstance {
 
     // V2 launcher: use config.launcher.shape when present, fall back to V1.
     const effectiveShape = config.launcher?.shape || config.launcherShape || 'tab'
-    const launcher = el('button', 'sk-launcher ' + shapeClass(effectiveShape)) as HTMLButtonElement
+    // V2 attention: the public config exposes only the effective authorized
+    // animation. 'none' preserves the legacy unanimated launcher (no class).
+    const effectiveAttention = config.attention?.animation || 'none'
+    root.setAttribute('data-sk-attention-animation', effectiveAttention)
+    const attentionClass = effectiveAttention !== 'none' ? ' sk-attention-' + effectiveAttention : ''
+    const launcher = el('button', 'sk-launcher ' + shapeClass(effectiveShape) + attentionClass) as HTMLButtonElement
     launcher.setAttribute('aria-label', this.state.locale === 'fa' ? 'گفت‌وگو' : 'Open chat')
     css(launcher, {
       display: 'flex',
@@ -2340,7 +2345,21 @@ export class SukhanWidget implements SukhanInstance {
       '.sk-dot{display:inline-block;width:5px;height:5px;border-radius:50%;background:#888;animation:skbounce 1.4s infinite ease-in-out both;}' +
       '.sk-dot:nth-child(1){animation-delay:-0.32s;} .sk-dot:nth-child(2){animation-delay:-0.16s;}' +
       '@keyframes skbounce{0%,80%,100%{transform:scale(0);}40%{transform:scale(1);}}' +
-      '.sk-body::-webkit-scrollbar{width:4px;} .sk-body::-webkit-scrollbar-thumb{background:rgba(0,0,0,.15);border-radius:2px;}'
+      '.sk-body::-webkit-scrollbar{width:4px;} .sk-body::-webkit-scrollbar-thumb{background:rgba(0,0,0,.15);border-radius:2px;}' +
+      // V2 attention animations — bounded, restrained, GPU-friendly motion.
+      '.sk-launcher.sk-attention-pulse{animation:sk-attention-pulse 2s ease-in-out infinite;}' +
+      '.sk-launcher.sk-attention-bounce{animation:sk-attention-bounce 1.8s ease-in-out infinite;}' +
+      '.sk-launcher.sk-attention-shake{animation:sk-attention-shake 1.2s ease-in-out infinite;}' +
+      '.sk-launcher.sk-attention-glow{animation:sk-attention-glow 2.4s ease-in-out infinite;}' +
+      '@keyframes sk-attention-pulse{0%,100%{transform:scale(1);}50%{transform:scale(1.06);}}' +
+      '@keyframes sk-attention-bounce{0%,100%{transform:translateY(0);}50%{transform:translateY(-6px);}}' +
+      '@keyframes sk-attention-shake{0%,100%{transform:translateX(0);}25%{transform:translateX(-3px);}75%{transform:translateX(3px);}}' +
+      '@keyframes sk-attention-glow{0%,100%{box-shadow:0 8px 24px rgba(0,0,0,0.18),0 0 0 0 ' +
+      hexA(accent, 0) +
+      ';}50%{box-shadow:0 8px 24px rgba(0,0,0,0.18),0 0 14px 2px ' +
+      hexA(accent, 0.45) +
+      ';}}' +
+      '@media (prefers-reduced-motion:reduce){.sk-launcher.sk-attention-pulse,.sk-launcher.sk-attention-bounce,.sk-launcher.sk-attention-shake,.sk-launcher.sk-attention-glow{animation:none !important;}}'
     document.head.appendChild(style)
   }
 

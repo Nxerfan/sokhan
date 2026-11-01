@@ -81,6 +81,15 @@ export interface WidgetConfig {
     shape: 'tab' | 'rounded' | 'pill'
   }
   /**
+   * V2 attention animation (Phase 2 / Feature 4). Additive — the public
+   * config exposes only the effective authorized animation (`{ animation }`),
+   * never the stored `paidAnimation`. 'none' preserves the legacy unanimated
+   * launcher. Older backends omit the field; the widget defaults to 'none'.
+   */
+  attention?: {
+    animation: 'none' | 'pulse' | 'bounce' | 'shake' | 'glow'
+  }
+  /**
    * Backend-supplied realtime endpoint config (additive field). The widget
    * uses this as the PRIMARY runtime source. Older backends omit the
    * field; the widget falls back to the documented hosted default.
