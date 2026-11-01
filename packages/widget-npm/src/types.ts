@@ -49,6 +49,29 @@ export interface WidgetConfig {
     mobile: import('./positioning').EffectivePositioning
   }
   /**
+   * V2 colors (Phase 2 / Feature 2). The backend resolves the EFFECTIVE
+   * color tokens from stored config + plan entitlements. Custom colors
+   * are included only for plans entitled to customColors. Older backends
+   * omit this field → the widget falls back to the V1 `accentColor`.
+   */
+  colors?: {
+    mode: string
+    presetId?: string
+    tokens: {
+      accent: string
+      launcherBg: string
+      launcherFg: string
+      headerBg: string
+      headerText: string
+      panelBg: string
+      panelText: string
+      visitorBubbleBg: string
+      visitorBubbleText: string
+      agentBubbleBg: string
+      agentBubbleText: string
+    }
+  }
+  /**
    * Backend-supplied realtime endpoint config (additive field). The widget
    * uses this as the PRIMARY runtime source. Older backends omit the
    * field; the widget falls back to the documented hosted default.

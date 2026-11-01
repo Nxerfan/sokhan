@@ -32,7 +32,12 @@ jobs:
           DIRECT_URL: postgresql://user:password@localhost:5432/dummy
       - name: Vercel build script syntax check
         run: bash -n vercel-build.sh
-      - name: Unit tests
+      # PR #17 runs only color unit tests. Keep complete regression on main and other PRs.
+      - name: Unit tests - Widget V2 Colors (Free + Pro)
+        if: github.event_name == 'pull_request' && github.head_ref == 'feat/widget-v2-colors'
+        run: bun test tests/unit/widget-v2-colors.test.ts
+      - name: Unit tests - full regression (main and other PRs)
+        if: github.event_name != 'pull_request' || github.head_ref != 'feat/widget-v2-colors'
         run: bun test tests/unit/
       - name: Production build
         run: bunx next build
@@ -57,12 +62,33 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
       - name: Setup Node.js
+        if: github.event_name != 'pull_request' || github.head_ref != 'feat/widget-v2-colors'
         uses: actions/setup-node@v6
         with:
           node-version: '24'
       - name: Install dependencies
         run: bun install
-      - name: Run shared widget package qualification
+      # Scoped PR #17 smoke: prove the NPM widget still compiles, imports on
+      # SSR, and exposes no internal test message-ingestion methods.
+      # No package installation/publishing or unrelated qualification drill.
+      - name: Widget V2 Colors - NPM package API/build smoke
+        if: github.event_name == 'pull_request' && github.head_ref == 'feat/widget-v2-colors'
+        run: |
+          cd packages/widget-npm
+          bun run build
+          test -s dist/index.js
+          test -s dist/index.d.ts
+          node --input-type=module <<'NODE'
+          import { initSukhan } from './dist/index.js'
+          const instance = initSukhan({ apiKey: 'ci-color-test-key' })
+          for (const key of ['open', 'close', 'toggle', 'send', 'destroy', 'setIdentity', 'refreshIdentity']) {
+            if (typeof instance[key] !== 'function') throw new Error('Missing public API: ' + key)
+          }
+          if ('__ingestMessage' in instance) throw new Error('Test-only message injection exposed publicly')
+          console.log('NPM widget build + SSR public API smoke passed')
+          NODE
+      - name: Run shared widget package qualification - main/other PRs
+        if: github.event_name != 'pull_request' || github.head_ref != 'feat/widget-v2-colors'
         run: bash scripts/qualify-widget-package.sh
         env:
           REPO_ROOT: ${{ github.workspace }}
@@ -128,10 +154,16 @@ jobs:
             done
           '
       - name: Run Full DB boundary tests (real PostgreSQL)
+        if: github.event_name != 'pull_request' || github.head_ref != 'feat/widget-v2-colors'
         run: bun test tests/db-boundary/
-      - name: Run Full regression tests
+      # PR #17: only colors browser tests (Free + Pro, all widget surfaces, downgrade).
+      - name: Run Full browser tests - Widget V2 Colors only
+        if: github.event_name == 'pull_request' && github.head_ref == 'feat/widget-v2-colors'
+        run: bunx playwright test tests/widget-v2-colors.spec.ts --workers=1 --retries=0
+      - name: Run Full regression tests - main and other PRs
+        if: github.event_name != 'pull_request' || github.head_ref != 'feat/widget-v2-colors'
         run: |
-          bunx playwright test             tests/module2.spec.ts             tests/socketio-verify.spec.ts             tests/socket-race.spec.ts             tests/realtime-authz.spec.ts             tests/widget-external-origin.spec.ts tests/reconnect-regression.spec.ts tests/tenant-security.spec.ts tests/inbox-reply-echo-dedup.spec.ts tests/inbox-stale-selection.spec.ts tests/widget-npm-external-origin.spec.ts tests/widget-npm-identity.spec.ts tests/widget-script-identity.spec.ts tests/widget-access-identity-dashboard.spec.ts tests/inbox-burst-dedup.spec.ts tests/onboarding.spec.ts tests/anonymous-isolation.spec.ts tests/widget-live-messaging.spec.ts tests/widget-optimistic-failure.spec.ts tests/widget-duplicate-messages.spec.ts tests/widget-adversarial-ordering.spec.ts tests/caddy-public-boundary.spec.ts tests/invite-workspace-switching.spec.ts tests/widget-customization.spec.ts tests/widget-v2-positioning.spec.ts tests/widget-domains.spec.ts tests/analytics-csat.spec.ts tests/workspace-switcher.spec.ts tests/password-reset.spec.ts tests/contacts-identity.spec.ts
+          bunx playwright test             tests/module2.spec.ts             tests/socketio-verify.spec.ts             tests/socket-race.spec.ts             tests/realtime-authz.spec.ts             tests/widget-external-origin.spec.ts tests/reconnect-regression.spec.ts tests/tenant-security.spec.ts tests/inbox-reply-echo-dedup.spec.ts tests/inbox-stale-selection.spec.ts tests/widget-npm-external-origin.spec.ts tests/widget-npm-identity.spec.ts tests/widget-script-identity.spec.ts tests/widget-access-identity-dashboard.spec.ts tests/inbox-burst-dedup.spec.ts tests/onboarding.spec.ts tests/anonymous-isolation.spec.ts tests/widget-live-messaging.spec.ts tests/widget-optimistic-failure.spec.ts tests/widget-duplicate-messages.spec.ts tests/widget-adversarial-ordering.spec.ts tests/caddy-public-boundary.spec.ts tests/invite-workspace-switching.spec.ts tests/widget-customization.spec.ts tests/widget-v2-positioning.spec.ts tests/widget-v2-colors.spec.ts tests/widget-domains.spec.ts tests/analytics-csat.spec.ts tests/workspace-switcher.spec.ts tests/password-reset.spec.ts tests/contacts-identity.spec.ts
       - name: Print Full container logs on failure
         if: failure()
         run: |
@@ -161,10 +193,16 @@ jobs:
             done
           '
       - name: Run Lite DB boundary tests (real PostgreSQL)
+        if: github.event_name != 'pull_request' || github.head_ref != 'feat/widget-v2-colors'
         run: bun test tests/db-boundary/
-      - name: Run Lite regression tests
+      # PR #17: only colors browser tests (Free + Pro, all widget surfaces, downgrade).
+      - name: Run Lite browser tests - Widget V2 Colors only
+        if: github.event_name == 'pull_request' && github.head_ref == 'feat/widget-v2-colors'
+        run: bunx playwright test tests/widget-v2-colors.spec.ts --workers=1 --retries=0
+      - name: Run Lite regression tests - main and other PRs
+        if: github.event_name != 'pull_request' || github.head_ref != 'feat/widget-v2-colors'
         run: |
-          bunx playwright test             tests/module2.spec.ts             tests/socketio-verify.spec.ts             tests/socket-race.spec.ts             tests/realtime-authz.spec.ts             tests/widget-external-origin.spec.ts tests/reconnect-regression.spec.ts tests/tenant-security.spec.ts tests/inbox-reply-echo-dedup.spec.ts tests/inbox-stale-selection.spec.ts tests/widget-npm-external-origin.spec.ts tests/widget-npm-identity.spec.ts tests/widget-script-identity.spec.ts tests/widget-access-identity-dashboard.spec.ts tests/inbox-burst-dedup.spec.ts tests/onboarding.spec.ts tests/anonymous-isolation.spec.ts tests/widget-live-messaging.spec.ts tests/widget-optimistic-failure.spec.ts tests/widget-duplicate-messages.spec.ts tests/widget-adversarial-ordering.spec.ts tests/caddy-public-boundary.spec.ts tests/invite-workspace-switching.spec.ts tests/widget-customization.spec.ts tests/widget-v2-positioning.spec.ts tests/widget-domains.spec.ts tests/analytics-csat.spec.ts tests/workspace-switcher.spec.ts tests/password-reset.spec.ts tests/contacts-identity.spec.ts
+          bunx playwright test             tests/module2.spec.ts             tests/socketio-verify.spec.ts             tests/socket-race.spec.ts             tests/realtime-authz.spec.ts             tests/widget-external-origin.spec.ts tests/reconnect-regression.spec.ts tests/tenant-security.spec.ts tests/inbox-reply-echo-dedup.spec.ts tests/inbox-stale-selection.spec.ts tests/widget-npm-external-origin.spec.ts tests/widget-npm-identity.spec.ts tests/widget-script-identity.spec.ts tests/widget-access-identity-dashboard.spec.ts tests/inbox-burst-dedup.spec.ts tests/onboarding.spec.ts tests/anonymous-isolation.spec.ts tests/widget-live-messaging.spec.ts tests/widget-optimistic-failure.spec.ts tests/widget-duplicate-messages.spec.ts tests/widget-adversarial-ordering.spec.ts tests/caddy-public-boundary.spec.ts tests/invite-workspace-switching.spec.ts tests/widget-customization.spec.ts tests/widget-v2-positioning.spec.ts tests/widget-v2-colors.spec.ts tests/widget-domains.spec.ts tests/analytics-csat.spec.ts tests/workspace-switcher.spec.ts tests/password-reset.spec.ts tests/contacts-identity.spec.ts
       - name: Print Lite container logs on failure
         if: failure()
         run: |
@@ -189,21 +227,34 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.ref }}
+      # Scoped PR #17 smoke: validate both production deployment topologies
+      # without building images or repeating destructive backup/restore drills.
+      - name: Widget V2 Colors - Full/Lite production Compose config smoke
+        if: github.event_name == 'pull_request' && github.head_ref == 'feat/widget-v2-colors'
+        run: |
+          docker compose -f docker-compose.yml config -q
+          docker compose -f docker-compose.lite.yml config -q
+          echo 'Full and Lite production Compose configs are valid'
       - name: Setup Bun
+        if: github.event_name != 'pull_request' || github.head_ref != 'feat/widget-v2-colors'
         uses: oven-sh/setup-bun@v2
       - name: Install dependencies
+        if: github.event_name != 'pull_request' || github.head_ref != 'feat/widget-v2-colors'
         run: bun install
       - name: Prisma generate
+        if: github.event_name != 'pull_request' || github.head_ref != 'feat/widget-v2-colors'
         run: bunx prisma generate
         env:
           DATABASE_URL: postgresql://user:password@localhost:5432/dummy
           DIRECT_URL: postgresql://user:password@localhost:5432/dummy
       - name: Install Playwright Chromium
+        if: github.event_name != 'pull_request' || github.head_ref != 'feat/widget-v2-colors'
         run: bunx playwright install --with-deps chromium
 
       # Build the image once (reuses the cache from the docker-regression job
       # if it ran first; otherwise builds fresh).
       - name: Build Docker image
+        if: github.event_name != 'pull_request' || github.head_ref != 'feat/widget-v2-colors'
         run: |
           docker compose -f docker-compose.yml build app
 
@@ -211,21 +262,22 @@ jobs:
       # their own Docker containers (start/stop/destroy/restore) using
       # the production compose files. They access the app through Caddy
       # on port 80 only — no internal service host exposure.
-      - name: Run self-host qualification tests (Full + Lite)
+      - name: Run self-host qualification tests (Full + Lite) - main/other PRs
+        if: github.event_name != 'pull_request' || github.head_ref != 'feat/widget-v2-colors'
         run: |
           bunx playwright test \
             tests/self-host-backup-restore.spec.ts \
             tests/self-host-clean-install.spec.ts
 
       - name: Print container logs on failure
-        if: failure()
+        if: failure() && (github.event_name != 'pull_request' || github.head_ref != 'feat/widget-v2-colors')
         run: |
           docker compose -p sukhan-bakres-full logs 2>/dev/null || true
           docker compose -p sukhan-bakres-lite logs 2>/dev/null || true
           docker compose -p sukhan-clean-full logs 2>/dev/null || true
           docker compose -p sukhan-clean-lite logs 2>/dev/null || true
       - name: Tear down any remaining stacks
-        if: always()
+        if: always() && (github.event_name != 'pull_request' || github.head_ref != 'feat/widget-v2-colors')
         run: |
           docker compose -p sukhan-bakres-full down -v --remove-orphans 2>/dev/null || true
           docker compose -p sukhan-bakres-lite down -v --remove-orphans 2>/dev/null || true

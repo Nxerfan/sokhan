@@ -15,6 +15,7 @@ import { PanelHeader } from './members-panel'
 import { cn } from '@/lib/utils'
 import { WidgetAccessIdentity } from './widget-access-identity'
 import { WidgetPositioningPanel } from './widget-positioning-panel'
+import { WidgetColorsPanel } from './widget-colors-panel'
 
 type WidgetConfig = {
   accentColor: string
@@ -90,6 +91,20 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
       mobile: { anchor: 'bottom-start' | 'bottom-end' | 'bottom-center'; offsetX?: number; offsetY?: number } | null
     }
   } | null>(null)
+  // V2 colors data (from GET /api/widget-config `colors` field).
+  const [colors, setColors] = useState<{
+    entitlements: { presetColors: boolean; customColors: boolean }
+    effective: {
+      mode: 'preset' | 'custom'
+      presetId?: string
+      tokens: Record<string, string>
+    } | null  // null when Free without V2 selection (legacy runtime)
+    stored: {
+      mode: 'preset' | 'custom'
+      presetId?: string
+      custom?: Record<string, string>
+    } | null
+  } | null>(null)
 
   const apiUrl = typeof window !== 'undefined' ? window.location.origin : HOSTED_API_URL
 
@@ -116,6 +131,8 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
     setIsLocked(Boolean(cfgData.isLocked))
     // V2 positioning data.
     if (cfgData.positioning) setPositioning(cfgData.positioning)
+    // V2 colors data.
+    if (cfgData.colors) setColors(cfgData.colors)
     const domData = await domRes.json()
     setDomains(domData.domains ?? [])
     setDomainLimit(domData.limit ?? 0)
@@ -137,9 +154,17 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
   async function save() {
     if (!config || isLocked) return
     setSaving(true)
+    // When V2 colors are active (stored), strip accentColor from the save
+    // body to avoid sending a stale legacy value that conflicts with the
+    // V2 color theme. The V2 Colors panel is the single source of truth
+    // for color when V2 colors are selected.
+    const saveBody: Record<string, unknown> = { ...config }
+    if (colors?.stored) {
+      delete saveBody.accentColor
+    }
     let res: Response
     try {
-      res = await fetch('/api/widget-config', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config) })
+      res = await fetch('/api/widget-config', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(saveBody) })
     } catch {
       toast.error(locale === 'fa' ? 'ذخیره ناموفق بود' : 'Failed to save')
       setSaving(false)
@@ -596,6 +621,13 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
             defaultDirection={(config.defaultLocale === 'fa' ? 'rtl' : 'ltr') as 'rtl' | 'ltr'}
             onReload={load}
           />
+          {/* V2 Colors — presets for all plans, custom tokens for paid plans. */}
+          <WidgetColorsPanel
+            slug={slug}
+            colors={colors}
+            defaultDirection={(config.defaultLocale === 'fa' ? 'rtl' : 'ltr') as 'rtl' | 'ltr'}
+            onReload={load}
+          />
         <div className="grid gap-4 lg:grid-cols-2">
           <div className="flex flex-col gap-4">
             <Card>
@@ -607,9 +639,12 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
                 <div className="space-y-2">
                   <Label>{t('accentColor')}</Label>
                   <div className="flex items-center gap-3">
-                    <input type="color" value={(disp ?? config).accentColor} onChange={(e) => update('accentColor', e.target.value)} disabled={isLocked} className="h-9 w-12 cursor-pointer rounded border border-border bg-transparent disabled:cursor-not-allowed disabled:opacity-50" />
-                    <Input data-testid="customization-accent" value={(disp ?? config).accentColor} onChange={(e) => update('accentColor', e.target.value)} dir="ltr" className="font-mono" disabled={isLocked} />
+                    <input type="color" value={(disp ?? config).accentColor} onChange={(e) => update('accentColor', e.target.value)} disabled={isLocked || !!colors?.stored} className="h-9 w-12 cursor-pointer rounded border border-border bg-transparent disabled:cursor-not-allowed disabled:opacity-50" />
+                    <Input data-testid="customization-accent" value={(disp ?? config).accentColor} onChange={(e) => update('accentColor', e.target.value)} dir="ltr" className="font-mono" disabled={isLocked || !!colors?.stored} />
                   </div>
+                  {!!colors?.stored && (
+                    <p className="text-xs text-muted-foreground">{fa ? 'رنگ توسط پنل رنگ‌های V2 مدیریت می‌شود' : 'Color is managed by the V2 Colors panel'}</p>
+                  )}
                 </div>
                 <div className="grid grid-cols-2 gap-3">
                   <div className="space-y-2">

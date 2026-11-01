@@ -26,6 +26,13 @@ import {
   OFFSET_MAX,
   type PositioningAnchor,
 } from './positioning-geometry'
+import {
+  isValidPaletteId,
+  isValidColor,
+  isValidCustomColors,
+  COLOR_TOKEN_NAMES,
+  type ColorTokens,
+} from './color-palettes'
 
 /** The appearance schema version. Currently 1. */
 export const APPEARANCE_V2_VERSION = 1 as const
@@ -63,11 +70,28 @@ export interface DevicePositioning {
   offsetY?: number
 }
 
+/**
+ * Global color theme (not device-specific — colors are consistent across
+ * desktop and mobile per product requirement).
+ *
+ * - `mode: 'preset'` — use a predefined palette (Free + paid).
+ * - `mode: 'custom'` — use custom color tokens (paid only).
+ */
+export interface ColorTheme {
+  mode: 'preset' | 'custom'
+  /** Palette ID (required when mode='preset'). Must be a valid stable ID. */
+  presetId?: string
+  /** Custom color tokens (required when mode='custom'). Paid plans only. */
+  custom?: ColorTokens
+}
+
 /** The versioned appearance configuration. */
 export interface AppearanceV2 {
   version: typeof APPEARANCE_V2_VERSION
   desktop?: DeviceAppearance
   mobile?: DeviceAppearance
+  /** Global color theme (Phase 2 / Feature 2). Additive — null = V1 behavior. */
+  colors?: ColorTheme
 }
 
 /** The canonical default appearance (V2). */
@@ -96,7 +120,7 @@ export const DEFAULT_APPEARANCE_V2: AppearanceV2 = {
  *   - Unknown version (version !== 1).
  *   - Fractional version.
  *   - desktop/mobile present but not plain objects.
- *   - Unexpected top-level keys (only version, desktop, mobile are allowed).
+ *   - Unexpected top-level keys (only version, desktop, mobile, colors are allowed).
  *   - Unexpected keys inside desktop/mobile (only `positioning` is allowed).
  *   - positioning present but not a plain object / malformed.
  *   - Invalid anchor (not one of the 3 presets).
@@ -112,7 +136,7 @@ export const DEFAULT_APPEARANCE_V2: AppearanceV2 = {
  */
 
 /** Allowed top-level keys in an AppearanceV2 object. */
-const ALLOWED_TOP_LEVEL_KEYS = new Set(['version', 'desktop', 'mobile'])
+const ALLOWED_TOP_LEVEL_KEYS = new Set(['version', 'desktop', 'mobile', 'colors'])
 
 /**
  * Check if a value is a plain JSON-compatible object — prototype is exactly
@@ -228,13 +252,122 @@ export function parseAppearanceV2(value: unknown): AppearanceV2 | null {
   const mobile = parseDeviceAppearance(mobileValue)
   if (mobile === undefined) return null
 
+  // Parse colors if present (read from descriptor to bypass Proxy get).
+  const colorsDesc = getOwnDataDescriptor(value, 'colors')
+  let colorsValue: unknown = undefined
+  if (colorsDesc !== null) {
+    colorsValue = colorsDesc.value
+  } else {
+    try {
+      if (Object.prototype.hasOwnProperty.call(value, 'colors')) return null
+    } catch {
+      return null
+    }
+  }
+  let colors: ColorTheme | null | undefined = undefined
+  if (colorsValue !== undefined) {
+    colors = parseColorTheme(colorsValue)
+    if (colors === undefined) return null // malformed → fail closed
+  }
+
   // Return a CANONICAL object (not the raw input reference) so callers
   // never hold an unvalidated object.
-  return {
+  const result: AppearanceV2 = {
     version: APPEARANCE_V2_VERSION,
     desktop: desktop ?? {},
     mobile: mobile ?? {},
   }
+  if (colors !== null && colors !== undefined) {
+    result.colors = colors
+  }
+  return result
+}
+
+/** Allowed keys inside a color theme object. */
+const ALLOWED_COLOR_KEYS = new Set(['mode', 'presetId', 'custom'])
+
+/** Allowed keys inside a custom colors object. */
+const ALLOWED_CUSTOM_COLOR_KEYS = new Set(COLOR_TOKEN_NAMES as readonly string[])
+
+/**
+ * Parse a color theme object. Returns:
+ *   - undefined → malformed (caller fails closed).
+ *   - null → absent (colors is null/undefined).
+ *   - ColorTheme → valid (canonical object).
+ *
+ * Validates: mode is 'preset' or 'custom'; presetId is valid when mode='preset';
+ * custom tokens are valid #RRGGBB when mode='custom'; no unexpected keys.
+ */
+function parseColorTheme(value: unknown): ColorTheme | null | undefined {
+  if (value === null || value === undefined) return null
+  if (!isPlainObject(value)) return undefined // malformed
+  const keys = safeOwnKeys(value)
+  if (keys === null) return undefined
+  for (const key of keys) {
+    if (typeof key !== 'string' || !ALLOWED_COLOR_KEYS.has(key)) return undefined
+  }
+
+  // mode — required, must be 'preset' or 'custom'.
+  const modeDesc = getOwnDataDescriptor(value, 'mode')
+  if (!modeDesc) return undefined
+  const modeValue = modeDesc.value
+  if (modeValue !== 'preset' && modeValue !== 'custom') return undefined
+
+  // presetId — required when mode='preset'.
+  const presetIdDesc = getOwnDataDescriptor(value, 'presetId')
+  let presetId: string | undefined
+  if (presetIdDesc !== null) {
+    const v = presetIdDesc.value
+    if (v !== undefined && v !== null) {
+      if (!isValidPaletteId(v)) return undefined
+      presetId = v
+    }
+  } else {
+    try {
+      if (Object.prototype.hasOwnProperty.call(value, 'presetId')) return undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  // custom — required when mode='custom'.
+  const customDesc = getOwnDataDescriptor(value, 'custom')
+  let custom: ColorTokens | undefined
+  if (customDesc !== null) {
+    const v = customDesc.value
+    if (v !== undefined && v !== null) {
+      if (!isPlainObject(v)) return undefined
+      const customKeys = safeOwnKeys(v)
+      if (customKeys === null) return undefined
+      // Check for unexpected keys.
+      for (const key of customKeys) {
+        if (typeof key !== 'string' || !ALLOWED_CUSTOM_COLOR_KEYS.has(key)) return undefined
+      }
+      // Validate all tokens are valid colors.
+      if (!isValidCustomColors(v)) return undefined
+      // Return canonical copy.
+      const tokens: Record<string, string> = {}
+      for (const name of COLOR_TOKEN_NAMES) {
+        tokens[name] = (v as unknown as Record<string, unknown>)[name] as string
+      }
+      custom = tokens as unknown as ColorTokens
+    }
+  } else {
+    try {
+      if (Object.prototype.hasOwnProperty.call(value, 'custom')) return undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  // Validate mode-specific requirements.
+  if (modeValue === 'preset' && !presetId) return undefined
+  if (modeValue === 'custom' && !custom) return undefined
+
+  const result: ColorTheme = { mode: modeValue }
+  if (presetId) result.presetId = presetId
+  if (custom) result.custom = custom
+  return result
 }
 
 /** Allowed keys inside a device appearance object. */
