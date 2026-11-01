@@ -306,8 +306,8 @@ const OTHER_CUSTOMIZATION_KEYS = new Set([
   'defaultLocale',
 ])
 
-/** All recognized top-level PATCH fields (customization + positioning + colors). */
-const ALL_RECOGNIZED_KEYS = new Set([...OTHER_CUSTOMIZATION_KEYS, 'positioning', 'colors'])
+/** All recognized top-level PATCH fields (customization + positioning + colors + launcher). */
+const ALL_RECOGNIZED_KEYS = new Set([...OTHER_CUSTOMIZATION_KEYS, 'positioning', 'colors', 'launcher'])
 
 /**
  * Check if the PATCH body contains any non-positioning customization fields.

@@ -16,6 +16,7 @@ import { cn } from '@/lib/utils'
 import { WidgetAccessIdentity } from './widget-access-identity'
 import { WidgetPositioningPanel } from './widget-positioning-panel'
 import { WidgetColorsPanel } from './widget-colors-panel'
+import { WidgetLauncherPanel } from './widget-launcher-panel'
 
 type WidgetConfig = {
   accentColor: string
@@ -105,6 +106,12 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
       custom?: Record<string, string>
     } | null
   } | null>(null)
+  // V2 launcher data (from GET /api/widget-config `launcher` field).
+  const [launcher, setLauncher] = useState<{
+    entitlements: { launcherSelection: 'limited' | 'all' }
+    effective: { shape: 'tab' | 'rounded' | 'pill' } | null  // null when Free without V2 selection (legacy runtime)
+    stored: 'tab' | 'rounded' | 'pill' | null
+  } | null>(null)
 
   const apiUrl = typeof window !== 'undefined' ? window.location.origin : HOSTED_API_URL
 
@@ -133,6 +140,8 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
     if (cfgData.positioning) setPositioning(cfgData.positioning)
     // V2 colors data.
     if (cfgData.colors) setColors(cfgData.colors)
+    // V2 launcher data.
+    if (cfgData.launcher) setLauncher(cfgData.launcher)
     const domData = await domRes.json()
     setDomains(domData.domains ?? [])
     setDomainLimit(domData.limit ?? 0)
@@ -161,6 +170,13 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
     const saveBody: Record<string, unknown> = { ...config }
     if (colors?.stored) {
       delete saveBody.accentColor
+    }
+    // When V2 launcher is active (stored), strip launcherShape from the
+    // save body to avoid sending a stale legacy value that conflicts with
+    // the V2 launcher selection. The V2 Launcher panel is the single
+    // source of truth for the launcher shape when V2 launcher is selected.
+    if (launcher?.stored) {
+      delete saveBody.launcherShape
     }
     let res: Response
     try {
@@ -628,6 +644,13 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
             defaultDirection={(config.defaultLocale === 'fa' ? 'rtl' : 'ltr') as 'rtl' | 'ltr'}
             onReload={load}
           />
+          {/* V2 Launcher — tab + rounded for all plans, pill for paid plans. */}
+          <WidgetLauncherPanel
+            slug={slug}
+            launcher={launcher}
+            defaultDirection={(config.defaultLocale === 'fa' ? 'rtl' : 'ltr') as 'rtl' | 'ltr'}
+            onReload={load}
+          />
         <div className="grid gap-4 lg:grid-cols-2">
           <div className="flex flex-col gap-4">
             <Card>
@@ -649,10 +672,13 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
                 <div className="grid grid-cols-2 gap-3">
                   <div className="space-y-2">
                     <Label>{t('launcherShape')}</Label>
-                    <Select value={(disp ?? config).launcherShape} onValueChange={(v) => update('launcherShape', v)} disabled={isLocked}>
+                    <Select value={(disp ?? config).launcherShape} onValueChange={(v) => update('launcherShape', v)} disabled={isLocked || !!launcher?.stored}>
                       <SelectTrigger data-testid="customization-shape"><SelectValue /></SelectTrigger>
                       <SelectContent>{SHAPES.map((s) => (<SelectItem key={s} value={s}>{t(`shapes.${s}` as any)}</SelectItem>))}</SelectContent>
                     </Select>
+                    {!!launcher?.stored && (
+                      <p className="text-xs text-muted-foreground">{t('launcher.legacyManagedHint')}</p>
+                    )}
                   </div>
                   <div className="space-y-2">
                     <Label>{t('position')}</Label>

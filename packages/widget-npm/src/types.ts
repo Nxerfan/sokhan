@@ -72,6 +72,15 @@ export interface WidgetConfig {
     }
   }
   /**
+   * V2 launcher style (Phase 2 / Feature 3). The backend resolves the
+   * EFFECTIVE launcher shape from stored config + plan entitlements.
+   * Older backends omit this field → the widget falls back to the V1
+   * `launcherShape` field.
+   */
+  launcher?: {
+    shape: 'tab' | 'rounded' | 'pill'
+  }
+  /**
    * Backend-supplied realtime endpoint config (additive field). The widget
    * uses this as the PRIMARY runtime source. Older backends omit the
    * field; the widget falls back to the documented hosted default.

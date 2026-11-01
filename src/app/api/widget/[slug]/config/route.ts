@@ -16,6 +16,10 @@ import {
   getStoredColorTheme,
   type StoredColorInput,
 } from '@/lib/widget/effective-colors'
+import {
+  resolveEffectiveLauncher,
+  type StoredLauncherInput,
+} from '@/lib/widget/effective-launcher'
 
 /** CORS headers for widget API responses. */
 function widgetHeaders(res: NextResponse): NextResponse {
@@ -93,6 +97,7 @@ export async function GET(
       position: true,
       appearanceV2: true,
       accentColor: true,
+      launcherShape: true,
     },
   })
   if (!widgetConfig) {
@@ -158,7 +163,17 @@ export async function GET(
   const legacyAccent = shouldExposeColors
     ? effectiveColors.tokens.accent
     : config.accentColor
-  const configWithPosition = { ...config, position: legacyPosition, accentColor: legacyAccent }
+
+  // V2 launcher: resolve effective launcher from stored V2/V1 + entitlements.
+  const launcherInput: StoredLauncherInput = {
+    launcherShape: widgetConfig.launcherShape ?? null,
+    appearanceV2: widgetConfig.appearanceV2,
+  }
+  const effectiveLauncher = resolveEffectiveLauncher(launcherInput, entitlements)
+  // Derive the V1 `launcherShape` for legacy consumers from the effective launcher.
+  const legacyLauncherShape = effectiveLauncher.shape
+
+  const configWithPosition = { ...config, position: legacyPosition, accentColor: legacyAccent, launcherShape: legacyLauncherShape }
 
   // Build the response — conditionally include `colors` only when the tenant
   // has an explicit V2 color selection or a paid V1 accent. This preserves
@@ -177,6 +192,8 @@ export async function GET(
   if (shouldExposeColors) {
     responseBody.colors = effectiveColors
   }
+  // V2 launcher (additive — older clients use the legacy `launcherShape` field).
+  responseBody.launcher = effectiveLauncher
 
   // Additive: the safe public access-policy fields. Existing clients continue
   // working (additive top-level fields). NEVER expose the raw integration

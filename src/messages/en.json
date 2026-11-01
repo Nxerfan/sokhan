@@ -182,6 +182,22 @@
         "agentBubbleText": "Agent bubble text"
       }
     },
+    "launcher": {
+      "title": "Widget Launcher",
+      "hint": "Pick the shape of your chat launcher button. Matches what visitors see on your site.",
+      "shape": "Launcher shape",
+      "upgradeHint": "Pill shape is available on paid plans.",
+      "locked": "This launcher shape is a paid-plan feature. Your saved selection is preserved and will restore on upgrade.",
+      "save": "Save launcher",
+      "discard": "Discard changes",
+      "dirty": "Unsaved changes",
+      "saveSuccess": "Launcher saved",
+      "saveFail": "Failed to save launcher",
+      "invalidShape": "Launcher shape must be tab, rounded, or pill.",
+      "preview": "Preview",
+      "previewLabel": "Open chat",
+      "legacyManagedHint": "Shape is managed by the V2 Launcher panel."
+    },
     "avatarUrl": "Agent avatar URL",
     "logoUrl": "Logo URL",
     "greetingFa": "Greeting (Persian)",
