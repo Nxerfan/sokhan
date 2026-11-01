@@ -159,7 +159,10 @@ describe('Message Preview — pure incoming-message eligibility and privacy', ()
     const preview = getMessagePreviewText({ ...opts, message: { ...message, content: { text: long } } })
     expect(preview).not.toBeNull()
     expect(Array.from(preview!).length).toBeLessThanOrEqual(121)
-    expect(preview!.startsWith('الف'.repeat(100))).toBe(true)
+    // Each 'الف' is THREE Unicode code points. Forty repetitions fill
+    // the 120-code-point cap; a hundred would require 300 characters.
+    expect(preview!.startsWith('الف'.repeat(40))).toBe(true)
+    expect(preview!.endsWith('…')).toBe(true)
     expect(getMessagePreviewText({ ...opts, message: { ...message, content: { text: ' \n   ' } } })).toBeNull()
   })
   test('untrusted text returned as plain content, not rendered HTML', () => {
