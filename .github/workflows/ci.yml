@@ -32,7 +32,12 @@ jobs:
           DIRECT_URL: postgresql://user:password@localhost:5432/dummy
       - name: Vercel build script syntax check
         run: bash -n vercel-build.sh
-      - name: Unit tests
+      # PR #17 runs only color unit tests. Keep complete regression on main and other PRs.
+      - name: Unit tests - Widget V2 Colors (Free + Pro)
+        if: github.event_name == 'pull_request' && github.head_ref == 'feat/widget-v2-colors'
+        run: bun test tests/unit/widget-v2-colors.test.ts
+      - name: Unit tests - full regression (main and other PRs)
+        if: github.event_name != 'pull_request' || github.head_ref != 'feat/widget-v2-colors'
         run: bun test tests/unit/
       - name: Production build
         run: bunx next build
@@ -49,6 +54,7 @@ jobs:
   # qualification also used by the publish workflow, so the two paths cannot
   # drift. NEVER publishes. Requires NO npm credential.
   widget-package-qualification:
+    if: github.event_name != 'pull_request' || github.head_ref != 'feat/widget-v2-colors'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -128,8 +134,14 @@ jobs:
             done
           '
       - name: Run Full DB boundary tests (real PostgreSQL)
+        if: github.event_name != 'pull_request' || github.head_ref != 'feat/widget-v2-colors'
         run: bun test tests/db-boundary/
-      - name: Run Full regression tests
+      # PR #17: only colors browser tests (Free + Pro, all widget surfaces, downgrade).
+      - name: Run Full browser tests - Widget V2 Colors only
+        if: github.event_name == 'pull_request' && github.head_ref == 'feat/widget-v2-colors'
+        run: bunx playwright test tests/widget-v2-colors.spec.ts --workers=1 --retries=0
+      - name: Run Full regression tests - main and other PRs
+        if: github.event_name != 'pull_request' || github.head_ref != 'feat/widget-v2-colors'
         run: |
           bunx playwright test             tests/module2.spec.ts             tests/socketio-verify.spec.ts             tests/socket-race.spec.ts             tests/realtime-authz.spec.ts             tests/widget-external-origin.spec.ts tests/reconnect-regression.spec.ts tests/tenant-security.spec.ts tests/inbox-reply-echo-dedup.spec.ts tests/inbox-stale-selection.spec.ts tests/widget-npm-external-origin.spec.ts tests/widget-npm-identity.spec.ts tests/widget-script-identity.spec.ts tests/widget-access-identity-dashboard.spec.ts tests/inbox-burst-dedup.spec.ts tests/onboarding.spec.ts tests/anonymous-isolation.spec.ts tests/widget-live-messaging.spec.ts tests/widget-optimistic-failure.spec.ts tests/widget-duplicate-messages.spec.ts tests/widget-adversarial-ordering.spec.ts tests/caddy-public-boundary.spec.ts tests/invite-workspace-switching.spec.ts tests/widget-customization.spec.ts tests/widget-v2-positioning.spec.ts tests/widget-v2-colors.spec.ts tests/widget-domains.spec.ts tests/analytics-csat.spec.ts tests/workspace-switcher.spec.ts tests/password-reset.spec.ts tests/contacts-identity.spec.ts
       - name: Print Full container logs on failure
@@ -161,8 +173,14 @@ jobs:
             done
           '
       - name: Run Lite DB boundary tests (real PostgreSQL)
+        if: github.event_name != 'pull_request' || github.head_ref != 'feat/widget-v2-colors'
         run: bun test tests/db-boundary/
-      - name: Run Lite regression tests
+      # PR #17: only colors browser tests (Free + Pro, all widget surfaces, downgrade).
+      - name: Run Lite browser tests - Widget V2 Colors only
+        if: github.event_name == 'pull_request' && github.head_ref == 'feat/widget-v2-colors'
+        run: bunx playwright test tests/widget-v2-colors.spec.ts --workers=1 --retries=0
+      - name: Run Lite regression tests - main and other PRs
+        if: github.event_name != 'pull_request' || github.head_ref != 'feat/widget-v2-colors'
         run: |
           bunx playwright test             tests/module2.spec.ts             tests/socketio-verify.spec.ts             tests/socket-race.spec.ts             tests/realtime-authz.spec.ts             tests/widget-external-origin.spec.ts tests/reconnect-regression.spec.ts tests/tenant-security.spec.ts tests/inbox-reply-echo-dedup.spec.ts tests/inbox-stale-selection.spec.ts tests/widget-npm-external-origin.spec.ts tests/widget-npm-identity.spec.ts tests/widget-script-identity.spec.ts tests/widget-access-identity-dashboard.spec.ts tests/inbox-burst-dedup.spec.ts tests/onboarding.spec.ts tests/anonymous-isolation.spec.ts tests/widget-live-messaging.spec.ts tests/widget-optimistic-failure.spec.ts tests/widget-duplicate-messages.spec.ts tests/widget-adversarial-ordering.spec.ts tests/caddy-public-boundary.spec.ts tests/invite-workspace-switching.spec.ts tests/widget-customization.spec.ts tests/widget-v2-positioning.spec.ts tests/widget-v2-colors.spec.ts tests/widget-domains.spec.ts tests/analytics-csat.spec.ts tests/workspace-switcher.spec.ts tests/password-reset.spec.ts tests/contacts-identity.spec.ts
       - name: Print Lite container logs on failure
@@ -179,6 +197,7 @@ jobs:
   # Uses ONLY production compose files (no test overrides). Access through
   # Caddy on port 80 only. No internal service host exposure.
   self-host-qualification:
+    if: github.event_name != 'pull_request' || github.head_ref != 'feat/widget-v2-colors'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
