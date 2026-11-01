@@ -275,6 +275,97 @@ test.describe('Widget V2 Attention Animations — PR #19 only', () => {
     }
   })
 
+
+  test('animated launcher remains entirely on-screen at clamped mobile positioning extremes', async ({ browser }) => {
+    // Attention keyframes change transform, but V2 Positioning clamps the
+    // UNTRANSFORMED launcher to the viewport. Probe the actual animated
+    // bounding box at the keyframe extrema, not just CSS class/duration.
+    test.setTimeout(180_000)
+    const ctx = await browser.newContext({
+      viewport: { width: 320, height: 640 },
+      reducedMotion: 'no-preference',
+    })
+    try {
+      const owner = await ctx.newPage()
+      const slug = await signup(owner, 'attention-boundary')
+      await setPlan(owner, 'pro')
+
+      for (const probe of [
+        { animation: 'shake' as const, offsetX: 2000, offsetY: -2000, phase: 0.75 },
+        { animation: 'bounce' as const, offsetX: 0, offsetY: 2000, phase: 0.5 },
+        { animation: 'pulse' as const, offsetX: 2000, offsetY: -2000, phase: 0.5 },
+      ]) {
+        await patch(owner, { attention: { animation: probe.animation } })
+        await patch(owner, {
+          positioning: { mobile: {
+            anchor: 'bottom-end', offsetX: probe.offsetX, offsetY: probe.offsetY,
+          } },
+        })
+        const effective = await publicConfig(owner, slug)
+        expect(effective.attention.animation).toBe(probe.animation)
+        expect(effective.positioning.mobile.offsetX).toBe(probe.offsetX)
+        expect(effective.positioning.mobile.offsetY).toBe(probe.offsetY)
+
+        for (const surface of ['slug', 'v1', 'npm'] as const) {
+          if (surface === 'npm' && !npmBuilt) {
+            execSync('bun run build', {
+              cwd: resolve(process.cwd(), 'packages/widget-npm'), stdio: 'pipe',
+            })
+            npmBuilt = true
+          }
+          const html = surface === 'slug'
+            ? '<!doctype html><html><body><script async defer src="' + BASE + '/api/widget/' + slug + '/script"></script></body></html>'
+            : surface === 'v1'
+              ? '<!doctype html><html><body><script async defer src="' + BASE + '/api/widget/v1/sukhan.js" data-api-key="' + slug + '"></script></body></html>'
+              : '<!doctype html><html><body></body></html>'
+          const site = await serve(html, surface === 'npm')
+          const page = await ctx.newPage()
+          try {
+            await page.goto(site.url + '/customer.html', { waitUntil: 'domcontentloaded' })
+            if (surface === 'npm') {
+              await page.evaluate(async (args) => {
+                const pkg = await import(window.location.origin + '/index.js')
+                pkg.initSukhan({ apiKey: args.slug, apiUrl: args.origin })
+              }, { slug, origin: BASE })
+            }
+            const launcher = page.locator('.sk-launcher')
+            await expect(launcher).toBeVisible({ timeout: 15_000 })
+            await expect(page.locator('.sk-root')).toHaveAttribute(
+              'data-sk-attention-animation', probe.animation,
+            )
+            const actual = await launcher.evaluate((node, args) => {
+              const cssAnimation = node.getAnimations().find(a =>
+                (a as CSSAnimation).animationName === 'sk-attention-' + args.animation
+              )
+              if (!cssAnimation) throw new Error('Expected real CSS attention animation')
+              const duration = cssAnimation.effect?.getComputedTiming().duration
+              if (typeof duration !== 'number' || duration <= 0) {
+                throw new Error('Missing positive CSS animation duration')
+              }
+              cssAnimation.pause()
+              cssAnimation.currentTime = duration * args.phase
+              const r = node.getBoundingClientRect()
+              return { left: r.left, top: r.top, right: r.right, bottom: r.bottom,
+                width: innerWidth, height: innerHeight }
+            }, { animation: probe.animation, phase: probe.phase })
+
+            // Geometric containment must hold throughout the configured
+            // attention motion, including at the sampled maximum displacement.
+            expect(actual.left, surface + '/' + probe.animation + ' overflows left').toBeGreaterThanOrEqual(-0.5)
+            expect(actual.top, surface + '/' + probe.animation + ' overflows top').toBeGreaterThanOrEqual(-0.5)
+            expect(actual.right, surface + '/' + probe.animation + ' overflows right').toBeLessThanOrEqual(actual.width + 0.5)
+            expect(actual.bottom, surface + '/' + probe.animation + ' overflows bottom').toBeLessThanOrEqual(actual.height + 0.5)
+          } finally {
+            await page.close()
+            await site.close()
+          }
+        }
+      }
+    } finally {
+      await ctx.close()
+    }
+  })
+
   test('Reduce Motion disables paid animation on real slug and NPM renderers', async ({ browser }) => {
     const ownerCtx = await browser.newContext()
     try {
