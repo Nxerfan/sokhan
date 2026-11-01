@@ -223,7 +223,7 @@ test.describe('Widget V2 Launcher Styles — PR #18 only', () => {
       const saved = await dashboardConfig(page)
       expect(saved.launcher.stored).toBe('rounded')
       expect(saved.launcher.effective.shape).toBe('rounded')
-      expect(saved.stored.appearanceV2.launcher).toEqual({ shape: 'rounded' })
+      expect(saved.config.appearanceV2.launcher).toEqual({ shape: 'rounded' })
       await page.reload()
       await openLauncherPanel(page)
       await expect(page.getByTestId('launcher-shape-rounded')).toHaveAttribute('aria-pressed', 'true')
