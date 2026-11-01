@@ -76,7 +76,9 @@ async function site(html: string, bundle = false): Promise<{ url: string, close:
     }
     const filename = req.url?.slice(1) ?? ''
     if (bundle && /^[a-zA-Z0-9_-]+\.js$/.test(filename)) {
-      const file = join(base, filename === 'widget.js' ? 'index.js' : filename)
+      // Serve each emitted ESM module under its real filename. Mapping
+      // /widget.js to /index.js makes index.js re-import itself (false cycle).
+      const file = join(base, filename)
       if (existsSync(file)) {
         res.writeHead(200, { 'Content-Type': 'application/javascript' })
         res.end(readFileSync(file))
@@ -112,7 +114,9 @@ async function renderedShape(context: import('@playwright/test').BrowserContext,
     await page.goto(server.url + '/customer.html', { waitUntil: 'domcontentloaded' })
     if (surface === 'npm') {
       await page.evaluate(async (args) => {
-        const mod = await import(window.location.origin + '/widget.js')
+        // index.js is the actual package entrypoint; its ./widget.js import
+        // must resolve to the distinct emitted widget.js implementation.
+        const mod = await import(window.location.origin + '/index.js')
         mod.initSukhan({ apiKey: args.slug, apiUrl: args.origin })
       }, { slug, origin: BASE })
     }
