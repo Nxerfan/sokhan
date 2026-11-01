@@ -145,6 +145,20 @@ async function answerFromInbox(page: Page, visitorText: string, reply: string, i
     const nav = page.getByRole('navigation', { name: 'primary' })
     await nav.getByRole('button', { name: /صندوق ورودی|Inbox/ }).click()
   }
+  // First prove the visitor's persisted conversation is visible to the
+  // authenticated agent via the REAL server API. This is a state condition,
+  // not a sleep: navigating to Inbox before it exists can leave Inbox's
+  // one-shot initial fetch permanently stale, hiding the conversation.
+  await expect.poll(async () => {
+    const res = await page.request.get(DASHBOARD + '/api/conversations?status=open')
+    expect(res.ok(), 'authenticated Inbox list request must succeed').toBe(true)
+    const data = await res.json()
+    return Array.isArray(data.conversations) && data.conversations.some(
+      (row: { lastMessagePreview?: unknown }) =>
+        typeof row.lastMessagePreview === 'string' &&
+        row.lastMessagePreview.includes(visitorText),
+    )
+  }, { timeout: 20_000, message: 'Visitor conversation persisted in agent Inbox API' }).toBe(true)
   const conv = page.locator('button').filter({ hasText: visitorText }).first()
   await expect(conv).toBeVisible({ timeout: 20_000 })
   await conv.click()
