@@ -33,9 +33,9 @@ jobs:
       - name: Vercel build script syntax check
         run: bash -n vercel-build.sh
       # PR #20 runs only Message Preview unit tests. Keep complete regression on main and other PRs.
-      - name: Unit tests - Widget V2 Message Preview (Free + Pro)
+      - name: Unit tests - Widget V2 Message Preview (reviewer + developer)
         if: github.event_name == 'pull_request' && github.head_ref == 'feat/widget-v2-message-preview'
-        run: bun test tests/unit/widget-v2-message-preview.test.ts
+        run: bun test tests/unit/widget-v2-message-preview.test.ts tests/unit/widget-v2-message-preview-implementation.test.ts
       - name: Unit tests - full regression (main and other PRs)
         if: github.event_name != 'pull_request' || github.head_ref != 'feat/widget-v2-message-preview'
         run: bun test tests/unit/
