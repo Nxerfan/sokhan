@@ -258,6 +258,88 @@ test.describe('Widget V2 Quick Replies — Feature 6 only', () => {
     } finally { await ctx.close() }
   })
 
+  // A launcher can be rendered long before identity bootstrap finishes.
+  // Hold the REAL /contact request in Playwright's network layer; no fake
+  // response, test-only production hook, sleep, or token injection. This
+  // proves suggestions cannot appear until server-issued visitor identity
+  // is ready, on all three runtimes. Once released, they must become usable.
+  for (const surface of ['slug', 'v1', 'npm'] as const) {
+    test('identity boundary ' + surface + ': quick replies hidden until real visitor /contact succeeds', async ({ browser }) => {
+      test.setTimeout(120_000)
+      const ownerCtx = await browser.newContext()
+      const visitorCtx = await browser.newContext({ viewport: { width: 320, height: 640 } })
+      let site: Awaited<ReturnType<typeof serve>> | undefined
+      let visitorPage: Page | undefined
+      let releaseContact: (() => void) | undefined
+      try {
+        const owner = await ownerCtx.newPage()
+        const slug = await signup(owner, 'identity-gate-' + surface)
+        await setAccessMode(owner, 'anonymous')
+        await patch(owner, { quickReplies: { items: ['First', 'Second'] } })
+
+        if (surface === 'npm' && !npmBuilt) {
+          execSync('bun run build', {
+            cwd: resolve(process.cwd(), 'packages/widget-npm'), stdio: 'pipe',
+          })
+          npmBuilt = true
+        }
+        const html = surface === 'slug'
+          ? '<!doctype html><html><body><script async defer src="' + BASE + '/api/widget/' + slug + '/script"></script></body></html>'
+          : surface === 'v1'
+            ? '<!doctype html><html><body><script async defer src="' + BASE + '/api/widget/v1/sukhan.js" data-api-key="' + slug + '"></script></body></html>'
+            : '<!doctype html><html><body></body></html>'
+        site = await serve(html, surface === 'npm')
+        const page = await visitorCtx.newPage()
+        visitorPage = page
+
+        const hold = new Promise<void>(resolve => { releaseContact = resolve })
+        const urlPart = '/api/widget/' + slug + '/contact'
+        await page.route('**/api/widget/' + slug + '/contact', async route => {
+          // The request is forwarded unchanged after the test releases it.
+          await hold
+          await route.continue()
+        })
+        const requestStarted = page.waitForRequest(req =>
+          req.method() === 'POST' && req.url().includes(urlPart),
+          { timeout: 20_000 },
+        )
+        await page.goto(site.url + '/customer.html', { waitUntil: 'domcontentloaded' })
+        if (surface === 'npm') {
+          await page.evaluate(async args => {
+            const widget = await import(window.location.origin + '/index.js')
+            widget.initSukhan({ apiKey: args.slug, apiUrl: args.origin })
+          }, { slug, origin: BASE })
+        }
+        await requestStarted
+        await expect(page.locator('.sk-launcher')).toBeVisible({ timeout: 15_000 })
+        await page.locator('.sk-launcher').click()
+        await expect(page.locator('.sk-panel')).toHaveCSS('pointer-events', 'auto')
+        // This is the regression check. Rendering early is allowed;
+        // advertising clickable suggestions before authorization is not.
+        await expect(page.locator('.sk-quick-reply').first()).toBeHidden()
+
+        const responseReady = page.waitForResponse(res =>
+          res.request().method() === 'POST' &&
+          res.url().includes(urlPart) &&
+          res.status() === 200, { timeout: 20_000 })
+        releaseContact()
+        releaseContact = undefined
+        const ready = await responseReady
+        await ready.finished()
+        await expect(page.locator('.sk-quick-reply')).toHaveCount(2, { timeout: 15_000 })
+        await expect(page.locator('.sk-quick-reply').first()).toBeVisible()
+      } finally {
+        // Never leave a held HTTP route waiting if an assertion fails.
+        releaseContact?.()
+        try { await visitorPage?.close() } finally {
+          await site?.close()
+          await visitorCtx.close()
+          await ownerCtx.close()
+        }
+      }
+    })
+  }
+
   for (const surface of ['slug', 'v1', 'npm'] as const) {
     test('Free ' + surface + ': two actual buttons, one authorized POST, no duplicate and no history replay', async ({ browser }) => {
       test.setTimeout(120_000)
