@@ -150,32 +150,32 @@ export function WidgetColorsPanel({
   const [draft, setDraft] = useState<DraftColors | null>(null)
   const [saving, setSaving] = useState(false)
 
+  // Entitlement-aware draft initialization. Used by both useEffect (initial
+  // load) and discard() (reset). When the plan is NOT entitled to
+  // customColors (e.g., Free after downgrade from Pro), do NOT initialize
+  // the draft from stored custom colors — the preview must reflect the
+  // authorized appearance. Stored custom tokens remain for upgrade restore.
+  const buildAuthorizedDraft = useCallback((colorsData: ColorsData | null): DraftColors | null => {
+    if (!colorsData || !colorsData.stored) return null
+    const ent = colorsData.entitlements
+    // Free with stored custom → do NOT load custom tokens into draft.
+    if (!ent.customColors && colorsData.stored.mode === 'custom') {
+      return null
+    }
+    return {
+      mode: colorsData.stored.mode,
+      presetId: colorsData.stored.presetId,
+      custom: colorsData.stored.custom ? normalizeTokens(colorsData.stored.custom) : undefined,
+    }
+  }, [])
+
   // Initialize draft when colors data loads.
   useEffect(() => {
     if (!colors) return
-    const ent = colors.entitlements
     /* eslint-disable react-hooks/set-state-in-effect */
-    if (colors.stored) {
-      // When the plan is NOT entitled to customColors (e.g., Free after
-      // downgrade from Pro), do NOT initialize the draft from stored
-      // custom colors — even if `colors.effective` is non-null (the
-      // server may return the default palette as effective). The preview
-      // must reflect the authorized appearance, not the unauthorized
-      // custom tokens. Stored custom tokens remain for upgrade restore.
-      if (!ent.customColors && colors.stored.mode === 'custom') {
-        setDraft(null)
-      } else {
-        setDraft({
-          mode: colors.stored.mode,
-          presetId: colors.stored.presetId,
-          custom: colors.stored.custom ? normalizeTokens(colors.stored.custom) : undefined,
-        })
-      }
-    } else {
-      setDraft(null)
-    }
+    setDraft(buildAuthorizedDraft(colors))
     /* eslint-enable react-hooks/set-state-in-effect */
-  }, [colors])
+  }, [colors, buildAuthorizedDraft])
 
   const entitlements = colors?.entitlements ?? { presetColors: false, customColors: false }
   const canPreset = entitlements.presetColors
@@ -211,7 +211,12 @@ export function WidgetColorsPanel({
   const isDirty = (() => {
     if (!colors) return false
     const d = draft
-    const s = colors.stored
+    // Compare against the authorized representation of stored colors,
+    // not the raw stored values. When Free has stored custom but is not
+    // entitled to customColors, the authorized representation is null
+    // (same as the initial draft), so the dirty state is false.
+    const authorizedStored = buildAuthorizedDraft(colors)
+    const s = authorizedStored
     // Both null → not dirty.
     if (!d && !s) return false
     // One null, other non-null → dirty.
@@ -332,19 +337,12 @@ export function WidgetColorsPanel({
     }
   }, [draft, canPreset, canCustom, t, onReload])
 
-  // Discard: reset draft to stored.
+  // Discard: reset draft to the authorized effective selection (not
+  // unauthorized stored paid custom values). Uses the same
+  // buildAuthorizedDraft logic as initial load.
   const discard = useCallback(() => {
-    if (!colors) return
-    if (colors.stored) {
-      setDraft({
-        mode: colors.stored.mode,
-        presetId: colors.stored.presetId,
-        custom: colors.stored.custom ? normalizeTokens(colors.stored.custom) : undefined,
-      })
-    } else {
-      setDraft(null)
-    }
-  }, [colors])
+    setDraft(buildAuthorizedDraft(colors))
+  }, [colors, buildAuthorizedDraft])
 
   if (!canPreset) {
     return (

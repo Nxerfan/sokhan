@@ -1139,15 +1139,15 @@ test.describe('Widget V2 Colors — browser regression', () => {
     await ctx.close()
   })
 
-  test('BLOCKER 3: Pro custom → Free downgrade → preview does NOT show custom colors', async ({ browser }) => {
-    test.setTimeout(120_000)
-    const { email, workspace } = creds('downgrade-preview')
+  test('BLOCKER 3: Pro custom → Free downgrade → preview + discard + save + upgrade + restore', async ({ browser }) => {
+    test.setTimeout(180_000)
+    const { email, workspace } = creds('downgrade-full')
     const ctx = await browser.newContext()
     const page = await ctx.newPage()
     const slug = await signupAndGetSlug(page, email, workspace)
     currentSlug = slug
 
-    // 1. Pro saves custom colors.
+    // 1. Pro saves a distinctive custom theme.
     await devSetPlan(page, 'pro')
     await page.goto(BASE)
     await page.waitForLoadState('networkidle')
@@ -1157,10 +1157,11 @@ test.describe('Widget V2 Colors — browser regression', () => {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       data: `email=${email}&password=password123&csrfToken=${csrfToken}&json=true`,
     })
-    await page.request.patch(`${BASE}/api/widget-config`, {
+    const saveRes = await page.request.patch(`${BASE}/api/widget-config`, {
       data: { colors: { mode: 'custom', custom: CUSTOM_TOKENS } },
       headers: { 'Content-Type': 'application/json' },
     })
+    expect(saveRes.ok()).toBe(true)
 
     // 2. Downgrade to Free.
     await devSetPlan(page, 'free')
@@ -1174,8 +1175,7 @@ test.describe('Widget V2 Colors — browser regression', () => {
     await expect(page.getByTestId('colors-panel')).toBeVisible({ timeout: 15_000 })
     await page.waitForTimeout(1000)
 
-    // 4. The preview must NOT show the custom colors (agentBubbleBg=#FF00FF).
-    // It should show the legacy/default appearance.
+    // 4. Verify the authorized preview colors (NOT the custom headerBg).
     const previewHeaderBg = await page.evaluate(() => {
       const header = document.querySelector('[data-testid="colors-preview-header"]') as HTMLElement
       if (!header) return null
@@ -1185,31 +1185,59 @@ test.describe('Widget V2 Colors — browser regression', () => {
     // Must NOT be the custom headerBg (#5B0E2D = rgb(91, 14, 45)).
     expect(previewHeaderBg).not.toBe(hexToRgb(CUSTOM_TOKENS.headerBg))
 
-    // 5. Verify all 10 preset palettes are accessible (not locked).
-    const paletteGrid = page.getByTestId('colors-panel')
-    await expect(paletteGrid).toBeVisible()
-    // Count palette buttons.
+    // 5. Click Discard and confirm the preview remains authorized.
+    //    Discard must NOT restore unauthorized custom tokens.
+    const discardBtn = page.getByTestId('colors-discard')
+    // Discard may or may not be enabled (dirty state should be false).
+    // If it's enabled, click it and verify the preview stays authorized.
+    const discardVisible = await discardBtn.isVisible().catch(() => false)
+    if (discardVisible) {
+      const discardEnabled = await discardBtn.isEnabled()
+      if (discardEnabled) {
+        await discardBtn.click()
+        await page.waitForTimeout(500)
+        // Preview must still NOT show custom colors.
+        const postDiscardHeaderBg = await page.evaluate(() => {
+          const header = document.querySelector('[data-testid="colors-preview-header"]') as HTMLElement
+          if (!header) return null
+          return getComputedStyle(header).backgroundColor
+        })
+        expect(postDiscardHeaderBg).not.toBe(hexToRgb(CUSTOM_TOKENS.headerBg))
+      }
+    }
+
+    // 6. Verify the 10 presets remain accessible.
     const paletteCount = await page.locator('[data-testid^="colors-palette-"]').count()
     expect(paletteCount).toBe(10)
 
-    // 6. Save an approved palette (emerald).
+    // 7. Select Emerald and save.
     await page.getByTestId('colors-palette-emerald').click()
     await page.getByTestId('colors-save').click()
-    await expect(page.getByText(/موقعیت ذخیره شد|Positioning saved|Saved/)).toBeVisible({ timeout: 10_000 }).catch(() => {})
+    // Assert PATCH success (no .catch swallow).
+    const savedToast = page.getByText(/ذخیره شد|Saved/)
+    await expect(savedToast).toBeVisible({ timeout: 15_000 })
     await page.waitForTimeout(1000)
 
-    // 7. Upgrade back to Pro.
+    // 8. Assert public config presetId === 'emerald'.
+    const pubConfigRes = await page.request.get(`${SUKHAN_ORIGIN}/api/widget/${slug}/config`)
+    expect(pubConfigRes.ok()).toBe(true)
+    const pubConfig = await pubConfigRes.json()
+    expect(pubConfig.colors.presetId).toBe('emerald')
+
+    // 9. Upgrade to Pro.
     await devSetPlan(page, 'pro')
     await page.goto(BASE)
     await page.waitForLoadState('networkidle')
+    await page.waitForTimeout(1000)
 
-    // 8. Verify the stored custom tokens are still in the DB (preserved).
+    // 10. Verify stored custom tokens are preserved (for restore).
     const cfgRes = await page.request.get(`${DASHBOARD}/api/widget-config`)
     const cfgData = await cfgRes.json()
-    // The stored colors should have mode='preset' (from step 6) but the
-    // custom tokens should be preserved (downgrade preservation).
     expect(cfgData.colors.stored).not.toBeNull()
     expect(cfgData.colors.stored.custom).toBeDefined()
+    // The custom tokens should match the original saved values.
+    expect(cfgData.colors.stored.custom.accent).toBe(CUSTOM_TOKENS.accent)
+    expect(cfgData.colors.stored.custom.headerBg).toBe(CUSTOM_TOKENS.headerBg)
 
     await ctx.close()
   })
