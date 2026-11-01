@@ -17,6 +17,7 @@ import {
   FREE_LAUNCHER_SHAPES,
   DEFAULT_LAUNCHER_SHAPE,
   isLauncherShapeAllowed,
+  isPaidOnlyLauncherShape,
   type LauncherShape,
 } from './effective-launcher'
 
@@ -149,32 +150,35 @@ export function mergeLauncherPatch(
       desktop: { ...(base.desktop ?? {}) },
       mobile: { ...(base.mobile ?? {}) },
       launcher: existingLauncher,
+      ...(base.colors ? { colors: base.colors } : {}),
     }
   }
 
   // Build the new launcher config.
-  // If the plan has 'all' entitlement and the new shape is 'pill', store it
-  // as the active shape. If the plan has 'limited' and the new shape is
-  // allowed (tab/rounded), store the paid shape (if any) separately.
   const launcherConfig: NonNullable<AppearanceV2['launcher']> = {
     shape: newShape,
   }
 
-  // Preserve paid-only shape for downgrade/upgrade restore.
-  // If the existing launcher has a shape that is NOT allowed for the
-  // current plan (e.g. 'pill' on Free), and the new shape IS allowed,
-  // store the disallowed shape as `paidShape` for future restore.
-  if (existingLauncher?.shape && existingLauncher.shape !== newShape) {
-    const existingShape = existingLauncher.shape as LauncherShape
-    if (!isLauncherShapeAllowed(existingShape, entitlements)) {
-      // The existing shape is paid-only and not the new shape → preserve.
-      launcherConfig.paidShape = existingShape
+  // BLOCKER 2: When the plan has 'all' entitlement (Pro), the user is
+  // explicitly choosing a shape on a paid plan. Clear paidShape — the
+  // user's explicit choice replaces any prior paid preference. There is
+  // no need to preserve a paid preference when the plan can already use
+  // all shapes.
+  if (entitlements?.launcherSelection === 'all') {
+    // No paidShape — explicit Pro choice.
+  } else {
+    // Plan is 'limited' (Free). Preserve paid-only shape for restore.
+    // BLOCKER 4: Only paid-only shapes (pill) are valid as paidShape.
+    if (existingLauncher?.shape && existingLauncher.shape !== newShape) {
+      const existingShape = existingLauncher.shape as LauncherShape
+      if (isPaidOnlyLauncherShape(existingShape)) {
+        launcherConfig.paidShape = existingShape
+      }
     }
-  }
-
-  // Also preserve any existing paidShape from the existing config.
-  if (existingLauncher?.paidShape && !launcherConfig.paidShape) {
-    launcherConfig.paidShape = existingLauncher.paidShape
+    // Also preserve any existing paidShape from the existing config.
+    if (existingLauncher?.paidShape && !launcherConfig.paidShape) {
+      launcherConfig.paidShape = existingLauncher.paidShape
+    }
   }
 
   return {
@@ -182,6 +186,8 @@ export function mergeLauncherPatch(
     desktop: { ...(base.desktop ?? {}) },
     mobile: { ...(base.mobile ?? {}) },
     launcher: launcherConfig,
+    // BLOCKER 1: Preserve colors + any other existing V2 fields.
+    ...(base.colors ? { colors: base.colors } : {}),
   }
 }
 

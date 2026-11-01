@@ -138,17 +138,16 @@ export async function GET() {
         stored: storedColors,
       },
       // V2 launcher: resolve effective + stored.
+      // BLOCKER 3: The dashboard effective must ALWAYS match the public widget
+      // config's effective launcher. The public config always exposes the
+      // effective launcher (from resolveEffectiveLauncher), so the dashboard
+      // must too — even for Free with only a V1 launcherShape and no V2
+      // selection. The old null-for-Free logic caused a preview mismatch.
       launcher: {
         entitlements: {
           launcherSelection: entitlements?.launcherSelection ?? 'limited',
         },
-        effective: (() => {
-          // No stored V2 launcher + Free → legacy V1 shape (may be null).
-          if (storedLauncherShape === null && !(entitlements?.legacyCustomizationUnlocked ?? false)) {
-            return null
-          }
-          return effectiveLauncher
-        })(),
+        effective: effectiveLauncher,
         stored: storedLauncherShape,
       },
     } as const

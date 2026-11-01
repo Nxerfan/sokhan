@@ -277,6 +277,9 @@ export function mergePositioningPatch(
     version: 1,
     desktop,
     mobile,
+    // BLOCKER 1: Preserve colors + launcher + any other existing V2 fields.
+    ...(base.colors ? { colors: base.colors } : {}),
+    ...(base.launcher ? { launcher: base.launcher } : {}),
   }
 }
 

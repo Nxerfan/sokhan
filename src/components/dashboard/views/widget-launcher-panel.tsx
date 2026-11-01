@@ -38,8 +38,8 @@ interface EffectiveLauncher {
  */
 interface LauncherData {
   entitlements: LauncherEntitlements
-  /** null when the widget runtime uses pre-V2 hardcoded shape (Free without V2 selection). */
-  effective: EffectiveLauncher | null
+  /** Always non-null — the server always resolves the effective launcher (including V1 fallback). */
+  effective: EffectiveLauncher
   /** The raw stored V2 launcher shape (may include a paid-only shape on Free, preserved for upgrade restore). */
   stored: LauncherShape | null
 }
@@ -167,23 +167,19 @@ export function WidgetLauncherPanel({
   const canAll = entitlements.launcherSelection === 'all'
 
   // The shape to render in the preview.
+  // BLOCKER 3: effective is now always non-null (the server always resolves
+  // the effective launcher, including V1 fallback). So the preview always
+  // matches the public widget config.
   const previewShape: LauncherShape = useMemo(() => {
     // Draft overrides when present.
     if (draft) {
-      // If the draft somehow holds a paid-only shape on a 'limited' plan,
-      // fall back to the legacy default (matches the runtime behavior).
-      // This is defensive — selectShape() prevents this from happening.
       if (!FREE_LAUNCHER_SHAPES.includes(draft) && !canAll) {
         return LEGACY_LAUNCHER_SHAPE
       }
       return draft
     }
-    // No draft → use effective.
-    if (launcher?.effective) {
-      return launcher.effective.shape
-    }
-    // No effective (Free without V2 → legacy runtime).
-    return LEGACY_LAUNCHER_SHAPE
+    // No draft → use effective (always present from server).
+    return launcher?.effective?.shape ?? LEGACY_LAUNCHER_SHAPE
   }, [draft, launcher, canAll])
 
   // Dirty detection: compare draft to the authorized representation of

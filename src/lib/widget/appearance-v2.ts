@@ -36,6 +36,7 @@ import {
 import {
   LAUNCHER_SHAPES,
   isValidLauncherShape,
+  isPaidOnlyLauncherShape,
   type LauncherShape,
 } from './effective-launcher'
 
@@ -559,12 +560,16 @@ function parseLauncherConfig(value: unknown): LauncherConfig | null | undefined 
 
   const result: LauncherConfig = { shape: shapeValue as LauncherShape }
 
-  // paidShape — optional, must be a valid launcher shape if present.
+  // paidShape — optional, must be a valid PAID-ONLY launcher shape.
+  // BLOCKER 4: Reject Free shapes (tab/rounded) as paidShape — only
+  // paid-only shapes (pill) are semantically valid as preserved paid
+  // preferences. A Free shape stored as paidShape is contradictory.
   const paidShapeDesc = getOwnDataDescriptor(value, 'paidShape')
   if (paidShapeDesc !== null) {
     const v = paidShapeDesc.value
     if (v !== undefined && v !== null) {
       if (!isValidLauncherShape(v)) return undefined
+      if (!isPaidOnlyLauncherShape(v as LauncherShape)) return undefined
       result.paidShape = v as LauncherShape
     }
   } else {

@@ -109,7 +109,7 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
   // V2 launcher data (from GET /api/widget-config `launcher` field).
   const [launcher, setLauncher] = useState<{
     entitlements: { launcherSelection: 'limited' | 'all' }
-    effective: { shape: 'tab' | 'rounded' | 'pill' } | null  // null when Free without V2 selection (legacy runtime)
+    effective: { shape: 'tab' | 'rounded' | 'pill' }  // always non-null (server resolves V1 fallback)
     stored: 'tab' | 'rounded' | 'pill' | null
   } | null>(null)
 

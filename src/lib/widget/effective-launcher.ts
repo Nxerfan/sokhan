@@ -24,6 +24,16 @@ export type LauncherShape = (typeof LAUNCHER_SHAPES)[number]
 /** Shapes available to Free (launcherSelection='limited'). */
 export const FREE_LAUNCHER_SHAPES: readonly LauncherShape[] = ['tab', 'rounded']
 
+/** Shapes that are paid-only (not available on Free). */
+export const PAID_ONLY_LAUNCHER_SHAPES: readonly LauncherShape[] = ['pill']
+
+/**
+ * Check if a shape is a paid-only shape (not available on Free).
+ */
+export function isPaidOnlyLauncherShape(shape: LauncherShape): boolean {
+  return PAID_ONLY_LAUNCHER_SHAPES.includes(shape)
+}
+
 /** The default launcher shape (fail-closed for unknown plans). */
 export const DEFAULT_LAUNCHER_SHAPE: LauncherShape = 'tab'
 
@@ -70,15 +80,20 @@ export function isLauncherShapeAllowed(
  * Resolve the effective launcher shape from stored config + plan entitlements.
  *
  * Resolution order:
- *   1. Stored V2 launcher shape (if present + valid + entitled).
- *   2. V1 `launcherShape` (if valid + entitled for paid plans, or 'tab'/'rounded' for Free).
+ *   1. Stored V2 launcher: if the plan is now entitled to the active shape,
+ *      apply it. If NOT entitled (e.g. Free after downgrade from Pro):
+ *        a. If a paidShape is stored AND the plan is now entitled to it
+ *           (e.g. re-upgraded to Pro), restore the paidShape.
+ *        b. Otherwise, fall back to the safe default ('tab').
+ *   2. V1 `launcherShape` (if valid + entitled).
  *   3. DEFAULT_LAUNCHER_SHAPE ('tab').
  *
  * Entitlement enforcement:
  *   - null entitlements (unknown plan) → fail closed to 'tab'.
  *   - launcherSelection='limited' → only 'tab' and 'rounded' applied.
  *     Paid-only shapes (e.g. 'pill') stored but NOT applied.
- *   - launcherSelection='all' → all shapes applied.
+ *   - launcherSelection='all' → all shapes applied, including restored
+ *     paidShape from prior downgrade.
  */
 export function resolveEffectiveLauncher(
   stored: StoredLauncherInput,
@@ -91,21 +106,29 @@ export function resolveEffectiveLauncher(
 
   // Parse stored V2 strictly.
   const appearanceV2 = parseAppearanceV2(stored.appearanceV2)
-  const v2Launcher = appearanceV2?.launcher?.shape ?? null
+  const v2Launcher = appearanceV2?.launcher
 
   if (v2Launcher) {
-    // V2 launcher present — apply if entitled.
-    if (isLauncherShapeAllowed(v2Launcher, entitlements)) {
-      return { shape: v2Launcher }
+    // V2 launcher present.
+    // BLOCKER 2: When the plan has 'all' entitlement AND a paidShape exists,
+    // restore the paidShape. The active shape was forced by a prior
+    // downgrade (Free couldn't use the paid-only shape). On upgrade, the
+    // user's original paid preference should be restored.
+    if (entitlements.launcherSelection === 'all' && v2Launcher.paidShape) {
+      return { shape: v2Launcher.paidShape }
     }
-    // Not entitled → fall back to safe default.
+    if (isLauncherShapeAllowed(v2Launcher.shape, entitlements)) {
+      return { shape: v2Launcher.shape }
+    }
+    // Active shape NOT entitled (e.g. Free after Pro downgrade).
+    if (v2Launcher.paidShape && isLauncherShapeAllowed(v2Launcher.paidShape, entitlements)) {
+      return { shape: v2Launcher.paidShape }
+    }
     return { shape: DEFAULT_LAUNCHER_SHAPE }
   }
 
   // No V2 launcher → try V1 launcherShape fallback.
   if (stored.launcherShape && isValidLauncherShape(stored.launcherShape)) {
-    // For paid plans, V1 shapes are always allowed.
-    // For Free, only 'tab' and 'rounded' are allowed; 'pill' falls back.
     if (isLauncherShapeAllowed(stored.launcherShape as LauncherShape, entitlements)) {
       return { shape: stored.launcherShape as LauncherShape }
     }
