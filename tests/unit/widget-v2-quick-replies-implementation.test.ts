@@ -28,6 +28,7 @@ import {
   normalizeQuickReplyText,
   hasCaseInsensitiveDuplicate,
   isAdvancedQuickRepliesPlan,
+  shouldShowQuickReplies,
 } from '../../src/lib/widget/quick-replies-types'
 import { mergeColorPatch } from '../../src/lib/widget/color-patch'
 import { mergeLauncherPatch } from '../../src/lib/widget/launcher-patch'
@@ -362,5 +363,104 @@ describe('Developer — constants', () => {
 
   test('QUICK_REPLY_MAX_CODE_POINTS is 80', () => {
     expect(QUICK_REPLY_MAX_CODE_POINTS).toBe(80)
+  })
+})
+
+describe('Developer — identity-readiness visibility policy (shouldShowQuickReplies)', () => {
+  // Helper: the fully-authorized, panel-open, pre-first-message state.
+  const ready = {
+    panelOpen: true,
+    authorized: true,
+    itemsCount: 2,
+    hasVisitorMessage: false,
+  }
+
+  test('identity not ready (no token) → hidden even if panel open + items exist', () => {
+    expect(shouldShowQuickReplies({ ...ready, authorized: false })).toBe(false)
+  })
+
+  test('authorization completes → visible without reopening panel', () => {
+    // Before /contact resolves: authorized=false → hidden.
+    expect(shouldShowQuickReplies({ ...ready, authorized: false })).toBe(false)
+    // After /contact resolves: authorized=true → visible (same panel state).
+    expect(shouldShowQuickReplies({ ...ready, authorized: true })).toBe(true)
+  })
+
+  test('authorization lost (token revoked / recovery starts) → immediately hidden', () => {
+    // Authorized → visible.
+    expect(shouldShowQuickReplies(ready)).toBe(true)
+    // Token revoked → hidden.
+    expect(shouldShowQuickReplies({ ...ready, authorized: false })).toBe(false)
+  })
+
+  test('authorization recovered → visible again', () => {
+    // Lost → hidden.
+    expect(shouldShowQuickReplies({ ...ready, authorized: false })).toBe(false)
+    // Recovered → visible.
+    expect(shouldShowQuickReplies({ ...ready, authorized: true })).toBe(true)
+  })
+
+  test('panel closed → hidden regardless of authorization', () => {
+    expect(shouldShowQuickReplies({ ...ready, panelOpen: false })).toBe(false)
+    expect(shouldShowQuickReplies({ ...ready, panelOpen: false, authorized: false })).toBe(false)
+  })
+
+  test('no items → hidden', () => {
+    expect(shouldShowQuickReplies({ ...ready, itemsCount: 0 })).toBe(false)
+  })
+
+  test('visitor message persisted → hidden (permanent, even if authorized)', () => {
+    expect(shouldShowQuickReplies({ ...ready, hasVisitorMessage: true })).toBe(false)
+  })
+
+  test('all conditions met → visible', () => {
+    expect(shouldShowQuickReplies(ready)).toBe(true)
+  })
+
+  test('any single condition false → hidden', () => {
+    // Each condition independently gates the visibility.
+    expect(shouldShowQuickReplies({ ...ready, panelOpen: false })).toBe(false)
+    expect(shouldShowQuickReplies({ ...ready, authorized: false })).toBe(false)
+    expect(shouldShowQuickReplies({ ...ready, itemsCount: 0 })).toBe(false)
+    expect(shouldShowQuickReplies({ ...ready, hasVisitorMessage: true })).toBe(false)
+  })
+
+  test('identity state transitions: mount → pending → ready → lost → recovered', () => {
+    // 1. Mount: panel closed, no identity.
+    expect(shouldShowQuickReplies({
+      panelOpen: false, authorized: false, itemsCount: 2, hasVisitorMessage: false,
+    })).toBe(false)
+
+    // 2. Panel opens while /contact pending: authorized still false.
+    expect(shouldShowQuickReplies({
+      panelOpen: true, authorized: false, itemsCount: 2, hasVisitorMessage: false,
+    })).toBe(false)
+
+    // 3. /contact succeeds: authorized becomes true → visible WITHOUT reopen.
+    expect(shouldShowQuickReplies({
+      panelOpen: true, authorized: true, itemsCount: 2, hasVisitorMessage: false,
+    })).toBe(true)
+
+    // 4. Authorization lost (recovery): token cleared → hidden.
+    expect(shouldShowQuickReplies({
+      panelOpen: true, authorized: false, itemsCount: 2, hasVisitorMessage: false,
+    })).toBe(false)
+
+    // 5. Recovery succeeds: authorized restored → visible again.
+    expect(shouldShowQuickReplies({
+      panelOpen: true, authorized: true, itemsCount: 2, hasVisitorMessage: false,
+    })).toBe(true)
+
+    // 6. First visitor message persisted → permanently hidden.
+    expect(shouldShowQuickReplies({
+      panelOpen: true, authorized: true, itemsCount: 2, hasVisitorMessage: true,
+    })).toBe(false)
+  })
+
+  test('history restore: visitor message from history → hidden on reload', () => {
+    // After reload, history includes a visitor message → hidden.
+    expect(shouldShowQuickReplies({
+      panelOpen: true, authorized: true, itemsCount: 2, hasVisitorMessage: true,
+    })).toBe(false)
   })
 })

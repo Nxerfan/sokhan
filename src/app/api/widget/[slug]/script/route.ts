@@ -867,7 +867,12 @@ ${POSITIONING_FN_SOURCE}
         }
       }
     }
-    var show = state.open && state.quickRepliesItems.length > 0 && !hasVisitorMsg;
+    // Identity readiness gate: Quick Replies are visible ONLY when the
+    // visitor has a valid token AND an active conversation — i.e., the
+    // /contact identity bootstrap has completed successfully. This prevents
+    // suggestions from appearing (and being clicked) before authorization.
+    var authorized = !!state.token && !!state.conversationId;
+    var show = state.open && state.quickRepliesItems.length > 0 && !hasVisitorMsg && authorized;
     state.quickRepliesEl.style.display = show ? 'flex' : 'none';
     // After the first visitor message, permanently remove the buttons from
     // the DOM (not just hide) — the test contract expects toHaveCount(0).
@@ -971,6 +976,10 @@ ${POSITIONING_FN_SOURCE}
       state.contactId = data.contactId;
       state.conversationId = data.conversationId;
       state.token = data.realtimeToken;
+
+      // Identity is now ready — Quick Replies may become visible without
+      // requiring the user to close and reopen the panel.
+      updateQuickReplies();
 
       // WARM UP the socket connection IMMEDIATELY after identification —
       // BEFORE any conversation exists. This fixes the race condition where

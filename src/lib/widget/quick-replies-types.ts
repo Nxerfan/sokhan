@@ -72,3 +72,31 @@ export function hasCaseInsensitiveDuplicate(items: string[]): boolean {
   }
   return false
 }
+
+/**
+ * Pure visibility policy for Quick Replies. Returns true if the suggestion
+ * buttons should be visible given the current runtime state.
+ *
+ * All five conditions must hold:
+ *   1. The panel is open.
+ *   2. The visitor is authorized (valid token + active conversation —
+ *      identity bootstrap completed).
+ *   3. Configured items exist.
+ *   4. No previously persisted visitor message exists.
+ *
+ * This mirrors the runtime `updateQuickReplies()` logic and is independently
+ * testable. The runtime passes `authorized = !!state.token && !!state.conversationId`.
+ */
+export function shouldShowQuickReplies(opts: {
+  panelOpen: boolean
+  authorized: boolean
+  itemsCount: number
+  hasVisitorMessage: boolean
+}): boolean {
+  return (
+    opts.panelOpen &&
+    opts.authorized &&
+    opts.itemsCount > 0 &&
+    !opts.hasVisitorMessage
+  )
+}

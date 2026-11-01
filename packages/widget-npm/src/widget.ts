@@ -1579,6 +1579,11 @@ export class SukhanWidget implements SukhanInstance {
     } catch {
       // ignore — bodyEl may not exist pre-mount
     }
+    // Identity cleared → Quick Replies must hide immediately. With token and
+    // conversationId both null, `authorized` is false so the gate hides the
+    // suggestions without requiring the user to close and reopen the panel.
+    // Safe no-op if the panel element does not exist yet.
+    this.updateQuickReplies()
     // NOTE: memoryIdentityToken is cleared on logout (setIdentity(null)) but
     // PRESERVED across a refresh/bootstrap re-entry so site_user_only can
     // re-use a still-valid token. Callers that must clear it do so explicitly.
@@ -1598,6 +1603,9 @@ export class SukhanWidget implements SukhanInstance {
     if (data.direction === 'rtl' || data.direction === 'ltr') {
       this.state.dir = data.direction
     }
+    // Identity is now ready — Quick Replies may become visible without
+    // requiring the user to close and reopen the panel.
+    this.updateQuickReplies()
   }
 
   /** Render the login-required UI (simple card; login button if loginUrl). */
@@ -1754,10 +1762,14 @@ export class SukhanWidget implements SukhanInstance {
     const hasVisitorMsg = (this.state.messages || []).some(
       (m) => m?.senderType === 'contact',
     )
+    // Identity readiness gate: Quick Replies visible ONLY when visitor has
+    // a valid token AND active conversation (identity bootstrap completed).
+    const authorized = !!this.state.token && !!this.state.conversationId
     const show =
       this.state.open &&
       this.state.quickRepliesItems.length > 0 &&
-      !hasVisitorMsg
+      !hasVisitorMsg &&
+      authorized
     this.state.quickRepliesEl.style.display = show ? 'flex' : 'none'
     // After the first visitor message, permanently remove the buttons from
     // the DOM (not just hide) — the test contract expects toHaveCount(0).
@@ -1983,6 +1995,9 @@ export class SukhanWidget implements SukhanInstance {
           this.state.conversationId = data.conversationId
         }
         this.state.token = data.realtimeToken
+        // Identity is now ready — Quick Replies may become visible without
+        // requiring the user to close and reopen the panel.
+        this.updateQuickReplies()
         return data.realtimeToken
       }
       if (mode === 'verified_visitor') {

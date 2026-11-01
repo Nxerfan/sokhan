@@ -634,7 +634,10 @@ ${POSITIONING_FN_SOURCE}
         }
       }
     }
-    var show = state.open && state.quickRepliesItems.length > 0 && !hasVisitorMsg;
+    // Identity readiness gate: Quick Replies visible ONLY when visitor has
+    // a valid token AND active conversation (identity bootstrap completed).
+    var authorized = !!state.token && !!state.conversationId;
+    var show = state.open && state.quickRepliesItems.length > 0 && !hasVisitorMsg && authorized;
     state.quickRepliesEl.style.display = show ? 'flex' : 'none';
     if (hasVisitorMsg && state.quickRepliesEl.childNodes.length > 0) {
       while (state.quickRepliesEl.firstChild) state.quickRepliesEl.removeChild(state.quickRepliesEl.firstChild);
@@ -724,6 +727,8 @@ ${POSITIONING_FN_SOURCE}
       state.contactId = data.contactId;
       state.conversationId = data.conversationId;
       state.token = data.realtimeToken;
+      // Identity is now ready — Quick Replies may become visible.
+      updateQuickReplies();
       connectSocket();
       if (state.conversationId) loadMessages();
     })
