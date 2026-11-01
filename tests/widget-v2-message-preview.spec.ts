@@ -268,9 +268,25 @@ test.describe('Widget V2 Message Preview — Feature 5 only', () => {
         await bubble.locator('.sk-message-preview-text').click()
         await expect(bubble).toBeHidden()
         await expect(site.page.locator('.sk-panel')).toHaveCSS('pointer-events', 'auto')
-        // Closing should not replay an already-seen agent message.
+        // Closing must not replay an already-seen agent message.
         await site.page.locator('.sk-launcher').click()
         await expect(bubble).toBeHidden()
+        // Reload the REAL customer page, including its original embed.
+        // History can be fetched again but must never create a NEW preview.
+        await site.page.reload({ waitUntil: 'domcontentloaded' })
+        if (surface === 'npm') {
+          await site.page.evaluate(async (args) => {
+            const widget = await import(window.location.origin + '/index.js')
+            widget.initSukhan({ apiKey: args.slug, apiUrl: args.origin })
+          }, { slug, origin: BASE })
+        }
+        await expect(site.page.locator('.sk-launcher')).toBeVisible({ timeout: 15_000 })
+        await expect(site.page.locator('.sk-message-preview')).toBeHidden()
+        await site.page.locator('.sk-launcher').click()
+        await expect(site.page.locator('.sk-msg.sk-agt p').filter({ hasText: agentReply }))
+          .toHaveCount(1, { timeout: 20_000 })
+        await site.page.locator('.sk-launcher').click()
+        await expect(site.page.locator('.sk-message-preview')).toBeHidden()
       } finally {
         if (site) await site.close()
         await widgetCtx.close()
