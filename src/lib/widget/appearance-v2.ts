@@ -33,6 +33,12 @@ import {
   COLOR_TOKEN_NAMES,
   type ColorTokens,
 } from './color-palettes'
+import {
+  LAUNCHER_SHAPES,
+  isValidLauncherShape,
+  isPaidOnlyLauncherShape,
+  type LauncherShape,
+} from './launcher-types'
 
 /** The appearance schema version. Currently 1. */
 export const APPEARANCE_V2_VERSION = 1 as const
@@ -85,6 +91,21 @@ export interface ColorTheme {
   custom?: ColorTokens
 }
 
+/**
+ * Global launcher style selection (not device-specific).
+ *
+ * - `shape`: the active launcher shape ('tab', 'rounded', 'pill').
+ * - `paidShape`: preserved paid-only shape for downgrade/upgrade restore.
+ *   When a paid tenant selects 'pill' then downgrades to Free, the active
+ *   shape becomes 'tab' (safe default), but 'pill' is stored in `paidShape`
+ *   so it can be restored on upgrade.
+ */
+export interface LauncherConfig {
+  shape: LauncherShape
+  /** Preserved paid-only shape for upgrade restore. */
+  paidShape?: LauncherShape
+}
+
 /** The versioned appearance configuration. */
 export interface AppearanceV2 {
   version: typeof APPEARANCE_V2_VERSION
@@ -92,6 +113,8 @@ export interface AppearanceV2 {
   mobile?: DeviceAppearance
   /** Global color theme (Phase 2 / Feature 2). Additive — null = V1 behavior. */
   colors?: ColorTheme
+  /** Global launcher style (Phase 2 / Feature 3). Additive — null = V1 behavior. */
+  launcher?: LauncherConfig
 }
 
 /** The canonical default appearance (V2). */
@@ -120,7 +143,7 @@ export const DEFAULT_APPEARANCE_V2: AppearanceV2 = {
  *   - Unknown version (version !== 1).
  *   - Fractional version.
  *   - desktop/mobile present but not plain objects.
- *   - Unexpected top-level keys (only version, desktop, mobile, colors are allowed).
+ *   - Unexpected top-level keys (only version, desktop, mobile, colors, launcher are allowed).
  *   - Unexpected keys inside desktop/mobile (only `positioning` is allowed).
  *   - positioning present but not a plain object / malformed.
  *   - Invalid anchor (not one of the 3 presets).
@@ -136,7 +159,7 @@ export const DEFAULT_APPEARANCE_V2: AppearanceV2 = {
  */
 
 /** Allowed top-level keys in an AppearanceV2 object. */
-const ALLOWED_TOP_LEVEL_KEYS = new Set(['version', 'desktop', 'mobile', 'colors'])
+const ALLOWED_TOP_LEVEL_KEYS = new Set(['version', 'desktop', 'mobile', 'colors', 'launcher'])
 
 /**
  * Check if a value is a plain JSON-compatible object — prototype is exactly
@@ -270,6 +293,24 @@ export function parseAppearanceV2(value: unknown): AppearanceV2 | null {
     if (colors === undefined) return null // malformed → fail closed
   }
 
+  // Parse launcher if present (read from descriptor to bypass Proxy get).
+  const launcherDesc = getOwnDataDescriptor(value, 'launcher')
+  let launcherValue: unknown = undefined
+  if (launcherDesc !== null) {
+    launcherValue = launcherDesc.value
+  } else {
+    try {
+      if (Object.prototype.hasOwnProperty.call(value, 'launcher')) return null
+    } catch {
+      return null
+    }
+  }
+  let launcher: LauncherConfig | null | undefined = undefined
+  if (launcherValue !== undefined) {
+    launcher = parseLauncherConfig(launcherValue)
+    if (launcher === undefined) return null // malformed → fail closed
+  }
+
   // Return a CANONICAL object (not the raw input reference) so callers
   // never hold an unvalidated object.
   const result: AppearanceV2 = {
@@ -279,6 +320,9 @@ export function parseAppearanceV2(value: unknown): AppearanceV2 | null {
   }
   if (colors !== null && colors !== undefined) {
     result.colors = colors
+  }
+  if (launcher !== null && launcher !== undefined) {
+    result.launcher = launcher
   }
   return result
 }
@@ -479,6 +523,58 @@ function parsePositioning(value: unknown): DevicePositioning | null | undefined 
   } else {
     try {
       if (Object.prototype.hasOwnProperty.call(value, 'offsetY')) return undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  return result
+}
+
+/** Allowed keys inside a launcher config object. */
+const ALLOWED_LAUNCHER_KEYS = new Set(['shape', 'paidShape'])
+
+/**
+ * Parse a launcher config object. Returns:
+ *   - undefined → malformed (caller fails closed).
+ *   - null → absent (launcher is null/undefined).
+ *   - LauncherConfig → valid (canonical object).
+ *
+ * Validates: shape is a valid launcher shape; paidShape (optional) is
+ * a valid launcher shape; no unexpected keys.
+ */
+function parseLauncherConfig(value: unknown): LauncherConfig | null | undefined {
+  if (value === null || value === undefined) return null
+  if (!isPlainObject(value)) return undefined // malformed
+  const keys = safeOwnKeys(value)
+  if (keys === null) return undefined
+  for (const key of keys) {
+    if (typeof key !== 'string' || !ALLOWED_LAUNCHER_KEYS.has(key)) return undefined
+  }
+
+  // shape — required, must be a valid launcher shape.
+  const shapeDesc = getOwnDataDescriptor(value, 'shape')
+  if (!shapeDesc) return undefined
+  const shapeValue = shapeDesc.value
+  if (!isValidLauncherShape(shapeValue)) return undefined
+
+  const result: LauncherConfig = { shape: shapeValue as LauncherShape }
+
+  // paidShape — optional, must be a valid PAID-ONLY launcher shape.
+  // BLOCKER 4: Reject Free shapes (tab/rounded) as paidShape — only
+  // paid-only shapes (pill) are semantically valid as preserved paid
+  // preferences. A Free shape stored as paidShape is contradictory.
+  const paidShapeDesc = getOwnDataDescriptor(value, 'paidShape')
+  if (paidShapeDesc !== null) {
+    const v = paidShapeDesc.value
+    if (v !== undefined && v !== null) {
+      if (!isValidLauncherShape(v)) return undefined
+      if (!isPaidOnlyLauncherShape(v as LauncherShape)) return undefined
+      result.paidShape = v as LauncherShape
+    }
+  } else {
+    try {
+      if (Object.prototype.hasOwnProperty.call(value, 'paidShape')) return undefined
     } catch {
       return undefined
     }

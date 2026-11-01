@@ -29,6 +29,17 @@ import {
   hasColorField,
   type ColorPatchData,
 } from '@/lib/widget/color-patch'
+import {
+  resolveEffectiveLauncher,
+  getStoredLauncherShape,
+  type StoredLauncherInput,
+} from '@/lib/widget/effective-launcher'
+import {
+  validateLauncherPatch,
+  mergeLauncherPatch,
+  hasLauncherField,
+  type LauncherPatchData,
+} from '@/lib/widget/launcher-patch'
 
 /**
  * GET /api/widget-config — dashboard widget configuration.
@@ -78,6 +89,14 @@ export async function GET() {
     const effectiveColors = resolveEffectiveColors(colorInput, entitlements)
     const storedColors = getStoredColorTheme(colorInput)
 
+    // V2 launcher: resolve effective + stored.
+    const launcherInput: StoredLauncherInput = {
+      launcherShape: stored?.launcherShape ?? null,
+      appearanceV2: stored?.appearanceV2,
+    }
+    const effectiveLauncher = resolveEffectiveLauncher(launcherInput, entitlements)
+    const storedLauncherShape = getStoredLauncherShape(launcherInput)
+
     return {
       stored,
       isLocked,
@@ -118,6 +137,19 @@ export async function GET() {
         })(),
         stored: storedColors,
       },
+      // V2 launcher: resolve effective + stored.
+      // BLOCKER 3: The dashboard effective must ALWAYS match the public widget
+      // config's effective launcher. The public config always exposes the
+      // effective launcher (from resolveEffectiveLauncher), so the dashboard
+      // must too — even for Free with only a V1 launcherShape and no V2
+      // selection. The old null-for-Free logic caused a preview mismatch.
+      launcher: {
+        entitlements: {
+          launcherSelection: entitlements?.launcherSelection ?? 'limited',
+        },
+        effective: effectiveLauncher,
+        stored: storedLauncherShape,
+      },
     } as const
   })
   if (!result) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
@@ -127,6 +159,7 @@ export async function GET() {
     isLocked: result.result.isLocked,
     positioning: result.result.positioning,
     colors: result.result.colors,
+    launcher: result.result.launcher,
   })
 }
 
@@ -185,6 +218,17 @@ const COLOR_ERROR_STATUS: Record<string, number> = {
   colors_no_fields: 400,
 }
 
+/** Launcher-specific error codes → HTTP status mapping. */
+const LAUNCHER_ERROR_STATUS: Record<string, number> = {
+  launcher_not_authorized: 403,
+  launcher_not_object: 400,
+  launcher_shape_missing: 400,
+  launcher_shape_invalid: 400,
+  launcher_shape_not_allowed: 403,
+  launcher_unexpected_key: 400,
+  launcher_no_fields: 400,
+}
+
 /**
  * PATCH /api/widget-config — update widget customization.
  *
@@ -234,12 +278,12 @@ export async function PATCH(req: NextRequest) {
     // ---- Determine the request type ----
     const hasPositioning = hasPositioningField(body)
     const hasColors = hasColorField(body)
+    const hasLauncher = hasLauncherField(body)
     const hasOtherFields = hasOtherCustomizationFields(body)
 
     // Reject unrecognized top-level fields when the request contains
-    // positioning or colors (isolated contracts). Prevents bypass via
-    // unknown keys without breaking existing customization PATCHes.
-    if ((hasPositioning || hasColors) && hasUnrecognizedFields(body)) {
+    // positioning, colors, or launcher (isolated contracts).
+    if ((hasPositioning || hasColors || hasLauncher) && hasUnrecognizedFields(body)) {
       return { badRequest: true as const, code: 'unrecognized_field' }
     }
 
@@ -267,6 +311,16 @@ export async function PATCH(req: NextRequest) {
         return { colorError: true as const, code: colorResult.code }
       }
       colorPatch = colorResult.data
+    }
+
+    // ---- Validate launcher (if present) ----
+    let launcherPatch: LauncherPatchData | null = null
+    if (hasLauncher) {
+      const launcherResult = validateLauncherPatch({ launcher: body.launcher }, entitlements)
+      if (!launcherResult.ok) {
+        return { launcherError: true as const, code: launcherResult.code }
+      }
+      launcherPatch = launcherResult.data
     }
 
     // ---- Validate + collect other customization fields (paid only) ----
@@ -368,6 +422,20 @@ export async function PATCH(req: NextRequest) {
       data.appearanceV2 = mergedColors as unknown as string // Prisma Json field
     }
 
+    // ---- Apply launcher patch (if validated) ----
+    if (launcherPatch) {
+      let baseAppearanceV2: unknown = data.appearanceV2 ?? undefined
+      if (baseAppearanceV2 === undefined) {
+        const existing = await db.widgetConfig.findUnique({
+          where: { tenantId: tid },
+          select: { appearanceV2: true },
+        })
+        baseAppearanceV2 = existing?.appearanceV2
+      }
+      const mergedLauncher = mergeLauncherPatch(baseAppearanceV2, launcherPatch, entitlements)
+      data.appearanceV2 = mergedLauncher as unknown as string // Prisma Json field
+    }
+
     if (Object.keys(data).length === 0) {
       return { badRequest: true as const, code: 'no_fields' }
     }
@@ -394,6 +462,10 @@ export async function PATCH(req: NextRequest) {
   }
   if ('colorError' in r) {
     const status = COLOR_ERROR_STATUS[r.code as string] ?? 400
+    return NextResponse.json({ error: r.code }, { status })
+  }
+  if ('launcherError' in r) {
+    const status = LAUNCHER_ERROR_STATUS[r.code as string] ?? 400
     return NextResponse.json({ error: r.code }, { status })
   }
   if ('badRequest' in r) return NextResponse.json({ error: r.code }, { status: 400 })

@@ -491,7 +491,9 @@ export class SukhanWidget implements SukhanInstance {
     this.root = root
     this.rootEl = root
 
-    const launcher = el('button', 'sk-launcher ' + shapeClass(config.launcherShape)) as HTMLButtonElement
+    // V2 launcher: use config.launcher.shape when present, fall back to V1.
+    const effectiveShape = config.launcher?.shape || config.launcherShape || 'tab'
+    const launcher = el('button', 'sk-launcher ' + shapeClass(effectiveShape)) as HTMLButtonElement
     launcher.setAttribute('aria-label', this.state.locale === 'fa' ? 'گفت‌وگو' : 'Open chat')
     css(launcher, {
       display: 'flex',

@@ -218,12 +218,14 @@ export function mergeColorPatch(
     }
   }
 
-  // Preserve existing desktop/mobile (positioning etc.) — only update colors.
+  // Preserve existing desktop/mobile (positioning etc.) + launcher.
+  // BLOCKER 1: Preserve launcher + any other existing V2 fields.
   return {
     version: 1,
     desktop: { ...(base.desktop ?? {}) },
     mobile: { ...(base.mobile ?? {}) },
     colors: mergedColors,
+    ...(base.launcher ? { launcher: base.launcher } : {}),
   }
 }
 

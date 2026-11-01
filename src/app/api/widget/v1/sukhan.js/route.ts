@@ -328,7 +328,9 @@ ${POSITIONING_FN_SOURCE}
     // Position application is deferred to after the panel + launcher are
     // appended (the panel side cannot be set before the panel DOM element exists).
 
-    launcher = el('button', 'sk-launcher ' + shapeClass(config.launcherShape));
+    // V2 launcher: use config.launcher.shape when present, fall back to V1.
+    var effectiveShape = (config.launcher && config.launcher.shape) || config.launcherShape || 'tab';
+    launcher = el('button', 'sk-launcher ' + shapeClass(effectiveShape));
     launcher.setAttribute('aria-label', state.locale === 'fa' ? 'گفت‌وگو' : 'Open chat');
     css(launcher, {
       display: 'flex', alignItems: 'center', justifyContent: 'center',
