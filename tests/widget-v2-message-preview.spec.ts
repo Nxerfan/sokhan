@@ -110,6 +110,17 @@ async function customer(ctx: BrowserContext, slug: string, surface: Surface) {
   const site = await serve(html, surface === 'npm')
   const page = await ctx.newPage()
   try {
+    // Message Preview acceptance requires an AUTHORIZED visitor session.
+    // The launcher becomes visible before asynchronous /contact bootstrap
+    // finishes. Register before navigation/init to catch every runtime;
+    // otherwise an early send can legitimately fail 401 invalid_token,
+    // which is an unrelated bootstrap precondition, not a preview failure.
+    const ready = page.waitForResponse(res =>
+      res.request().method() === 'POST' &&
+      res.url().includes('/api/widget/' + slug + '/contact') &&
+      res.status() === 200,
+      { timeout: 20_000 },
+    )
     await page.goto(site.url + '/customer.html', { waitUntil: 'domcontentloaded' })
     if (surface === 'npm') {
       await page.evaluate(async (args) => {
@@ -117,6 +128,8 @@ async function customer(ctx: BrowserContext, slug: string, surface: Surface) {
         widget.initSukhan({ apiKey: args.slug, apiUrl: args.origin })
       }, { slug, origin: BASE })
     }
+    const contactResponse = await ready
+    await contactResponse.finished()
     await expect(page.locator('.sk-launcher')).toBeVisible({ timeout: 15_000 })
     return { page, close: async () => {
       try { await page.close() } finally { await site.close() }
