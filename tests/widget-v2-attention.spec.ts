@@ -366,6 +366,50 @@ test.describe('Widget V2 Attention Animations — PR #19 only', () => {
     }
   })
 
+
+  test('Glow preview uses the authorized effective V2 accent, not hardcoded gold', async ({ browser }) => {
+    test.setTimeout(120_000)
+    const ctx = await browser.newContext()
+    try {
+      const page = await ctx.newPage()
+      const slug = await signup(page, 'glow-effective-accent')
+      await setPlan(page, 'pro')
+      // Emerald has accent #10B981 rather than the Sukhan gold #E09A2B.
+      // Choose it through the real API to prove the dashboard's Glow
+      // derives from effective V2 Colors instead of a hardcoded preview.
+      await patch(page, { colors: { mode: 'preset', presetId: 'emerald' } })
+      await patch(page, { attention: { animation: 'glow' } })
+      const config = await publicConfig(page, slug)
+      expect(config.colors.tokens.accent).toBe('#10B981')
+      expect(config.accentColor).toBe('#10B981')
+      expect(config.attention).toEqual({ animation: 'glow' })
+
+      await page.reload()
+      await openAttention(page)
+      const preview = page.getByTestId('attention-preview-button')
+      await expect(preview).toHaveClass(/sk-attention-glow/)
+      const shadow = await preview.evaluate((button) => {
+        // Probe an actual running CSS animation at its 50% keyframe;
+        // no fake styles or manually inserted preview DOM.
+        const animation = button.getAnimations().find(a =>
+          (a as CSSAnimation).animationName === 'sk-attention-glow'
+        )
+        if (!animation) throw new Error('Glow preview CSS animation missing')
+        const duration = animation.effect?.getComputedTiming().duration
+        if (typeof duration !== 'number' || duration <= 0) {
+          throw new Error('Invalid Glow preview CSS duration')
+        }
+        animation.pause()
+        animation.currentTime = duration / 2
+        return getComputedStyle(button).boxShadow
+      })
+      expect(shadow).toMatch(/rgba?\(16,\s*185,\s*129(?:,|\s*\/)/)
+      expect(shadow).not.toMatch(/rgba?\(224,\s*154,\s*43(?:,|\s*\/)/)
+    } finally {
+      await ctx.close()
+    }
+  })
+
   test('Reduce Motion disables paid animation on real slug and NPM renderers', async ({ browser }) => {
     const ownerCtx = await browser.newContext()
     try {
