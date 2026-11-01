@@ -136,18 +136,24 @@ export function WidgetLauncherPanel({
   const [saving, setSaving] = useState(false)
 
   // Entitlement-aware draft initialization. Used by both useEffect (initial
-  // load) and discard() (reset). When the plan is NOT entitled to a paid
-  // shape (e.g., Free after downgrade from Pro with stored 'pill'), do NOT
-  // initialize the draft from the stored paid shape — the preview must
-  // reflect the authorized appearance. The stored paid shape remains for
-  // upgrade restore (preserved in appearanceV2.launcher.paidShape).
+  // load) and discard() (reset).
+  // - When the plan is 'all' (Pro): use the EFFECTIVE shape (which includes
+  //   paidShape restoration after upgrade). The stored `shape` might be a
+  //   Free shape from the downgrade period — the effective shape reflects
+  //   the user's actual intended selection.
+  // - When the plan is 'limited' (Free): use the stored shape, but only if
+  //   it's an allowed Free shape. Paid-only shapes ('pill') are not loaded.
   const buildAuthorizedDraft = useCallback(
     (launcherData: LauncherData | null): LauncherShape | null => {
       if (!launcherData || !launcherData.stored) return null
       const ent = launcherData.entitlements
       const canAll = ent.launcherSelection === 'all'
-      // Free with stored paid-only shape ('pill') → do NOT load into draft.
-      if (!canAll && !FREE_LAUNCHER_SHAPES.includes(launcherData.stored)) {
+      // Pro: use effective shape (includes paidShape restoration).
+      if (canAll) {
+        return launcherData.effective?.shape ?? launcherData.stored
+      }
+      // Free with stored paid-only shape → do NOT load into draft.
+      if (!FREE_LAUNCHER_SHAPES.includes(launcherData.stored)) {
         return null
       }
       return launcherData.stored
