@@ -35,7 +35,7 @@ describe('launcher entitlements and V1 compatibility', () => {
     expect(FREE?.launcherSelection).toBe('limited')
     expect(PRO?.launcherSelection).toBe('all')
     expect(INVALID).toBeNull()
-    expect(resolveEffectiveLauncher(original, INVALID).shape).toBe('tab')
+    expect(resolveEffectiveLauncher({ appearanceV2: original }, INVALID).shape).toBe('tab')
   })
   test('V1 never-adopted: paid pill, Free rounded, Free pill locked', () => {
     expect(resolveEffectiveLauncher({ launcherShape: 'pill' }, PRO).shape).toBe('pill')
@@ -92,13 +92,13 @@ describe('true-patch invariants across V2 features', () => {
     expect(out.desktop).toEqual(original.desktop)
   })
   test('subsequent positioning updates must NOT remove launcher or colors', () => {
-    const out = mergePositioningPatch(original, { desktop: { anchor: 'bottom-end', hasFields: true } }, 'bottom-end')
+    const out = mergePositioningPatch(original, { desktop: { anchor: 'bottom-end', hasFields: true }, hasAny: true }, 'bottom-end')
     expect(out.launcher).toEqual(original.launcher)
     expect(out.colors).toEqual(original.colors)
     expect(out.mobile).toEqual(original.mobile)
   })
   test('combined patch order must not destroy a neighboring V2 feature', () => {
-    const pos = mergePositioningPatch(original, { mobile: { anchor: 'bottom-start', hasFields: true } }, 'bottom-end')
+    const pos = mergePositioningPatch(original, { mobile: { anchor: 'bottom-start', hasFields: true }, hasAny: true }, 'bottom-end')
     const color = mergeColorPatch(pos, { theme: { mode: 'preset', presetId: 'sunset' } })
     const launch = mergeLauncherPatch(color, { shape: 'rounded' }, PRO)
     expect(launch.colors?.presetId).toBe('sunset')
