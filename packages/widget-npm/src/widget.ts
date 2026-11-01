@@ -314,6 +314,8 @@ interface WidgetInternalState {
   quickRepliesItems: string[]
   /** Quick replies DOM container. */
   quickRepliesEl: HTMLElement | null
+  /** Prevents duplicate quick-reply sends while a POST is in-flight. */
+  quickRepliesInFlight: boolean
   /** The current panel side (left/right/center) from the geometry function. */
   panelSide: 'left' | 'right' | 'center'
   /** Resize listener reference (for cleanup on destroy). */
@@ -395,6 +397,7 @@ export class SukhanWidget implements SukhanInstance {
     seenMessageIds: [],
     quickRepliesItems: [],
     quickRepliesEl: null,
+    quickRepliesInFlight: false,
     panelSide: 'right',
     resizeHandler: null,
   }
@@ -830,8 +833,11 @@ export class SukhanWidget implements SukhanInstance {
       })
       qrBtn.setAttribute('type', 'button')
       qrBtn.onclick = () => {
+        if (this.state.quickRepliesInFlight) return
+        this.state.quickRepliesInFlight = true
         this.inputEl.value = qrText
         this.sendMessage()
+        this.updateQuickReplies()
       }
       quickRepliesEl.appendChild(qrBtn)
     }
@@ -1759,25 +1765,34 @@ export class SukhanWidget implements SukhanInstance {
   // suggestions are permanently hidden.
   private updateQuickReplies(): void {
     if (!this.state.quickRepliesEl) return
-    const hasVisitorMsg = (this.state.messages || []).some(
-      (m) => m?.senderType === 'contact',
+    // Only count server-persisted visitor messages (real id, not __local_).
+    // Optimistic placeholders (pending/failed) do NOT permanently hide
+    // suggestions — the buttons remain available until the server confirms.
+    const hasPersistedVisitorMsg = (this.state.messages || []).some(
+      (m) =>
+        m?.senderType === 'contact' &&
+        !(m.id && String(m.id).indexOf('__local_') === 0),
     )
-    // Identity readiness gate: Quick Replies visible ONLY when visitor has
-    // a valid token (identity bootstrap completed). The token is cleared on
-    // authorization recovery/revocation/policy-change. conversationId is NOT
-    // required — it may be null before the first message.
     const authorized = !!this.state.token
     const show =
       this.state.open &&
       this.state.quickRepliesItems.length > 0 &&
-      !hasVisitorMsg &&
+      !hasPersistedVisitorMsg &&
       authorized
     this.state.quickRepliesEl.style.display = show ? 'flex' : 'none'
-    // After the first visitor message, permanently remove the buttons from
-    // the DOM (not just hide) — the test contract expects toHaveCount(0).
-    if (hasVisitorMsg && this.state.quickRepliesEl.childNodes.length > 0) {
+    if (hasPersistedVisitorMsg && this.state.quickRepliesEl.childNodes.length > 0) {
       while (this.state.quickRepliesEl.firstChild) {
         this.state.quickRepliesEl.removeChild(this.state.quickRepliesEl.firstChild)
+      }
+    }
+    // Disable buttons while a send is in-flight (prevents duplicate sends).
+    if (show) {
+      const btns = this.state.quickRepliesEl.querySelectorAll('.sk-quick-reply')
+      for (let bi = 0; bi < btns.length; bi++) {
+        const btn = btns[bi] as HTMLButtonElement
+        btn.disabled = this.state.quickRepliesInFlight
+        btn.style.opacity = this.state.quickRepliesInFlight ? '0.5' : '1'
+        btn.style.pointerEvents = this.state.quickRepliesInFlight ? 'none' : 'auto'
       }
     }
   }
@@ -2132,6 +2147,7 @@ export class SukhanWidget implements SukhanInstance {
       .sendMessage(this.state.token, text)
       .then((data) => {
         if (this.destroyed) return // guard: destroy during async send
+        this.state.quickRepliesInFlight = false
         if (data.message) {
           // Central merge — POST response dedups against any socket
           // delivery of the same message id.
@@ -2153,6 +2169,8 @@ export class SukhanWidget implements SukhanInstance {
         // Never silently lose the typed message — restore it so the user
         // can retry. (Explicit retry remains safer than auto-resend.)
         if (this.inputEl) this.inputEl.value = text
+        this.state.quickRepliesInFlight = false
+        this.updateQuickReplies() // re-enable buttons after failure
         if (e instanceof SukhanApiError) {
           // Policy send errors → re-fetch config + trigger the correct
           // identity-upgrade flow. Do NOT auto-resend the message.

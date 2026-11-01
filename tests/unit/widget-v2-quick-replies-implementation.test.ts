@@ -29,6 +29,7 @@ import {
   hasCaseInsensitiveDuplicate,
   isAdvancedQuickRepliesPlan,
   shouldShowQuickReplies,
+  shouldDisableQuickReplies,
 } from '../../src/lib/widget/quick-replies-types'
 import { mergeColorPatch } from '../../src/lib/widget/color-patch'
 import { mergeLauncherPatch } from '../../src/lib/widget/launcher-patch'
@@ -462,5 +463,57 @@ describe('Developer — identity-readiness visibility policy (shouldShowQuickRep
     expect(shouldShowQuickReplies({
       panelOpen: true, authorized: true, itemsCount: 2, hasVisitorMessage: true,
     })).toBe(false)
+  })
+})
+
+describe('Developer — pending/failed/persisted message distinction (shouldDisableQuickReplies)', () => {
+  test('no pending message + no in-flight → buttons enabled', () => {
+    expect(shouldDisableQuickReplies({ hasPendingVisitorMessage: false, inFlight: false })).toBe(false)
+  })
+
+  test('pending optimistic message → buttons disabled (not removed)', () => {
+    expect(shouldDisableQuickReplies({ hasPendingVisitorMessage: true, inFlight: false })).toBe(true)
+  })
+
+  test('in-flight flag set → buttons disabled', () => {
+    expect(shouldDisableQuickReplies({ hasPendingVisitorMessage: false, inFlight: true })).toBe(true)
+  })
+
+  test('failed message (not pending, not in-flight) → buttons re-enabled', () => {
+    expect(shouldDisableQuickReplies({ hasPendingVisitorMessage: false, inFlight: false })).toBe(false)
+  })
+
+  test('full lifecycle: idle → pending → failed → idle → pending → persisted', () => {
+    // 1. Idle: no pending, no in-flight → enabled.
+    expect(shouldDisableQuickReplies({ hasPendingVisitorMessage: false, inFlight: false })).toBe(false)
+    // 2. Pending: optimistic message created → disabled.
+    expect(shouldDisableQuickReplies({ hasPendingVisitorMessage: true, inFlight: false })).toBe(true)
+    // 3. Failed: optimistic status changes to 'failed' → re-enabled.
+    expect(shouldDisableQuickReplies({ hasPendingVisitorMessage: false, inFlight: false })).toBe(false)
+    // 4. Retry: optimistic status back to 'pending' → disabled.
+    expect(shouldDisableQuickReplies({ hasPendingVisitorMessage: true, inFlight: false })).toBe(true)
+    // 5. Success: persisted message replaces optimistic → buttons removed
+    //    (shouldShowQuickReplies returns false; disable is moot).
+    expect(shouldShowQuickReplies({
+      panelOpen: true, authorized: true, itemsCount: 2, hasVisitorMessage: true,
+    })).toBe(false)
+  })
+
+  test('pending message does NOT count as persisted (buttons remain visible)', () => {
+    // A pending optimistic message should NOT set hasVisitorMessage=true.
+    // The runtime distinguishes: __local_ ids = optimistic, real ids = persisted.
+    // So shouldShowQuickReplies with hasVisitorMessage=false (pending only):
+    expect(shouldShowQuickReplies({
+      panelOpen: true, authorized: true, itemsCount: 2, hasVisitorMessage: false,
+    })).toBe(true) // buttons remain visible
+    // But shouldDisableQuickReplies with pending=true:
+    expect(shouldDisableQuickReplies({ hasPendingVisitorMessage: true, inFlight: false })).toBe(true) // disabled
+  })
+
+  test('failed message does NOT count as persisted (buttons remain visible + enabled)', () => {
+    expect(shouldShowQuickReplies({
+      panelOpen: true, authorized: true, itemsCount: 2, hasVisitorMessage: false,
+    })).toBe(true) // visible
+    expect(shouldDisableQuickReplies({ hasPendingVisitorMessage: false, inFlight: false })).toBe(false) // enabled
   })
 })

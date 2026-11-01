@@ -137,6 +137,7 @@ ${POSITIONING_FN_SOURCE}
     // V2 quick replies state.
     quickRepliesItems: [],  // effective items from public config
     quickRepliesEl: null,   // .sk-quick-replies DOM element
+    quickRepliesInFlight: false, // prevents duplicate sends
   };
 
   // ============================================================
@@ -536,8 +537,11 @@ ${POSITIONING_FN_SOURCE}
       qrBtn.setAttribute('type', 'button');
       qrBtn.onclick = (function(text) {
         return function() {
+          if (state.quickRepliesInFlight) return;
+          state.quickRepliesInFlight = true;
           inputEl.value = text;
           sendMessage();
+          updateQuickReplies();
         };
       })(qrItems[qi]);
       quickRepliesEl.appendChild(qrBtn);
@@ -626,21 +630,30 @@ ${POSITIONING_FN_SOURCE}
   // suggestions are permanently hidden.
   function updateQuickReplies(){
     if (!state.quickRepliesEl) return;
-    var hasVisitorMsg = false;
+    var hasPersistedVisitorMsg = false;
     if (state.messages && state.messages.length > 0) {
       for (var i = 0; i < state.messages.length; i++) {
-        if (state.messages[i] && state.messages[i].senderType === 'contact') {
-          hasVisitorMsg = true; break;
-        }
+        var m = state.messages[i];
+        if (!m || m.senderType !== 'contact') continue;
+        // Only count server-persisted messages (real id, not __local_).
+        if (m.id && String(m.id).indexOf('__local_') === 0) continue;
+        hasPersistedVisitorMsg = true; break;
       }
     }
-    // Identity readiness gate: Quick Replies visible ONLY when visitor has
-    // a valid token AND active conversation (identity bootstrap completed).
     var authorized = !!state.token;
-    var show = state.open && state.quickRepliesItems.length > 0 && !hasVisitorMsg && authorized;
+    var show = state.open && state.quickRepliesItems.length > 0 && !hasPersistedVisitorMsg && authorized;
     state.quickRepliesEl.style.display = show ? 'flex' : 'none';
-    if (hasVisitorMsg && state.quickRepliesEl.childNodes.length > 0) {
+    if (hasPersistedVisitorMsg && state.quickRepliesEl.childNodes.length > 0) {
       while (state.quickRepliesEl.firstChild) state.quickRepliesEl.removeChild(state.quickRepliesEl.firstChild);
+    }
+    // Disable buttons while a send is in-flight (prevents duplicate sends).
+    if (show) {
+      var btns = state.quickRepliesEl.querySelectorAll('.sk-quick-reply');
+      for (var bi = 0; bi < btns.length; bi++) {
+        btns[bi].disabled = state.quickRepliesInFlight;
+        btns[bi].style.opacity = state.quickRepliesInFlight ? '0.5' : '1';
+        btns[bi].style.pointerEvents = state.quickRepliesInFlight ? 'none' : 'auto';
+      }
     }
   }
 
@@ -877,6 +890,7 @@ ${POSITIONING_FN_SOURCE}
     })
     .then(function(data){
       if (!data) return;
+      state.quickRepliesInFlight = false;
       if (data.message) {
         state.messages.push(data.message);
         renderMessages();
@@ -892,6 +906,8 @@ ${POSITIONING_FN_SOURCE}
     })
     .catch(function(e){
       if (inputEl) inputEl.value = text; // never silently lose the typed message
+      state.quickRepliesInFlight = false;
+      updateQuickReplies(); // re-enable buttons after failure
       console.error('[sukhan] send failed', e);
     });
   }

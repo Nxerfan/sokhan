@@ -100,3 +100,17 @@ export function shouldShowQuickReplies(opts: {
     !opts.hasVisitorMessage
   )
 }
+
+/**
+ * Whether the Quick Reply buttons should be DISABLED (not removed) while a
+ * message send is in-flight. Returns true when there is a pending optimistic
+ * visitor message or an explicit in-flight flag. The buttons remain visible
+ * but non-interactive to prevent duplicate sends. On failure, the pending
+ * state clears and the buttons are re-enabled.
+ */
+export function shouldDisableQuickReplies(opts: {
+  hasPendingVisitorMessage: boolean
+  inFlight: boolean
+}): boolean {
+  return opts.hasPendingVisitorMessage || opts.inFlight
+}

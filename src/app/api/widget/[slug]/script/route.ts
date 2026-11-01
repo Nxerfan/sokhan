@@ -854,33 +854,47 @@ ${POSITIONING_FN_SOURCE}
   }
 
   // V2 quick replies: show suggestion buttons only when the panel is open,
-  // the visitor is authorized, and NO visitor message has been persisted yet
-  // (including from history on reload). After the first visitor message,
-  // suggestions are permanently hidden.
+  // the visitor is authorized, and NO server-persisted visitor message exists.
+  // Optimistic (pending/failed) messages do NOT count as persisted — the
+  // suggestions remain available until the server confirms the first message.
   function updateQuickReplies(){
     if (!state.quickRepliesEl) return;
-    var hasVisitorMsg = false;
+    var hasPersistedVisitorMsg = false;
+    var hasPendingVisitorMsg = false;
     if (state.messages && state.messages.length > 0) {
       for (var i = 0; i < state.messages.length; i++) {
-        if (state.messages[i] && state.messages[i].senderType === 'contact') {
-          hasVisitorMsg = true; break;
+        var m = state.messages[i];
+        if (!m || m.senderType !== 'contact') continue;
+        // Distinguish optimistic placeholders (__local_ ids) from
+        // server-persisted messages (real ids). Only persisted messages
+        // permanently hide the suggestions.
+        if (m.id && String(m.id).indexOf('__local_') === 0) {
+          // Optimistic: pending or failed. Track pending for button disabling.
+          if (m._optimisticStatus === 'pending') hasPendingVisitorMsg = true;
+        } else {
+          // Server-persisted (real id) or history message.
+          hasPersistedVisitorMsg = true; break;
         }
       }
     }
     // Identity readiness gate: Quick Replies are visible ONLY when the
-    // visitor has a valid token — i.e., the /contact identity bootstrap has
-    // completed successfully. The token is cleared by __sk_clearIdentityState()
-    // on authorization recovery, revocation, and access-policy changes, so
-    // !!state.token reliably tracks the authorized state across all transitions.
-    // NOTE: conversationId is NOT required — it may be null before the first
-    // message (the conversation is created on the first send).
+    // visitor has a valid token (identity bootstrap completed).
     var authorized = !!state.token;
-    var show = state.open && state.quickRepliesItems.length > 0 && !hasVisitorMsg && authorized;
+    var show = state.open && state.quickRepliesItems.length > 0 && !hasPersistedVisitorMsg && authorized;
     state.quickRepliesEl.style.display = show ? 'flex' : 'none';
-    // After the first visitor message, permanently remove the buttons from
-    // the DOM (not just hide) — the test contract expects toHaveCount(0).
-    if (hasVisitorMsg && state.quickRepliesEl.childNodes.length > 0) {
+    // After the first PERSISTED visitor message, permanently remove buttons.
+    if (hasPersistedVisitorMsg && state.quickRepliesEl.childNodes.length > 0) {
       while (state.quickRepliesEl.firstChild) state.quickRepliesEl.removeChild(state.quickRepliesEl.firstChild);
+    }
+    // While a send is in-flight (pending optimistic), disable buttons to
+    // prevent duplicate sends. Re-enable on failure (when pending → failed).
+    if (show) {
+      var btns = state.quickRepliesEl.querySelectorAll('.sk-quick-reply');
+      for (var bi = 0; bi < btns.length; bi++) {
+        btns[bi].disabled = hasPendingVisitorMsg;
+        btns[bi].style.opacity = hasPendingVisitorMsg ? '0.5' : '1';
+        btns[bi].style.pointerEvents = hasPendingVisitorMsg ? 'none' : 'auto';
+      }
     }
   }
 
