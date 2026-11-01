@@ -1182,29 +1182,30 @@ test.describe('Widget V2 Colors — browser regression', () => {
       return getComputedStyle(header).backgroundColor
     })
     expect(previewHeaderBg).not.toBeNull()
-    // Must NOT be the custom headerBg (#5B0E2D = rgb(91, 14, 45)).
+    // Compare with the actual public effective theme, not merely "not custom".
     expect(previewHeaderBg).not.toBe(hexToRgb(CUSTOM_TOKENS.headerBg))
+    const freeConfigRes = await page.request.get(`${SUKHAN_ORIGIN}/api/widget/${slug}/config`)
+    expect(freeConfigRes.ok()).toBe(true)
+    const freeConfig = await freeConfigRes.json()
+    expect(freeConfig.colors.mode).toBe('preset')
+    expect(freeConfig.colors.presetId).toBe('sukhan')
+    expect(previewHeaderBg).toBe(hexToRgb(freeConfig.colors.tokens.headerBg))
 
-    // 5. Click Discard and confirm the preview remains authorized.
-    //    Discard must NOT restore unauthorized custom tokens.
+    // 5. Fresh Free configuration is NOT dirty. Make a real unsaved edit,
+    // exercise Discard, and confirm it resets to the authorized effective theme.
     const discardBtn = page.getByTestId('colors-discard')
-    // Discard may or may not be enabled (dirty state should be false).
-    // If it's enabled, click it and verify the preview stays authorized.
-    const discardVisible = await discardBtn.isVisible().catch(() => false)
-    if (discardVisible) {
-      const discardEnabled = await discardBtn.isEnabled()
-      if (discardEnabled) {
-        await discardBtn.click()
-        await page.waitForTimeout(500)
-        // Preview must still NOT show custom colors.
-        const postDiscardHeaderBg = await page.evaluate(() => {
-          const header = document.querySelector('[data-testid="colors-preview-header"]') as HTMLElement
-          if (!header) return null
-          return getComputedStyle(header).backgroundColor
-        })
-        expect(postDiscardHeaderBg).not.toBe(hexToRgb(CUSTOM_TOKENS.headerBg))
-      }
-    }
+    await expect(discardBtn).toBeDisabled()
+    await page.getByTestId('colors-palette-emerald').click()
+    await expect(page.getByTestId('colors-palette-emerald')).toHaveAttribute('aria-pressed', 'true')
+    await expect(discardBtn).toBeEnabled()
+    await discardBtn.click()
+    await expect(discardBtn).toBeDisabled()
+    await expect(page.getByTestId('colors-palette-sukhan')).toHaveAttribute('aria-pressed', 'true')
+    const postDiscardHeaderBg = await page.evaluate(() => {
+      const header = document.querySelector('[data-testid="colors-preview-header"]') as HTMLElement
+      return header ? getComputedStyle(header).backgroundColor : null
+    })
+    expect(postDiscardHeaderBg).toBe(hexToRgb(freeConfig.colors.tokens.headerBg))
 
     // 6. Verify the 10 presets remain accessible.
     const paletteCount = await page.locator('[data-testid^="colors-palette-"]').count()
@@ -1238,6 +1239,20 @@ test.describe('Widget V2 Colors — browser regression', () => {
     // The custom tokens should match the original saved values.
     expect(cfgData.colors.stored.custom.accent).toBe(CUSTOM_TOKENS.accent)
     expect(cfgData.colors.stored.custom.headerBg).toBe(CUSTOM_TOKENS.headerBg)
+
+    // 11. Verify actual user-facing restore, not just retained DB fields.
+    await nav.getByRole('button', { name: /^ویجت$|^Widget$/ }).click()
+    await page.getByRole('button', { name: /^سفارشی‌سازی$|^Customization$/ }).click()
+    await expect(page.getByTestId('colors-panel')).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByTestId('colors-palette-emerald')).toHaveAttribute('aria-pressed', 'true')
+    await page.getByTestId('colors-custom-switch').click()
+    await expect(page.getByTestId('colors-token-accent-input')).toHaveValue(CUSTOM_TOKENS.accent)
+    await expect(page.getByTestId('colors-token-headerBg-input')).toHaveValue(CUSTOM_TOKENS.headerBg)
+    const restoredHeaderBg = await page.evaluate(() => {
+      const header = document.querySelector('[data-testid="colors-preview-header"]') as HTMLElement
+      return header ? getComputedStyle(header).backgroundColor : null
+    })
+    expect(restoredHeaderBg).toBe(hexToRgb(CUSTOM_TOKENS.headerBg))
 
     await ctx.close()
   })
