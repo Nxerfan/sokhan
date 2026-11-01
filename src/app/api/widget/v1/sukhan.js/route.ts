@@ -636,6 +636,9 @@ ${POSITIONING_FN_SOURCE}
     }
     var show = state.open && state.quickRepliesItems.length > 0 && !hasVisitorMsg;
     state.quickRepliesEl.style.display = show ? 'flex' : 'none';
+    if (hasVisitorMsg && state.quickRepliesEl.childNodes.length > 0) {
+      while (state.quickRepliesEl.firstChild) state.quickRepliesEl.removeChild(state.quickRepliesEl.firstChild);
+    }
   }
 
   // ---- V2 Message Preview helpers ----

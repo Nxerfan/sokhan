@@ -869,6 +869,11 @@ ${POSITIONING_FN_SOURCE}
     }
     var show = state.open && state.quickRepliesItems.length > 0 && !hasVisitorMsg;
     state.quickRepliesEl.style.display = show ? 'flex' : 'none';
+    // After the first visitor message, permanently remove the buttons from
+    // the DOM (not just hide) — the test contract expects toHaveCount(0).
+    if (hasVisitorMsg && state.quickRepliesEl.childNodes.length > 0) {
+      while (state.quickRepliesEl.firstChild) state.quickRepliesEl.removeChild(state.quickRepliesEl.firstChild);
+    }
   }
 
   // ---- V2 Message Preview helpers ----

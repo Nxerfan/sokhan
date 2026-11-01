@@ -1759,6 +1759,13 @@ export class SukhanWidget implements SukhanInstance {
       this.state.quickRepliesItems.length > 0 &&
       !hasVisitorMsg
     this.state.quickRepliesEl.style.display = show ? 'flex' : 'none'
+    // After the first visitor message, permanently remove the buttons from
+    // the DOM (not just hide) — the test contract expects toHaveCount(0).
+    if (hasVisitorMsg && this.state.quickRepliesEl.childNodes.length > 0) {
+      while (this.state.quickRepliesEl.firstChild) {
+        this.state.quickRepliesEl.removeChild(this.state.quickRepliesEl.firstChild)
+      }
+    }
   }
 
   // ---- V2 Message Preview helpers ----
