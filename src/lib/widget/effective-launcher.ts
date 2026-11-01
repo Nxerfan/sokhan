@@ -16,26 +16,26 @@
 
 import { parseAppearanceV2 } from './appearance-v2'
 import type { WidgetEntitlements } from '../payments/widget-entitlements'
+import {
+  LAUNCHER_SHAPES,
+  FREE_LAUNCHER_SHAPES,
+  PAID_ONLY_LAUNCHER_SHAPES,
+  DEFAULT_LAUNCHER_SHAPE,
+  isValidLauncherShape,
+  isPaidOnlyLauncherShape,
+  type LauncherShape,
+} from './launcher-types'
 
-/** All supported launcher shapes. */
-export const LAUNCHER_SHAPES = ['tab', 'rounded', 'pill'] as const
-export type LauncherShape = (typeof LAUNCHER_SHAPES)[number]
-
-/** Shapes available to Free (launcherSelection='limited'). */
-export const FREE_LAUNCHER_SHAPES: readonly LauncherShape[] = ['tab', 'rounded']
-
-/** Shapes that are paid-only (not available on Free). */
-export const PAID_ONLY_LAUNCHER_SHAPES: readonly LauncherShape[] = ['pill']
-
-/**
- * Check if a shape is a paid-only shape (not available on Free).
- */
-export function isPaidOnlyLauncherShape(shape: LauncherShape): boolean {
-  return PAID_ONLY_LAUNCHER_SHAPES.includes(shape)
+// Re-export for backward compatibility (other modules import from here).
+export {
+  LAUNCHER_SHAPES,
+  FREE_LAUNCHER_SHAPES,
+  PAID_ONLY_LAUNCHER_SHAPES,
+  DEFAULT_LAUNCHER_SHAPE,
+  isValidLauncherShape,
+  isPaidOnlyLauncherShape,
+  type LauncherShape,
 }
-
-/** The default launcher shape (fail-closed for unknown plans). */
-export const DEFAULT_LAUNCHER_SHAPE: LauncherShape = 'tab'
 
 /**
  * The effective launcher shape (what the widget actually renders).
@@ -53,14 +53,6 @@ export interface StoredLauncherInput {
   launcherShape?: string | null
   /** V2 appearance field (raw — parsed strictly by parseAppearanceV2). */
   appearanceV2?: unknown
-}
-
-/**
- * Check if a shape is valid.
- */
-export function isValidLauncherShape(value: unknown): value is LauncherShape {
-  if (typeof value !== 'string') return false
-  return (LAUNCHER_SHAPES as readonly string[]).includes(value)
 }
 
 /**

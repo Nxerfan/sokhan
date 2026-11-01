@@ -14,12 +14,11 @@ import { parseAppearanceV2, type AppearanceV2 } from './appearance-v2'
 import type { WidgetEntitlements } from '../payments/widget-entitlements'
 import {
   LAUNCHER_SHAPES,
-  FREE_LAUNCHER_SHAPES,
   DEFAULT_LAUNCHER_SHAPE,
-  isLauncherShapeAllowed,
   isPaidOnlyLauncherShape,
   type LauncherShape,
-} from './effective-launcher'
+} from './launcher-types'
+import { isLauncherShapeAllowed } from './effective-launcher'
 
 /** The launcher patch payload shape. */
 export interface LauncherPatchBody {

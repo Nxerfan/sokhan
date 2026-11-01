@@ -38,7 +38,7 @@ import {
   isValidLauncherShape,
   isPaidOnlyLauncherShape,
   type LauncherShape,
-} from './effective-launcher'
+} from './launcher-types'
 
 /** The appearance schema version. Currently 1. */
 export const APPEARANCE_V2_VERSION = 1 as const
