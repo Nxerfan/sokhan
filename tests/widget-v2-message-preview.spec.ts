@@ -141,10 +141,6 @@ async function sendVisitor(page: Page, text: string) {
   await expect(page.locator('.sk-panel')).toHaveCSS('pointer-events', 'none')
 }
 async function answerFromInbox(page: Page, visitorText: string, reply: string, inInbox = false) {
-  if (!inInbox) {
-    const nav = page.getByRole('navigation', { name: 'primary' })
-    await nav.getByRole('button', { name: /صندوق ورودی|Inbox/ }).click()
-  }
   // First prove the visitor's persisted conversation is visible to the
   // authenticated agent via the REAL server API. This is a state condition,
   // not a sleep: navigating to Inbox before it exists can leave Inbox's
@@ -159,6 +155,12 @@ async function answerFromInbox(page: Page, visitorText: string, reply: string, i
         row.lastMessagePreview.includes(visitorText),
     )
   }, { timeout: 20_000, message: 'Visitor conversation persisted in agent Inbox API' }).toBe(true)
+  // Only mount Inbox AFTER persistence is confirmed, so its initial GET
+  // cannot race the first message. Keep the real dashboard UI interaction.
+  if (!inInbox) {
+    const nav = page.getByRole('navigation', { name: 'primary' })
+    await nav.getByRole('button', { name: /صندوق ورودی|Inbox/ }).click()
+  }
   const conv = page.locator('button').filter({ hasText: visitorText }).first()
   await expect(conv).toBeVisible({ timeout: 20_000 })
   await conv.click()
