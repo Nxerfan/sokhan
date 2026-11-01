@@ -137,34 +137,42 @@ export function mergeLauncherPatch(
   }
 
   // Determine the stored paid shape for preservation.
-  // If the existing V2 has a launcher with a paid-only shape, and the
-  // new patch is an allowed Free shape, preserve the paid shape.
   const existingLauncher = existing?.launcher
   const newShape = patch.shape
 
-  // If the new shape is the same as the existing shape, no change needed.
-  if (existingLauncher?.shape === newShape) {
-    return {
-      version: 1,
-      desktop: { ...(base.desktop ?? {}) },
-      mobile: { ...(base.mobile ?? {}) },
-      launcher: existingLauncher,
-      ...(base.colors ? { colors: base.colors } : {}),
-    }
-  }
-
-  // Build the new launcher config.
+  // Build the new launcher config from the patch + entitlement context.
+  //
+  // NOTE: we intentionally do NOT short-circuit when
+  // existingLauncher?.shape === newShape. An explicit authorized Pro
+  // selection must replace the previous paid preference even when the
+  // new shape happens to match the stored (Free-forced) shape.
+  //
+  // Reproduction this guards:
+  //   1. Pro saves pill        -> stored { shape: 'pill' }
+  //   2. Downgrade to Free
+  //   3. Free saves rounded    -> stored { shape: 'rounded', paidShape: 'pill' }
+  //   4. Upgrade to Pro        -> resolver restores pill (via paidShape)
+  //   5. User explicitly selects rounded and saves
+  //      newShape ('rounded') === existingLauncher.shape ('rounded')
+  //      -> a short-circuit here would retain paidShape='pill'
+  //      -> resolver would STILL return pill (stale paid preference)
+  //   6. Correct behavior: clear paidShape so the resolver returns the
+  //      user's explicit 'rounded'.
+  //
+  // The Free (limited) branch below still preserves paidShape for both
+  // real edits and idempotent Free saves, so removing the short-circuit
+  // does not regress downgrade/upgrade restoration.
   const launcherConfig: NonNullable<AppearanceV2['launcher']> = {
     shape: newShape,
   }
 
-  // BLOCKER 2: When the plan has 'all' entitlement (Pro), the user is
-  // explicitly choosing a shape on a paid plan. Clear paidShape — the
-  // user's explicit choice replaces any prior paid preference. There is
-  // no need to preserve a paid preference when the plan can already use
-  // all shapes.
+  // When the plan has 'all' entitlement (Pro), the user is explicitly
+  // choosing a shape on a paid plan. Clear paidShape — the user's
+  // explicit choice replaces any prior paid preference, including when
+  // newShape === existingLauncher.shape. There is no need to preserve a
+  // paid preference when the plan can already use all shapes.
   if (entitlements?.launcherSelection === 'all') {
-    // No paidShape — explicit Pro choice.
+    // No paidShape — explicit Pro choice replaces prior preference.
   } else {
     // Plan is 'limited' (Free). Preserve paid-only shape for restore.
     // BLOCKER 4: Only paid-only shapes (pill) are valid as paidShape.
@@ -175,6 +183,9 @@ export function mergeLauncherPatch(
       }
     }
     // Also preserve any existing paidShape from the existing config.
+    // This covers idempotent Free saves (newShape === existingLauncher.shape)
+    // and Free edits between two Free-allowed shapes: the stored paid
+    // preference is carried forward unchanged for future upgrade restore.
     if (existingLauncher?.paidShape && !launcherConfig.paidShape) {
       launcherConfig.paidShape = existingLauncher.paidShape
     }
