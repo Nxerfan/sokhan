@@ -333,7 +333,7 @@ ${POSITIONING_FN_SOURCE}
     if (o.seenIds && o.seenIds.indexOf(id) !== -1) return null;
     var raw = (m.content && m.content.text);
     if (typeof raw !== 'string') return null;
-    var text = raw.trim().replace(/\s+/g, ' ');
+    var text = raw.trim().replace(/\\s+/g, ' ');
     if (text === '') return null;
     var chars = Array.from(text);
     if (chars.length > 120) return chars.slice(0, 120).join('') + '\u2026';
