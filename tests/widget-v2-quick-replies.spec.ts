@@ -412,6 +412,49 @@ test.describe('Widget V2 Quick Replies — Feature 6 only', () => {
     })
   }
 
+  test('slug failed FIRST quick reply must not consume suggestions before server persistence', async ({ browser }) => {
+    test.setTimeout(120_000)
+    const ownerCtx = await browser.newContext()
+    const visitorCtx = await browser.newContext({ viewport: { width: 320, height: 640 } })
+    let site: Awaited<ReturnType<typeof customer>> | undefined
+    try {
+      const owner = await ownerCtx.newPage()
+      const slug = await signup(owner, 'failed-first-send')
+      await setAccessMode(owner, 'anonymous')
+      await patch(owner, { quickReplies: { items: ['First', 'Second'] } })
+      site = await customer(visitorCtx, slug, 'slug')
+      await site.page.locator('.sk-launcher').click()
+      await expect(site.page.locator('.sk-panel')).toHaveCSS('pointer-events', 'auto')
+      await expect(site.page.locator('.sk-quick-reply')).toHaveCount(2)
+      // Inject a REAL transport failure in the outgoing request; do not
+      // pretend that the server accepted or persisted a message.
+      // The existing optimistic-send UI must mark the bubble failed.
+      let aborted = 0
+      await site.page.route('**/api/widget/' + slug + '/messages', async route => {
+        if (route.request().method() === 'POST') {
+          aborted++
+          await route.abort('failed')
+          return
+        }
+        await route.continue()
+      })
+      await site.page.locator('.sk-quick-reply').first().click()
+      await expect(site.page.locator('.sk-msg.sk-vis.sk-failed p').filter({ hasText: 'First' }))
+        .toHaveCount(1, { timeout: 20_000 })
+      expect(aborted).toBe(1)
+      await expect(site.page.locator('.sk-retry-btn')).toBeVisible()
+      // A LOCAL optimistic/failed contact entry is NOT a persisted visitor
+      // message. Suggestions must not be permanently removed before a 200
+      // server response, including after a transport failure.
+      await expect(site.page.locator('.sk-quick-reply')).toHaveCount(2)
+      await expect(site.page.locator('.sk-quick-reply').first()).toBeVisible()
+    } finally {
+      if (site) await site.close()
+      await visitorCtx.close()
+      await ownerCtx.close()
+    }
+  })
+
   test('XSS-looking quick reply stays text only, never creates HTML elements', async ({ browser }) => {
     const ownerCtx = await browser.newContext()
     const visitorCtx = await browser.newContext()
