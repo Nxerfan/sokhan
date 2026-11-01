@@ -270,6 +270,10 @@ test.describe('Widget V2 Quick Replies — Feature 6 only', () => {
         await setAccessMode(owner, 'anonymous')
         await patch(owner, { quickReplies: { items: ['سلام', 'How much?'] } })
         site = await customer(visitorCtx, slug, surface)
+        // Quick Replies belong to the OPEN chat panel, not the closed
+        // launcher. Opening the actual widget is a required user action.
+        await site.page.locator('.sk-launcher').click()
+        await expect(site.page.locator('.sk-panel')).toHaveCSS('pointer-events', 'auto')
         const buttons = site.page.locator('.sk-quick-reply')
         await expect(buttons).toHaveCount(2, { timeout: 15_000 })
         for (const button of await buttons.all()) {
@@ -314,6 +318,8 @@ test.describe('Widget V2 Quick Replies — Feature 6 only', () => {
         await setAccessMode(owner, 'anonymous')
         await patch(owner, { quickReplies: { items: TEN } })
         site = await customer(visitorCtx, slug, surface)
+        await site.page.locator('.sk-launcher').click()
+        await expect(site.page.locator('.sk-panel')).toHaveCSS('pointer-events', 'auto')
         await expect(site.page.locator('.sk-quick-reply')).toHaveCount(10, { timeout: 15_000 })
         await chooseQuickReply(site.page, slug, 9, 'Talk to a person')
       } finally {
@@ -335,6 +341,8 @@ test.describe('Widget V2 Quick Replies — Feature 6 only', () => {
       const raw = '<img src=x onerror=alert(1)>'
       await patch(owner, { quickReplies: { items: [raw] } })
       site = await customer(visitorCtx, slug, 'slug')
+      await site.page.locator('.sk-launcher').click()
+      await expect(site.page.locator('.sk-panel')).toHaveCSS('pointer-events', 'auto')
       const item = site.page.locator('.sk-quick-reply').first()
       await expect(item).toHaveText(raw)
       await expect(site.page.locator('.sk-quick-replies img, .sk-quick-replies script')).toHaveCount(0)
