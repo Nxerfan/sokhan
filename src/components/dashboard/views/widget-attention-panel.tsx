@@ -57,20 +57,49 @@ interface WidgetAttentionPanelProps {
   attention: AttentionData | null
   defaultDirection: 'rtl' | 'ltr'
   onReload: () => void
+  /**
+   * The tenant's authorized effective accent (hex). Used for the Glow
+   * preview keyframe so the dashboard matches the live widget. Comes
+   * from the dashboard's already-resolved effective color data — no
+   * independent color resolution is duplicated here.
+   */
+  effectiveAccent: string
 }
 
 /**
- * The inline keyframes + reduced-motion guard for the live preview.
- *
- * Mirrors the runtime CSS (slug/v1/NPM) so the dashboard preview matches
- * what visitors see on the site. Bounded, restrained, GPU-friendly motion.
- * The accent glow uses the Sukhan default accent — the preview is illustrative.
+ * Convert a hex color to an rgba() string with the given alpha. Falls back
+ * to the Sukhan default gold on invalid input so the preview never breaks.
  */
-const PREVIEW_STYLES = `
+function hexToRgba(hex: string, alpha: number): string {
+  const h = String(hex || '#E09A2B').replace('#', '')
+  if (h.length === 3) {
+    // Expand shorthand (#abc → #aabbcc).
+    const expanded = h.split('').map((c) => c + c).join('')
+    return hexToRgba('#' + expanded, alpha)
+  }
+  if (h.length !== 6) return `rgba(224,154,43,${alpha})`
+  const r = parseInt(h.slice(0, 2), 16)
+  const g = parseInt(h.slice(2, 4), 16)
+  const b = parseInt(h.slice(4, 6), 16)
+  if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) return `rgba(224,154,43,${alpha})`
+  return `rgba(${r},${g},${b},${alpha})`
+}
+
+/**
+ * Build the inline keyframes + reduced-motion guard for the live preview,
+ * using the tenant's effective accent for the Glow keyframe so the preview
+ * matches the live widget.
+ *
+ * Mirrors the runtime CSS (slug/v1/NPM). Bounded, restrained, GPU-friendly.
+ */
+function buildPreviewStyles(accent: string): string {
+  const glow0 = hexToRgba(accent, 0)
+  const glow45 = hexToRgba(accent, 0.45)
+  return `
 @keyframes sk-attention-pulse{0%,100%{transform:scale(1);}50%{transform:scale(1.06);}}
 @keyframes sk-attention-bounce{0%,100%{transform:translateY(0);}50%{transform:translateY(-6px);}}
 @keyframes sk-attention-shake{0%,100%{transform:translateX(0);}25%{transform:translateX(-3px);}75%{transform:translateX(3px);}}
-@keyframes sk-attention-glow{0%,100%{box-shadow:0 8px 24px rgba(0,0,0,0.18),0 0 0 0 rgba(224,154,43,0);}50%{box-shadow:0 8px 24px rgba(0,0,0,0.18),0 0 14px 2px rgba(224,154,43,0.45);}}
+@keyframes sk-attention-glow{0%,100%{box-shadow:0 8px 24px rgba(0,0,0,0.18),0 0 0 0 ${glow0};}50%{box-shadow:0 8px 24px rgba(0,0,0,0.18),0 0 14px 2px ${glow45};}}
 .sk-preview-launcher.sk-attention-pulse{animation:sk-attention-pulse 2s ease-in-out infinite;}
 .sk-preview-launcher.sk-attention-bounce{animation:sk-attention-bounce 1.8s ease-in-out infinite;}
 .sk-preview-launcher.sk-attention-shake{animation:sk-attention-shake 1.2s ease-in-out infinite;}
@@ -82,12 +111,14 @@ const PREVIEW_STYLES = `
   .sk-preview-launcher.sk-attention-glow{animation:none !important;}
 }
 `
+}
 
 export function WidgetAttentionPanel({
   slug,
   attention,
   defaultDirection,
   onReload,
+  effectiveAccent,
 }: WidgetAttentionPanelProps) {
   // `slug` is accepted for prop-shape parity with the sibling panels; the
   // dashboard works against the current tenant via session.
@@ -95,6 +126,14 @@ export function WidgetAttentionPanel({
 
   const t = useTranslations('settings')
   const fa = defaultDirection === 'rtl'
+
+  // Build the preview styles using the tenant's effective accent so the
+  // Glow preview matches the live widget. Recomputed only when the accent
+  // changes (e.g. after saving a Pro custom-color change + reload).
+  const previewStyles = useMemo(
+    () => buildPreviewStyles(effectiveAccent),
+    [effectiveAccent],
+  )
 
   // The authorized saved animation — always the effective animation from the
   // server (the resolver returns the authorized animation for both plans,
@@ -201,8 +240,9 @@ export function WidgetAttentionPanel({
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
-        {/* Inline preview styles — mirror the runtime keyframes. */}
-        <style dangerouslySetInnerHTML={{ __html: PREVIEW_STYLES }} />
+        {/* Inline preview styles — mirror the runtime keyframes, using the
+            tenant's effective accent for the Glow keyframe. */}
+        <style dangerouslySetInnerHTML={{ __html: previewStyles }} />
 
         <div className="grid gap-4 md:grid-cols-2" dir={defaultDirection}>
           {/* Controls */}

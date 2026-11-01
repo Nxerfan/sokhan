@@ -301,6 +301,8 @@ interface WidgetInternalState {
   typingTimer?: ReturnType<typeof setTimeout>
   /** V2 positioning — the effective positioning for the current device. */
   effectivePositioning: EffectivePositioning | null
+  /** V2 attention animation — for motion-aware positioning clamp. */
+  effectiveAttention: string
   /** The current panel side (left/right/center) from the geometry function. */
   panelSide: 'left' | 'right' | 'center'
   /** Resize listener reference (for cleanup on destroy). */
@@ -375,6 +377,7 @@ export class SukhanWidget implements SukhanInstance {
     locale: 'fa',
     dir: 'rtl',
     effectivePositioning: null,
+    effectiveAttention: 'none',
     panelSide: 'right',
     resizeHandler: null,
   }
@@ -497,6 +500,7 @@ export class SukhanWidget implements SukhanInstance {
     // animation. 'none' preserves the legacy unanimated launcher (no class).
     const effectiveAttention = config.attention?.animation || 'none'
     root.setAttribute('data-sk-attention-animation', effectiveAttention)
+    this.state.effectiveAttention = effectiveAttention
     const attentionClass = effectiveAttention !== 'none' ? ' sk-attention-' + effectiveAttention : ''
     const launcher = el('button', 'sk-launcher ' + shapeClass(effectiveShape) + attentionClass) as HTMLButtonElement
     launcher.setAttribute('aria-label', this.state.locale === 'fa' ? 'گفت‌وگو' : 'Open chat')
@@ -2210,6 +2214,7 @@ export class SukhanWidget implements SukhanInstance {
       launcherHeight: dims.height,
       safeAreaBottom,
       baseMargin: DEFAULT_BASE_MARGIN,
+      attentionAnimation: this.state.effectiveAttention,
     })
 
     // Apply the root position (always left + bottom).
@@ -2262,6 +2267,7 @@ export class SukhanWidget implements SukhanInstance {
       launcherHeight: dims.height,
       safeAreaBottom: this.getSafeAreaBottom(),
       baseMargin: DEFAULT_BASE_MARGIN,
+      attentionAnimation: this.state.effectiveAttention,
     })
     const ph = computePanelHorizontalPosition({
       launcherLeft: launcherResult.left,

@@ -124,6 +124,7 @@ ${POSITIONING_FN_SOURCE}
     dir: 'rtl',
     connected: false,
     effectivePos: null,
+    effectiveAttention: 'none',
     panelSide: 'right',
     rootEl: null,
     resizeHandler: null,
@@ -165,7 +166,8 @@ ${POSITIONING_FN_SOURCE}
       launcherWidth: dims.w,
       launcherHeight: dims.h,
       safeAreaBottom: sab,
-      baseMargin: 20
+      baseMargin: 20,
+      attentionAnimation: state.effectiveAttention
     });
     state.rootEl.style.left = result.left + 'px';
     state.rootEl.style.bottom = result.bottom + 'px';
@@ -194,7 +196,8 @@ ${POSITIONING_FN_SOURCE}
       anchor: pos.anchor, offsetX: pos.offsetX || 0, offsetY: pos.offsetY || 0,
       dir: state.dir, viewportWidth: window.innerWidth, viewportHeight: window.innerHeight,
       launcherWidth: dims.w, launcherHeight: dims.h,
-      safeAreaBottom: __skGetSafeAreaBottom(), baseMargin: 20
+      safeAreaBottom: __skGetSafeAreaBottom(), baseMargin: 20,
+      attentionAnimation: state.effectiveAttention
     });
     var ph = __skComputePanelHorizontal(lr.left, dims.w, 360, window.innerWidth, side, 20);
     panel.style.left = ph.left + 'px';
@@ -334,6 +337,7 @@ ${POSITIONING_FN_SOURCE}
     // animation. 'none' preserves the legacy unanimated launcher (no class).
     var effectiveAttention = (config.attention && config.attention.animation) || 'none';
     root.setAttribute('data-sk-attention-animation', effectiveAttention);
+    state.effectiveAttention = effectiveAttention;
     var attentionClass = effectiveAttention !== 'none' ? ' sk-attention-' + effectiveAttention : '';
     launcher = el('button', 'sk-launcher ' + shapeClass(effectiveShape) + attentionClass);
     launcher.setAttribute('aria-label', state.locale === 'fa' ? 'گفت‌وگو' : 'Open chat');

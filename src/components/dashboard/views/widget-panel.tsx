@@ -666,6 +666,7 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
             attention={attention}
             defaultDirection={(config.defaultLocale === 'fa' ? 'rtl' : 'ltr') as 'rtl' | 'ltr'}
             onReload={load}
+            effectiveAccent={colors?.effective?.tokens?.accent ?? effective?.accentColor ?? '#E09A2B'}
           />
         <div className="grid gap-4 lg:grid-cols-2">
           <div className="flex flex-col gap-4">

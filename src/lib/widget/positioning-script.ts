@@ -21,6 +21,24 @@
  * Injected into the script routes via template-literal interpolation.
  */
 export const POSITIONING_FN_SOURCE = `
+function __skAttentionMotion(animation, lw, lh) {
+  // Maximum visual displacement (px) of each V2 attention animation in each
+  // direction. Used to inset the positioning clamp so the animated
+  // launcher's CSS transform never escapes the viewport.
+  //   shake: translateX(±3) → horizontal ±3.
+  //   bounce: translateY(-6) → vertical up 6.
+  //   pulse: scale(1.06) → symmetric expansion of dim*0.03 each side (ceil'd).
+  //   none / glow / undefined → 0.
+  if (animation === 'shake') return { left: 3, right: 3, up: 0, down: 0 };
+  if (animation === 'bounce') return { left: 0, right: 0, up: 6, down: 0 };
+  if (animation === 'pulse') {
+    var px = Math.ceil(lw * 0.03);
+    var py = Math.ceil(lh * 0.03);
+    return { left: px, right: px, up: py, down: py };
+  }
+  return { left: 0, right: 0, up: 0, down: 0 };
+}
+
 function __skComputePosition(opts) {
   var anchor = opts.anchor;
   var offsetX = opts.offsetX || 0;
@@ -32,6 +50,7 @@ function __skComputePosition(opts) {
   var lh = opts.launcherHeight || 52;
   var sab = opts.safeAreaBottom || 0;
   var bm = opts.baseMargin != null ? opts.baseMargin : 20;
+  var attention = opts.attentionAnimation || 'none';
 
   var baseLeft;
   if (anchor === 'bottom-center') {
@@ -49,12 +68,16 @@ function __skComputePosition(opts) {
   var left = baseLeft + offsetX;
   var bottom = bm + offsetY + sab;
 
-  var maxLeft = Math.max(0, vw - lw);
-  if (left < 0) left = 0;
+  // Motion-aware safety inset — reserve space for the attention animation's
+  // maximum transform displacement so the animated launcher stays in bounds.
+  var motion = __skAttentionMotion(attention, lw, lh);
+
+  var maxLeft = Math.max(motion.left, vw - lw - motion.right);
+  if (left < motion.left) left = motion.left;
   if (left > maxLeft) left = maxLeft;
 
-  var minBottom = sab;
-  var maxBottom = Math.max(minBottom, vh - lh - sab);
+  var minBottom = Math.max(sab, motion.down);
+  var maxBottom = Math.max(minBottom, vh - lh - sab - motion.up);
   if (bottom < minBottom) bottom = minBottom;
   if (bottom > maxBottom) bottom = maxBottom;
 
