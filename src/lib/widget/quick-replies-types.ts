@@ -79,8 +79,8 @@ export function hasCaseInsensitiveDuplicate(items: string[]): boolean {
  *
  * All five conditions must hold:
  *   1. The panel is open.
- *   2. The visitor is authorized (valid token + active conversation —
- *      identity bootstrap completed).
+ *   2. The visitor is authorized (valid token — identity bootstrap completed).
+ *      The token is cleared on authorization recovery/revocation/policy-change.
  *   3. Configured items exist.
  *   4. No previously persisted visitor message exists.
  *

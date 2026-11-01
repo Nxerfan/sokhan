@@ -1763,8 +1763,10 @@ export class SukhanWidget implements SukhanInstance {
       (m) => m?.senderType === 'contact',
     )
     // Identity readiness gate: Quick Replies visible ONLY when visitor has
-    // a valid token AND active conversation (identity bootstrap completed).
-    const authorized = !!this.state.token && !!this.state.conversationId
+    // a valid token (identity bootstrap completed). The token is cleared on
+    // authorization recovery/revocation/policy-change. conversationId is NOT
+    // required — it may be null before the first message.
+    const authorized = !!this.state.token
     const show =
       this.state.open &&
       this.state.quickRepliesItems.length > 0 &&

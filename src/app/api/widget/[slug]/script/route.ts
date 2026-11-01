@@ -868,10 +868,13 @@ ${POSITIONING_FN_SOURCE}
       }
     }
     // Identity readiness gate: Quick Replies are visible ONLY when the
-    // visitor has a valid token AND an active conversation — i.e., the
-    // /contact identity bootstrap has completed successfully. This prevents
-    // suggestions from appearing (and being clicked) before authorization.
-    var authorized = !!state.token && !!state.conversationId;
+    // visitor has a valid token — i.e., the /contact identity bootstrap has
+    // completed successfully. The token is cleared by __sk_clearIdentityState()
+    // on authorization recovery, revocation, and access-policy changes, so
+    // !!state.token reliably tracks the authorized state across all transitions.
+    // NOTE: conversationId is NOT required — it may be null before the first
+    // message (the conversation is created on the first send).
+    var authorized = !!state.token;
     var show = state.open && state.quickRepliesItems.length > 0 && !hasVisitorMsg && authorized;
     state.quickRepliesEl.style.display = show ? 'flex' : 'none';
     // After the first visitor message, permanently remove the buttons from

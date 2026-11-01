@@ -636,7 +636,7 @@ ${POSITIONING_FN_SOURCE}
     }
     // Identity readiness gate: Quick Replies visible ONLY when visitor has
     // a valid token AND active conversation (identity bootstrap completed).
-    var authorized = !!state.token && !!state.conversationId;
+    var authorized = !!state.token;
     var show = state.open && state.quickRepliesItems.length > 0 && !hasVisitorMsg && authorized;
     state.quickRepliesEl.style.display = show ? 'flex' : 'none';
     if (hasVisitorMsg && state.quickRepliesEl.childNodes.length > 0) {
