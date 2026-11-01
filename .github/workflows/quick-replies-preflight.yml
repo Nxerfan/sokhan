@@ -1,0 +1,43 @@
+name: Quick Replies — test harness preflight
+on:
+  push:
+    branches:
+      - feat/widget-v2-quick-replies
+    paths:
+      - tests/unit/widget-v2-quick-replies.test.ts
+      - tests/widget-v2-quick-replies.spec.ts
+      - .github/workflows/quick-replies-preflight.yml
+
+jobs:
+  test-harness-preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+      - name: Parse reviewer-owned TypeScript tests
+        run: |
+          node --input-type=module <<'NODE'
+          import ts from 'typescript'
+          import { readFileSync } from 'node:fs'
+          for (const file of [
+            'tests/unit/widget-v2-quick-replies.test.ts',
+            'tests/widget-v2-quick-replies.spec.ts',
+          ]) {
+            const source = ts.createSourceFile(
+              file, readFileSync(file, 'utf8'),
+              ts.ScriptTarget.Latest, true, ts.ScriptKind.TS,
+            )
+            if (source.parseDiagnostics.length) {
+              for (const problem of source.parseDiagnostics)
+                console.error(ts.flattenDiagnosticMessageText(problem.messageText, '\n'))
+              throw Error('Invalid TypeScript syntax in ' + file)
+            }
+            console.log('Syntax OK: ' + file)
+          }
+          NODE
+      - name: Discover scoped Playwright scenarios (no DB or Docker)
+        run: bunx playwright test tests/widget-v2-quick-replies.spec.ts --list
