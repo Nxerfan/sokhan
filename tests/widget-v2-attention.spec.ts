@@ -157,6 +157,23 @@ test.describe('Widget V2 Attention Animations — PR #19 only', () => {
     }
   }
 
+  test('Pro renders all four real attention animations, not just Glow', async ({ browser }) => {
+    test.setTimeout(150_000)
+    const ctx = await browser.newContext()
+    try {
+      const page = await ctx.newPage()
+      const slug = await signup(page, 'four-paid-motions')
+      await setPlan(page, 'pro')
+      for (const animation of ['pulse', 'bounce', 'shake', 'glow'] as const) {
+        await patch(page, { attention: { animation } })
+        expect((await publicConfig(page, slug)).attention.animation).toBe(animation)
+        await verifyRender(ctx, slug, animation, 'slug')
+      }
+    } finally {
+      await ctx.close()
+    }
+  })
+
   test('Free UI enables none/pulse, locks paid choices, enforces PATCH restrictions', async ({ browser }) => {
     const ctx = await browser.newContext()
     try {
@@ -179,6 +196,13 @@ test.describe('Widget V2 Attention Animations — PR #19 only', () => {
       await openAttention(page)
       await expect(page.getByTestId('attention-animation-pulse')).toHaveAttribute('aria-pressed', 'true')
       await expect(page.getByTestId('attention-discard')).toBeDisabled()
+      // Discard must revert an actual unsaved change, not just look disabled.
+      await page.getByTestId('attention-animation-none').click()
+      await expect(page.getByTestId('attention-discard')).toBeEnabled()
+      await page.getByTestId('attention-discard').click()
+      await expect(page.getByTestId('attention-animation-pulse')).toHaveAttribute('aria-pressed', 'true')
+      await expect(page.getByTestId('attention-discard')).toBeDisabled()
+      expect((await publicConfig(page, slug)).attention.animation).toBe('pulse')
     } finally {
       await ctx.close()
     }
