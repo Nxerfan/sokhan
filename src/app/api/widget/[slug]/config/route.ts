@@ -24,6 +24,10 @@ import {
   resolveEffectiveAttention,
   type StoredAttentionInput,
 } from '@/lib/widget/effective-attention'
+import {
+  resolveEffectiveMessagePreview,
+  type StoredMessagePreviewInput,
+} from '@/lib/widget/effective-message-preview'
 
 /** CORS headers for widget API responses. */
 function widgetHeaders(res: NextResponse): NextResponse {
@@ -188,6 +192,16 @@ export async function GET(
   }
   const effectiveAttention = resolveEffectiveAttention(attentionInput, entitlements)
 
+  // V2 message preview: resolve effective from stored V2 + entitlements.
+  // The public config exposes ONLY the effective authorized boolean —
+  // never the raw stored preference. Free with a stored `true` (from a
+  // prior paid period) exposes `false`. The public config never contains
+  // message text or conversation history.
+  const messagePreviewInput: StoredMessagePreviewInput = {
+    appearanceV2: widgetConfig.appearanceV2,
+  }
+  const effectiveMessagePreview = resolveEffectiveMessagePreview(messagePreviewInput, entitlements)
+
   const configWithPosition = { ...config, position: legacyPosition, accentColor: legacyAccent, launcherShape: legacyLauncherShape }
 
   // Build the response — conditionally include `colors` only when the tenant
@@ -213,6 +227,10 @@ export async function GET(
   // 'none' preserves the legacy unanimated launcher for tenants who haven't
   // adopted V2 attention. Older consumers ignore the field.
   responseBody.attention = effectiveAttention
+  // V2 message preview (additive — always present as { enabled }).
+  // `false` for Free / unknown / no-V2-selection. Older consumers ignore
+  // the field. Never contains message text or conversation history.
+  responseBody.messagePreview = effectiveMessagePreview
 
   // Additive: the safe public access-policy fields. Existing clients continue
   // working (additive top-level fields). NEVER expose the raw integration

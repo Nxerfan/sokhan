@@ -18,6 +18,7 @@ import { WidgetPositioningPanel } from './widget-positioning-panel'
 import { WidgetColorsPanel } from './widget-colors-panel'
 import { WidgetLauncherPanel } from './widget-launcher-panel'
 import { WidgetAttentionPanel } from './widget-attention-panel'
+import { WidgetMessagePreviewPanel } from './widget-message-preview-panel'
 
 type WidgetConfig = {
   accentColor: string
@@ -119,6 +120,12 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
     effective: { animation: 'none' | 'pulse' | 'bounce' | 'shake' | 'glow' }
     stored: { animation: 'none' | 'pulse' | 'bounce' | 'shake' | 'glow'; paidAnimation?: 'bounce' | 'shake' | 'glow' } | null
   } | null>(null)
+  // V2 message preview data (from GET /api/widget-config `messagePreview` field).
+  const [messagePreview, setMessagePreview] = useState<{
+    entitlements: { messagePreview: boolean }
+    effective: { enabled: boolean }
+    stored: { enabled: boolean } | null
+  } | null>(null)
 
   const apiUrl = typeof window !== 'undefined' ? window.location.origin : HOSTED_API_URL
 
@@ -151,6 +158,8 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
     if (cfgData.launcher) setLauncher(cfgData.launcher)
     // V2 attention data.
     if (cfgData.attention) setAttention(cfgData.attention)
+    // V2 message preview data.
+    if (cfgData.messagePreview) setMessagePreview(cfgData.messagePreview)
     const domData = await domRes.json()
     setDomains(domData.domains ?? [])
     setDomainLimit(domData.limit ?? 0)
@@ -667,6 +676,13 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
             defaultDirection={(config.defaultLocale === 'fa' ? 'rtl' : 'ltr') as 'rtl' | 'ltr'}
             onReload={load}
             effectiveAccent={colors?.effective?.tokens?.accent ?? effective?.accentColor ?? '#E09A2B'}
+          />
+          {/* V2 Message Preview — paid-only feature. */}
+          <WidgetMessagePreviewPanel
+            slug={slug}
+            messagePreview={messagePreview}
+            defaultDirection={(config.defaultLocale === 'fa' ? 'rtl' : 'ltr') as 'rtl' | 'ltr'}
+            onReload={load}
           />
         <div className="grid gap-4 lg:grid-cols-2">
           <div className="flex flex-col gap-4">

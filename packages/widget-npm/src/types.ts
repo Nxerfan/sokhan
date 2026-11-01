@@ -90,6 +90,14 @@ export interface WidgetConfig {
     animation: 'none' | 'pulse' | 'bounce' | 'shake' | 'glow'
   }
   /**
+   * V2 message preview (Phase 2 / Feature 5). Additive — the public config
+   * exposes only the effective authorized boolean. Older backends omit the
+   * field; the widget defaults to disabled.
+   */
+  messagePreview?: {
+    enabled: boolean
+  }
+  /**
    * Backend-supplied realtime endpoint config (additive field). The widget
    * uses this as the PRIMARY runtime source. Older backends omit the
    * field; the widget falls back to the documented hosted default.
