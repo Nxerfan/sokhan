@@ -357,3 +357,112 @@ describe('Developer — strict parseAppearanceV2 pageVisibility', () => {
     expect(v?.pageVisibility?.rules[0].device).toBe('desktop')
   })
 })
+
+describe('Developer — Free entitlement leakage regression', () => {
+  // These tests verify the fix for the blocker where Free's resolveEffectivePageVisibility
+  // filtered by match === 'exact' but did NOT exclude device-specific rules.
+  // Free must never receive device-scoped or prefix rules in its effective config.
+
+  test('Pro device-specific exact rules → Free downgrade → rules empty (no leakage)', () => {
+    const paidOnly = [
+      rule('/checkout', 'hide', 'exact', 'mobile'),
+      rule('/account', 'hide', 'exact', 'desktop'),
+    ]
+    const result = resolveEffectivePageVisibility({ appearanceV2: { version: 1, pageVisibility: { rules: paidOnly } } }, FREE)
+    expect(result.rules).toEqual([])
+  })
+
+  test('Mixed general exact + device exact + prefix → Free retains only general exact', () => {
+    const mixed = [
+      rule('/help', 'hide'),                              // general exact → Free eligible
+      rule('/checkout', 'hide', 'exact', 'mobile'),       // device exact → paid-only
+      rule('/products', 'hide', 'prefix'),                 // prefix → paid-only
+    ]
+    const result = resolveEffectivePageVisibility({ appearanceV2: { version: 1, pageVisibility: { rules: mixed } } }, FREE)
+    expect(result.rules).toEqual([rule('/help', 'hide')])
+  })
+
+  test('Free edit preserves paid configuration with device + prefix rules', () => {
+    const paidConfig = {
+      rules: [rule('/help', 'hide'), rule('/checkout', 'hide', 'exact', 'mobile'), rule('/products', 'hide', 'prefix')],
+    }
+    const full = { version: 1 as const, desktop: {}, mobile: {}, pageVisibility: paidConfig }
+    const down = mergePageVisibilityPatch(full, { rules: [rule('/about', 'show')] }, FREE)
+    // Free edit: stored rules = the Free edit, paidRules = the prior Pro config.
+    expect(down.pageVisibility?.rules).toEqual([rule('/about', 'show')])
+    expect(down.pageVisibility?.paidRules).toEqual(paidConfig.rules)
+    // Free effective: only general exact rules from the Free edit.
+    expect(resolveEffectivePageVisibility({ appearanceV2: down }, FREE).rules).toEqual([rule('/about', 'show')])
+  })
+
+  test('Upgrade restores paid configuration with device + prefix rules', () => {
+    const paidConfig = {
+      rules: [rule('/help', 'hide'), rule('/checkout', 'hide', 'exact', 'mobile'), rule('/products', 'hide', 'prefix')],
+    }
+    const full = { version: 1 as const, desktop: {}, mobile: {}, pageVisibility: paidConfig }
+    const down = mergePageVisibilityPatch(full, { rules: [rule('/about', 'show')] }, FREE)
+    // Upgrade to Pro → restores paidRules.
+    expect(resolveEffectivePageVisibility({ appearanceV2: down }, PRO).rules).toEqual(paidConfig.rules)
+  })
+
+  test('Explicit paid save clears stale paidRules', () => {
+    const paidConfig = {
+      rules: [rule('/help', 'hide'), rule('/checkout', 'hide', 'exact', 'mobile')],
+    }
+    const full = { version: 1 as const, desktop: {}, mobile: {}, pageVisibility: paidConfig }
+    const down = mergePageVisibilityPatch(full, { rules: [rule('/about', 'show')] }, FREE)
+    const up = mergePageVisibilityPatch(down, { rules: [rule('/about', 'show')] }, PRO)
+    expect(up.pageVisibility).toEqual({ rules: [rule('/about', 'show')] })
+    expect(up.pageVisibility?.paidRules).toBeUndefined()
+  })
+
+  test('Public config never leaks paidRules to Free', () => {
+    const paidConfig = {
+      rules: [rule('/checkout', 'hide', 'exact', 'mobile'), rule('/products', 'hide', 'prefix')],
+    }
+    const result = resolveEffectivePageVisibility({ appearanceV2: { version: 1, pageVisibility: paidConfig } }, FREE)
+    // Free effective rules must be empty — no device or prefix rules.
+    expect(result.rules).toEqual([])
+    // No paidRules field in the effective output.
+    expect(JSON.stringify(result)).not.toContain('paidRules')
+  })
+
+  test('Free with 3 general exact rules + 2 device rules → only 3 general exact returned', () => {
+    const rules = [
+      rule('/a', 'hide'),
+      rule('/b', 'show'),
+      rule('/c', 'hide'),
+      rule('/d', 'hide', 'exact', 'desktop'),
+      rule('/e', 'hide', 'exact', 'mobile'),
+    ]
+    const result = resolveEffectivePageVisibility({ appearanceV2: { version: 1, pageVisibility: { rules } } }, FREE)
+    expect(result.rules).toEqual([rule('/a', 'hide'), rule('/b', 'show'), rule('/c', 'hide')])
+    // No device rules in the result.
+    expect(result.rules.every(r => !r.device)).toBe(true)
+  })
+
+  test('Free with only device exact rules → empty (all filtered)', () => {
+    const rules = [
+      rule('/a', 'hide', 'exact', 'desktop'),
+      rule('/b', 'hide', 'exact', 'mobile'),
+    ]
+    const result = resolveEffectivePageVisibility({ appearanceV2: { version: 1, pageVisibility: { rules } } }, FREE)
+    expect(result.rules).toEqual([])
+  })
+
+  test('Free with only prefix rules → empty (all filtered)', () => {
+    const rules = [rule('/products', 'hide', 'prefix')]
+    const result = resolveEffectivePageVisibility({ appearanceV2: { version: 1, pageVisibility: { rules } } }, FREE)
+    expect(result.rules).toEqual([])
+  })
+
+  test('Pro with device + prefix rules → all returned', () => {
+    const rules = [
+      rule('/help', 'hide'),
+      rule('/checkout', 'hide', 'exact', 'mobile'),
+      rule('/products', 'hide', 'prefix'),
+    ]
+    const result = resolveEffectivePageVisibility({ appearanceV2: { version: 1, pageVisibility: { rules } } }, PRO)
+    expect(result.rules).toEqual(rules)
+  })
+})

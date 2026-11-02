@@ -40,9 +40,11 @@ export function resolveEffectivePageVisibility(
     return { rules: pv.paidRules.slice(0, 10) }
   }
 
-  // Basic (Free): filter to exact-match rules only + truncate to 3.
+  // Basic (Free): filter to general exact-match rules only (no device
+  // selector, no prefix) + truncate to 3. Device-specific exact rules
+  // and prefix rules are paid-only — they must NOT be exposed to Free.
   if (capability === 'basic') {
-    const basicRules = pv.rules.filter(r => r.match === 'exact')
+    const basicRules = pv.rules.filter(r => r.match === 'exact' && !r.device)
     return { rules: basicRules.slice(0, 3) }
   }
 
