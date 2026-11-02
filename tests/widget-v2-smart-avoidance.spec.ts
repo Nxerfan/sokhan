@@ -308,4 +308,40 @@ test.describe('Reviewer — Smart Avoidance Feature 10 / Real browser', () => {
       await expect(site.page.locator('.sk-launcher')).toBeVisible()
     } finally { if (site) await site.close(); await visitorCtx.close(); await ownerCtx.close() }
   })
+  test('Mobile centered launcher avoids a small fixed overlay using a short move even when 240px leaves viewport', async ({ browser }) => {
+    const ownerCtx = await browser.newContext()
+    const visitorCtx = await browser.newContext({ viewport: { width: 375, height: 500 } })
+    let site: Awaited<ReturnType<typeof customer>> | undefined
+    try {
+      const owner = await ownerCtx.newPage()
+      const slug = await signup(owner, 'small-viewport')
+      await setPlan(owner, 'pro')
+      await setAccessMode(owner, 'anonymous')
+      await patch(owner, true)
+      const position = await owner.request.patch(BASE + '/api/widget-config', {
+        data: { positioning: { mobile: { anchor: 'bottom-center', offsetX: 0, offsetY: 204 } } },
+      })
+      expect(position.ok(), await position.text()).toBe(true)
+      site = await customer(visitorCtx, slug, 'slug')
+      const before = await site.page.locator('.sk-launcher').boundingBox()
+      expect(before).not.toBeNull()
+      // Positioning is centered on both axes; a full 240px jump crosses the
+      // viewport edge in every direction, but an ~80px adjustment is safe.
+      expect(before!.x).toBeGreaterThan(120)
+      expect(before!.x).toBeLessThan(205)
+      expect(before!.y).toBeGreaterThan(170)
+      expect(before!.y).toBeLessThan(290)
+      await addHostOverlay(site.page)
+      await expect.poll(() => isSeparated(site!.page), { timeout: 15_000 }).toBe(true)
+      const after = await site.page.locator('.sk-launcher').boundingBox()
+      expect(after).not.toBeNull()
+      expect(Math.hypot(after!.x - before!.x, after!.y - before!.y)).toBeGreaterThan(10)
+      await site.page.evaluate(() => document.querySelector('#host-cookie-banner')?.remove())
+      await expect.poll(async () => {
+        const now = await site!.page.locator('.sk-launcher').boundingBox()
+        return now ? Math.hypot(now.x - before!.x, now.y - before!.y) : Infinity
+      }, { timeout: 15_000 }).toBeLessThanOrEqual(2)
+    } finally { if (site) await site.close(); await visitorCtx.close(); await ownerCtx.close() }
+  })
+
 })

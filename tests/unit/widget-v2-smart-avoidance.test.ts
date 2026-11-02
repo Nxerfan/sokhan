@@ -150,4 +150,39 @@ describe('Reviewer — bounded deterministic collision geometry', () => {
     const bad = rect(NaN, 0, 100, 100)
     expect(computeSmartAvoidanceShift(orig, [bad], viewport)).toEqual({ dx: 0, dy: 0 })
   })
+  test('A valid short displacement works even when the full 240px endpoint leaves a small viewport', () => {
+    const smallViewport = { width: 375, height: 500 }
+    const original = rect(161, 224, 213, 276)
+    const banner = rect(153, 216, 221, 284)
+    // All eight endpoints at distance 240 are outside this viewport.
+    // Nevertheless shifting up or sideways by 80px is in bounds and clear.
+    const result = computeSmartAvoidanceShift(original, [banner], smallViewport, { gap: 12, maxShift: 240 })
+    clean(result)
+    expect(Math.hypot(result.dx, result.dy), 'A legal short move must not be rejected because maxShift is out of bounds').toBeGreaterThan(0)
+    expect(Math.hypot(result.dx, result.dy)).toBeLessThanOrEqual(240)
+    const moved = rect(original.left + result.dx, original.top + result.dy, original.right + result.dx, original.bottom + result.dy)
+    expect(separated(moved, banner, 12)).toBe(true)
+    expect(moved.left).toBeGreaterThanOrEqual(0)
+    expect(moved.right).toBeLessThanOrEqual(smallViewport.width)
+    expect(moved.top).toBeGreaterThanOrEqual(0)
+    expect(moved.bottom).toBeLessThanOrEqual(smallViewport.height)
+  })
+
+  test('Avoiding the current overlap must not move into a second nearby, initially non-overlapping obstacle', () => {
+    const original = rect(320, 728, 372, 780)
+    const blocking = rect(300, 690, 400, 800)
+    const adjacent = rect(50, 700, 300, 800)
+    // The second obstacle starts 20px to the left of the launcher, beyond
+    // the 12px clearance gap, but a 84px left move collides with it.
+    // Moving UP ~102px safely avoids BOTH obstacles.
+    expect(separated(original, adjacent, 12)).toBe(true)
+    const result = computeSmartAvoidanceShift(original, [blocking, adjacent], viewport, { gap: 12, maxShift: 240 })
+    clean(result)
+    expect(Math.hypot(result.dx, result.dy)).toBeGreaterThan(0)
+    const moved = rect(original.left + result.dx, original.top + result.dy, original.right + result.dx, original.bottom + result.dy)
+    expect(separated(moved, blocking, 12)).toBe(true)
+    expect(separated(moved, adjacent, 12), 'Must validate the displaced launcher against ALL obstacles, not only those overlapping at the starting position').toBe(true)
+    expect(computeSmartAvoidanceShift(original, [adjacent, blocking], viewport)).toEqual(result)
+  })
+
 })
