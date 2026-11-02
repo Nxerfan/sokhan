@@ -272,3 +272,89 @@ describe('Developer — cross-feature preservation', () => {
     expect(mergePageVisibilityPatch(a, { rules: [] }, PRO).alternativeContactButtons).toEqual(a.alternativeContactButtons)
   })
 })
+
+describe('Developer — email injection and accessor safety regression', () => {
+  test('email with ?bcc= query parameter rejected', () => {
+    expect(isValidAlternativeContactButton(item('email', 'Email', 'support@example.com?bcc=attacker@outside.test'))).toBe(false)
+  })
+  test('email with ?subject= query parameter rejected', () => {
+    expect(isValidAlternativeContactButton(item('email', 'Email', 'support@example.com?subject=hi'))).toBe(false)
+  })
+  test('email with ?body= query parameter rejected', () => {
+    expect(isValidAlternativeContactButton(item('email', 'Email', 'support@example.com?body=hello'))).toBe(false)
+  })
+  test('email with URL fragment rejected', () => {
+    expect(isValidAlternativeContactButton(item('email', 'Email', 'support@example.com#fragment'))).toBe(false)
+  })
+  test('email with percent-encoded CR/LF rejected', () => {
+    expect(isValidAlternativeContactButton(item('email', 'Email', 'support@example.com%0d%0aBcc:attacker@test'))).toBe(false)
+  })
+  test('email with percent sign rejected', () => {
+    expect(isValidAlternativeContactButton(item('email', 'Email', 'support@example.com%40test'))).toBe(false)
+  })
+  test('email with raw newline rejected', () => {
+    expect(isValidAlternativeContactButton(item('email', 'Email', 'support@example.com\nBcc:attacker@test'))).toBe(false)
+  })
+  test('legitimate plus-addressing still accepted', () => {
+    expect(isValidAlternativeContactButton(item('email', 'Email', 'support+sales@example.com'))).toBe(true)
+  })
+  test('legitimate email still accepted', () => {
+    expect(isValidAlternativeContactButton(EMAIL)).toBe(true)
+  })
+  test('PATCH validation rejects email with ?bcc=', () => {
+    expect(patch([item('email', 'Email', 'support@example.com?bcc=attacker@outside.test')]).ok).toBe(false)
+  })
+  test('V2 parser rejects email with ?bcc=', () => {
+    expect(parseAppearanceV2({ version: 1, alternativeContactButtons: { items: [item('email', 'Email', 'support@example.com?bcc=x')] } })).toBeNull()
+  })
+
+  test('accessor-backed value does not execute getter', () => {
+    let triggered = false
+    const raw = {
+      kind: 'email' as const, label: 'Email us',
+      get value() { triggered = true; throw Error('Must not invoke getters') },
+    }
+    // Must not throw — must return false.
+    expect(isValidAlternativeContactButton(raw)).toBe(false)
+    expect(triggered).toBe(false)
+  })
+  test('accessor-backed kind does not execute getter', () => {
+    let triggered = false
+    const raw = {
+      get kind() { triggered = true; throw Error('Must not invoke getters') },
+      label: 'Test', value: 'support@example.com',
+    }
+    expect(isValidAlternativeContactButton(raw)).toBe(false)
+    expect(triggered).toBe(false)
+  })
+  test('accessor-backed label does not execute getter', () => {
+    let triggered = false
+    const raw = {
+      kind: 'email' as const,
+      get label() { triggered = true; throw Error('Must not invoke getters') },
+      value: 'support@example.com',
+    }
+    expect(isValidAlternativeContactButton(raw)).toBe(false)
+    expect(triggered).toBe(false)
+  })
+  test('object with Symbol key rejected', () => {
+    const sym = Symbol('test')
+    const raw = { kind: 'email' as const, label: 'Test', value: 'support@example.com', [sym]: 'extra' }
+    expect(isValidAlternativeContactButton(raw)).toBe(false)
+  })
+  test('object with extra property rejected', () => {
+    expect(isValidAlternativeContactButton({ ...EMAIL, href: 'tel:123' })).toBe(false)
+    expect(isValidAlternativeContactButton({ ...PHONE, onClick: 'alert(1)' })).toBe(false)
+  })
+  test('PATCH validation rejects accessor-backed value', () => {
+    const raw = {
+      kind: 'email', label: 'Email',
+      get value() { throw Error('getter') },
+    }
+    expect(patch([raw as never]).ok).toBe(false)
+  })
+  test('V2 parser rejects accessor-backed value', () => {
+    const raw = { version: 1, alternativeContactButtons: { items: [{ kind: 'email', label: 'Email', get value() { throw Error('x') } }] } }
+    expect(parseAppearanceV2(raw)).toBeNull()
+  })
+})

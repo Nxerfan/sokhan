@@ -1208,6 +1208,9 @@ function validateAcbValue(kind: string, value: string): boolean {
     case 'email':
       if (value.startsWith('mailto:')) return false
       if (value.includes(' ') || value.includes('<') || value.includes('>')) return false
+      if (value.includes('?') || value.includes('#')) return false
+      if (value.includes('%')) return false
+      if (/[\r\n\0]/.test(value)) return false
       return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) && value.length <= 200
     case 'whatsapp':
       if (value.startsWith('http') || value.includes('wa.me')) return false
