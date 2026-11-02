@@ -22,6 +22,7 @@ import { WidgetMessagePreviewPanel } from './widget-message-preview-panel'
 import { WidgetQuickRepliesPanel } from './widget-quick-replies-panel'
 import { WidgetPreChatFormPanel } from './widget-pre-chat-form-panel'
 import { WidgetPageVisibilityPanel } from './widget-page-visibility-panel'
+import { WidgetAltContactPanel } from './widget-alt-contact-panel'
 
 type WidgetConfig = {
   accentColor: string
@@ -147,6 +148,13 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
     effective: { rules: Array<{ pattern: string; match: 'exact' | 'prefix'; action: 'show' | 'hide'; device?: 'desktop' | 'mobile' }> }
     stored: { rules: Array<{ pattern: string; match: 'exact' | 'prefix'; action: 'show' | 'hide'; device?: 'desktop' | 'mobile' }>; paidRules?: Array<{ pattern: string; match: 'exact' | 'prefix'; action: 'show' | 'hide'; device?: 'desktop' | 'mobile' }> } | null
   } | null>(null)
+  // V2 alternative contact buttons data (from GET /api/widget-config
+  // `alternativeContactButtons` field).
+  const [alternativeContactButtons, setAlternativeContactButtons] = useState<{
+    entitlements: { max: number }
+    effective: { items: Array<{ kind: 'phone' | 'email' | 'whatsapp' | 'telegram' | 'website'; label: string; value: string }> }
+    stored: { items: Array<{ kind: 'phone' | 'email' | 'whatsapp' | 'telegram' | 'website'; label: string; value: string }>; paidItems?: Array<{ kind: 'phone' | 'email' | 'whatsapp' | 'telegram' | 'website'; label: string; value: string }> } | null
+  } | null>(null)
 
   const apiUrl = typeof window !== 'undefined' ? window.location.origin : HOSTED_API_URL
 
@@ -187,6 +195,8 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
     if (cfgData.preChatForm) setPreChatForm(cfgData.preChatForm)
     // V2 page visibility data.
     if (cfgData.pageVisibility) setPageVisibility(cfgData.pageVisibility)
+    // V2 alternative contact buttons data.
+    if (cfgData.alternativeContactButtons) setAlternativeContactButtons(cfgData.alternativeContactButtons)
     const domData = await domRes.json()
     setDomains(domData.domains ?? [])
     setDomainLimit(domData.limit ?? 0)
@@ -729,6 +739,15 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
           <WidgetPageVisibilityPanel
             slug={slug}
             pageVisibility={pageVisibility}
+            defaultDirection={(config.defaultLocale === 'fa' ? 'rtl' : 'ltr') as 'rtl' | 'ltr'}
+            onReload={load}
+          />
+          {/* V2 Alternative Contact Buttons — render safe anchor links inside
+              the open panel (Feature 9). Plain <a> elements; never send a
+              Sukhan message, complete a pre-chat form, or bypass authorization. */}
+          <WidgetAltContactPanel
+            slug={slug}
+            alternativeContactButtons={alternativeContactButtons}
             defaultDirection={(config.defaultLocale === 'fa' ? 'rtl' : 'ltr') as 'rtl' | 'ltr'}
             onReload={load}
           />

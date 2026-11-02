@@ -145,6 +145,7 @@ export function mergeMessagePreviewPatch(
     ...(base.quickReplies ? { quickReplies: base.quickReplies } : {}),
     ...(base.preChatForm ? { preChatForm: base.preChatForm } : {}),
     ...(base.pageVisibility ? { pageVisibility: base.pageVisibility } : {}),
+    ...(base.alternativeContactButtons ? { alternativeContactButtons: base.alternativeContactButtons } : {}),
   }
 }
 

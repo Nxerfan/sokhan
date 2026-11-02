@@ -143,6 +143,29 @@ export interface WidgetConfig {
     }>
   }
   /**
+   * V2 alternative contact buttons (Phase 2 / Feature 9). Additive — the
+   * public config exposes only the effective authorized items. Older
+   * backends omit the field; the widget defaults to no buttons (legacy
+   * behavior). `paidItems` is NEVER exposed to the browser — only the
+   * effective `items` array reaches the runtime.
+   *
+   * Each item:
+   *   - `kind`: one of 'phone' | 'email' | 'whatsapp' | 'telegram' | 'website'.
+   *   - `label`: 1-40 code points, single line, no whitespace padding.
+   *   - `value`: kind-specific (validated by the backend).
+   *
+   * The runtime derives the safe href from kind + value — never from a
+   * client-supplied href. Links NEVER send a Sukhan message, complete a
+   * pre-chat form, or bypass authorization.
+   */
+  alternativeContactButtons?: {
+    items: Array<{
+      kind: 'phone' | 'email' | 'whatsapp' | 'telegram' | 'website'
+      label: string
+      value: string
+    }>
+  }
+  /**
    * Backend-supplied realtime endpoint config (additive field). The widget
    * uses this as the PRIMARY runtime source. Older backends omit the
    * field; the widget falls back to the documented hosted default.

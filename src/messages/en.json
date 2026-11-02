@@ -297,6 +297,41 @@
       "deviceDesktop": "Desktop",
       "deviceMobile": "Mobile"
     },
+    "altContact": {
+      "title": "Alternative Contact Buttons",
+      "hint": "Show phone, email, WhatsApp, Telegram, or website links inside the open chat panel. Links never send a Sukhan message or bypass authorization.",
+      "save": "Save buttons",
+      "discard": "Discard changes",
+      "dirty": "Unsaved changes",
+      "saveSuccess": "Alternative contact buttons saved",
+      "saveFail": "Failed to save alternative contact buttons",
+      "limitExceeded": "You've reached the maximum number of buttons for your plan.",
+      "duplicateKind": "Each contact kind (phone, email, WhatsApp, Telegram, website) may appear at most once.",
+      "invalidItem": "Each button needs a valid kind, a non-blank label (up to 40 characters), and a valid value for the chosen kind.",
+      "upgradeHint": "Up to 5 alternative contact buttons are available on paid plans.",
+      "empty": "No alternative contact buttons configured — visitors see only the chat.",
+      "addItem": "Add button",
+      "removeItem": "Remove button",
+      "itemNumber": "Button {n}",
+      "kind": "Kind",
+      "label": "Label",
+      "labelPlaceholder": "Call us",
+      "value": "Value",
+      "valuePlaceholders": {
+        "phone": "+989121234567",
+        "email": "support@example.com",
+        "whatsapp": "+989121234567",
+        "telegram": "username",
+        "website": "https://help.example.com"
+      },
+      "kinds": {
+        "phone": "Phone",
+        "email": "Email",
+        "whatsapp": "WhatsApp",
+        "telegram": "Telegram",
+        "website": "Website"
+      }
+    },
     "avatarUrl": "Agent avatar URL",
     "logoUrl": "Logo URL",
     "greetingFa": "Greeting (Persian)",

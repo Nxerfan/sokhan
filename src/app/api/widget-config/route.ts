@@ -95,6 +95,17 @@ import {
   hasPageVisibilityField,
   type PageVisibilityPatchData,
 } from '@/lib/widget/page-visibility-patch'
+import {
+  resolveEffectiveAlternativeContactButtons,
+  getStoredAlternativeContactButtons,
+  type StoredAlternativeContactInput,
+} from '@/lib/widget/effective-alternative-contacts'
+import {
+  validateAlternativeContactButtonsPatch,
+  mergeAlternativeContactButtonsPatch,
+  hasAlternativeContactButtonsField,
+  type AlternativeContactButtonsPatchData,
+} from '@/lib/widget/alternative-contact-patch'
 
 /**
  * GET /api/widget-config — dashboard widget configuration.
@@ -192,6 +203,16 @@ export async function GET() {
     }
     const effectivePageVisibility = resolveEffectivePageVisibility(pageVisibilityInput, entitlements)
     const storedPageVisibility = getStoredPageVisibility(pageVisibilityInput)
+
+    // V2 alternative contact buttons: resolve effective + stored.
+    // The dashboard `effective` must match the public widget. The raw stored
+    // `paidItems` is exposed ONLY via `stored` (for restore-on-upgrade),
+    // NEVER as `effective` for Free (the resolver truncates to the plan max).
+    const alternativeContactInput: StoredAlternativeContactInput = {
+      appearanceV2: stored?.appearanceV2,
+    }
+    const effectiveAlternativeContactButtons = resolveEffectiveAlternativeContactButtons(alternativeContactInput, entitlements)
+    const storedAlternativeContactButtons = getStoredAlternativeContactButtons(alternativeContactInput)
 
     return {
       stored,
@@ -300,6 +321,15 @@ export async function GET() {
         effective: effectivePageVisibility,
         stored: storedPageVisibility,
       },
+      // V2 alternative contact buttons: resolve effective + stored.
+      // The dashboard `effective` must match the public widget. The raw stored
+      // `paidItems` is exposed ONLY via `stored` (for restore-on-upgrade),
+      // NEVER as `effective` for Free (the resolver truncates to the plan max).
+      alternativeContactButtons: {
+        entitlements: { max: entitlements?.alternativeContactButtons ?? 0 },
+        effective: effectiveAlternativeContactButtons,
+        stored: storedAlternativeContactButtons,
+      },
     } as const
   })
   if (!result) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
@@ -315,6 +345,7 @@ export async function GET() {
     quickReplies: result.result.quickReplies,
     preChatForm: result.result.preChatForm,
     pageVisibility: result.result.pageVisibility,
+    alternativeContactButtons: result.result.alternativeContactButtons,
   })
 }
 
@@ -447,6 +478,19 @@ const PAGE_VISIBILITY_ERROR_STATUS: Record<string, number> = {
   page_visibility_no_fields: 400,
 }
 
+/** Alternative-contact-buttons-specific error codes → HTTP status mapping. */
+const ALTERNATIVE_CONTACT_BUTTONS_ERROR_STATUS: Record<string, number> = {
+  alt_contact_not_authorized: 403,
+  alt_contact_not_object: 400,
+  alt_contact_items_missing: 400,
+  alt_contact_items_not_array: 400,
+  alt_contact_item_invalid: 400,
+  alt_contact_limit_exceeded: 403,
+  alt_contact_duplicate_kind: 400,
+  alt_contact_unexpected_key: 400,
+  alt_contact_no_fields: 400,
+}
+
 /**
  * PATCH /api/widget-config — update widget customization.
  *
@@ -502,12 +546,13 @@ export async function PATCH(req: NextRequest) {
     const hasQuickReplies = hasQuickRepliesField(body)
     const hasPreChatForm = hasPreChatFormField(body)
     const hasPageVisibility = hasPageVisibilityField(body)
+    const hasAlternativeContactButtons = hasAlternativeContactButtonsField(body)
     const hasOtherFields = hasOtherCustomizationFields(body)
 
     // Reject unrecognized top-level fields when the request contains
     // positioning, colors, launcher, attention, messagePreview, quickReplies,
-    // preChatForm, or pageVisibility.
-    if ((hasPositioning || hasColors || hasLauncher || hasAttention || hasMessagePreview || hasQuickReplies || hasPreChatForm || hasPageVisibility) && hasUnrecognizedFields(body)) {
+    // preChatForm, pageVisibility, or alternativeContactButtons.
+    if ((hasPositioning || hasColors || hasLauncher || hasAttention || hasMessagePreview || hasQuickReplies || hasPreChatForm || hasPageVisibility || hasAlternativeContactButtons) && hasUnrecognizedFields(body)) {
       return { badRequest: true as const, code: 'unrecognized_field' }
     }
 
@@ -595,6 +640,16 @@ export async function PATCH(req: NextRequest) {
         return { pageVisibilityError: true as const, code: pvResult.code }
       }
       pageVisibilityPatch = pvResult.data
+    }
+
+    // ---- Validate alternative contact buttons (if present) ----
+    let alternativeContactButtonsPatch: AlternativeContactButtonsPatchData | null = null
+    if (hasAlternativeContactButtons) {
+      const acbResult = validateAlternativeContactButtonsPatch({ alternativeContactButtons: body.alternativeContactButtons }, entitlements)
+      if (!acbResult.ok) {
+        return { alternativeContactButtonsError: true as const, code: acbResult.code }
+      }
+      alternativeContactButtonsPatch = acbResult.data
     }
 
     // ---- Validate + collect other customization fields (paid only) ----
@@ -788,6 +843,22 @@ export async function PATCH(req: NextRequest) {
       data.appearanceV2 = mergedPageVisibility as unknown as string // Prisma Json field
     }
 
+    // ---- Apply alternative contact buttons patch (if validated) ----
+    // Reads the already-merged appearanceV2 (from prior patches, if any) so
+    // all neighboring V2 capabilities are preserved.
+    if (alternativeContactButtonsPatch) {
+      let baseAppearanceV2: unknown = data.appearanceV2 ?? undefined
+      if (baseAppearanceV2 === undefined) {
+        const existing = await db.widgetConfig.findUnique({
+          where: { tenantId: tid },
+          select: { appearanceV2: true },
+        })
+        baseAppearanceV2 = existing?.appearanceV2
+      }
+      const mergedAlternativeContactButtons = mergeAlternativeContactButtonsPatch(baseAppearanceV2, alternativeContactButtonsPatch, entitlements)
+      data.appearanceV2 = mergedAlternativeContactButtons as unknown as string // Prisma Json field
+    }
+
     if (Object.keys(data).length === 0) {
       return { badRequest: true as const, code: 'no_fields' }
     }
@@ -838,6 +909,10 @@ export async function PATCH(req: NextRequest) {
   }
   if ('pageVisibilityError' in r) {
     const status = PAGE_VISIBILITY_ERROR_STATUS[r.code as string] ?? 400
+    return NextResponse.json({ error: r.code }, { status })
+  }
+  if ('alternativeContactButtonsError' in r) {
+    const status = ALTERNATIVE_CONTACT_BUTTONS_ERROR_STATUS[r.code as string] ?? 400
     return NextResponse.json({ error: r.code }, { status })
   }
   if ('badRequest' in r) return NextResponse.json({ error: r.code }, { status: 400 })

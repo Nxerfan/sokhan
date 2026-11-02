@@ -190,6 +190,23 @@ export interface PageVisibilityRuleStored {
   device?: 'desktop' | 'mobile'
 }
 
+/**
+ * Alternative Contact Buttons configuration (Phase 2 / Feature 9). Additive.
+ * - `items`: the active contact buttons.
+ * - `paidItems`: preserved paid selection for downgrade/upgrade restore.
+ */
+export interface AlternativeContactButtonsConfig {
+  items: AlternativeContactButtonStored[]
+  paidItems?: AlternativeContactButtonStored[]
+}
+
+/** A stored alternative contact button. */
+export interface AlternativeContactButtonStored {
+  kind: 'phone' | 'email' | 'whatsapp' | 'telegram' | 'website'
+  label: string
+  value: string
+}
+
 /** The versioned appearance configuration. */
 export interface AppearanceV2 {
   version: typeof APPEARANCE_V2_VERSION
@@ -209,6 +226,8 @@ export interface AppearanceV2 {
   preChatForm?: PreChatFormConfig
   /** Page Visibility (Phase 2 / Feature 8). Additive — null = no rules (default visible). */
   pageVisibility?: PageVisibilityConfig
+  /** Alternative Contact Buttons (Phase 2 / Feature 9). Additive — null = no buttons. */
+  alternativeContactButtons?: AlternativeContactButtonsConfig
 }
 
 /** The canonical default appearance (V2). */
@@ -253,7 +272,7 @@ export const DEFAULT_APPEARANCE_V2: AppearanceV2 = {
  */
 
 /** Allowed top-level keys in an AppearanceV2 object. */
-const ALLOWED_TOP_LEVEL_KEYS = new Set(['version', 'desktop', 'mobile', 'colors', 'launcher', 'attention', 'messagePreview', 'quickReplies', 'preChatForm', 'pageVisibility'])
+const ALLOWED_TOP_LEVEL_KEYS = new Set(['version', 'desktop', 'mobile', 'colors', 'launcher', 'attention', 'messagePreview', 'quickReplies', 'preChatForm', 'pageVisibility', 'alternativeContactButtons'])
 
 /**
  * Check if a value is a plain JSON-compatible object — prototype is exactly
@@ -522,6 +541,27 @@ export function parseAppearanceV2(value: unknown): AppearanceV2 | null {
   }
   if (pageVisibility !== null && pageVisibility !== undefined) {
     result.pageVisibility = pageVisibility
+  }
+
+  // Parse alternativeContactButtons if present.
+  const acbDesc = getOwnDataDescriptor(value, 'alternativeContactButtons')
+  let acbValue: unknown = undefined
+  if (acbDesc !== null) {
+    acbValue = acbDesc.value
+  } else {
+    try {
+      if (Object.prototype.hasOwnProperty.call(value, 'alternativeContactButtons')) return null
+    } catch {
+      return null
+    }
+  }
+  let alternativeContactButtons: AlternativeContactButtonsConfig | null | undefined = undefined
+  if (acbValue !== undefined) {
+    alternativeContactButtons = parseAlternativeContactButtonsConfig(acbValue)
+    if (alternativeContactButtons === undefined) return null
+  }
+  if (alternativeContactButtons !== null && alternativeContactButtons !== undefined) {
+    result.alternativeContactButtons = alternativeContactButtons
   }
   return result
 }
@@ -1152,6 +1192,124 @@ function parsePreChatFormConfig(value: unknown): PreChatFormConfig | null | unde
     } catch {
       return undefined
     }
+  }
+  return result
+}
+
+const ALLOWED_ACB_KEYS = new Set(['items', 'paidItems'])
+const ALLOWED_ACB_KINDS = new Set(['phone', 'email', 'whatsapp', 'telegram', 'website'])
+
+function validateAcbValue(kind: string, value: string): boolean {
+  switch (kind) {
+    case 'phone':
+      if (value.startsWith('tel:')) return false
+      if (value.includes('<') || value.includes('>')) return false
+      return /^\+[\d\s\-()]+$/.test(value) && value.replace(/[\s\-()]/g, '').length >= 8
+    case 'email':
+      if (value.startsWith('mailto:')) return false
+      if (value.includes(' ') || value.includes('<') || value.includes('>')) return false
+      if (value.includes('?') || value.includes('#')) return false
+      if (value.includes('%')) return false
+      if (/[\r\n\0]/.test(value)) return false
+      return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) && value.length <= 200
+    case 'whatsapp':
+      if (value.startsWith('http') || value.includes('wa.me')) return false
+      if (value.includes('<') || value.includes('>')) return false
+      const waClean = value.replace(/[\s\-()]/g, '')
+      return /^\+?\d{8,}$/.test(waClean)
+    case 'telegram':
+      if (value.startsWith('http') || value.includes('t.me')) return false
+      if (value.startsWith('@')) return false
+      if (value.includes('/') || value.includes('\\') || value.includes(' ')) return false
+      if (value.includes('<') || value.includes('>')) return false
+      return /^[a-zA-Z0-9_]{3,}$/.test(value)
+    case 'website':
+      if (!value.startsWith('https://')) return false
+      if (!/^https:\/\/[^\s\n\r\t\\]+$/.test(value)) return false
+      try {
+        const url = new URL(value)
+        if (url.username || url.password) return false
+        if (url.protocol !== 'https:') return false
+      } catch { return false }
+      return true
+    default: return false
+  }
+}
+
+function parseAcbButton(raw: unknown): AlternativeContactButtonStored | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+  const keys = safeOwnKeys(raw)
+  if (keys === null) return undefined
+  if (keys.length !== 3) return undefined
+  let hasKind = false, hasLabel = false, hasValue = false
+  for (const k of keys) {
+    if (k === 'kind') hasKind = true
+    else if (k === 'label') hasLabel = true
+    else if (k === 'value') hasValue = true
+    else return undefined
+  }
+  if (!hasKind || !hasLabel || !hasValue) return undefined
+  const kindDesc = getOwnDataDescriptor(raw, 'kind')
+  if (!kindDesc) return undefined
+  const kind = kindDesc.value
+  if (typeof kind !== 'string' || !ALLOWED_ACB_KINDS.has(kind)) return undefined
+  const labelDesc = getOwnDataDescriptor(raw, 'label')
+  if (!labelDesc) return undefined
+  const label = labelDesc.value
+  if (typeof label !== 'string') return undefined
+  if (label.trim() === '') return undefined
+  if (label !== label.trim()) return undefined
+  if (label.includes('\n') || label.includes('\r')) return undefined
+  if (Array.from(label).length > 40) return undefined
+  const valueDesc = getOwnDataDescriptor(raw, 'value')
+  if (!valueDesc) return undefined
+  const value = valueDesc.value
+  if (typeof value !== 'string' || value.length === 0 || value.length > 500) return undefined
+  if (!validateAcbValue(kind, value)) return undefined
+  return { kind: kind as AlternativeContactButtonStored['kind'], label, value }
+}
+
+function parseAcbItemsArray(arr: unknown): AlternativeContactButtonStored[] | undefined {
+  if (!Array.isArray(arr)) return undefined
+  const items: AlternativeContactButtonStored[] = []
+  const seenKinds = new Set<string>()
+  for (const raw of arr) {
+    const btn = parseAcbButton(raw)
+    if (btn === undefined) return undefined
+    if (seenKinds.has(btn.kind)) return undefined
+    seenKinds.add(btn.kind)
+    items.push(btn)
+  }
+  return items
+}
+
+function parseAlternativeContactButtonsConfig(value: unknown): AlternativeContactButtonsConfig | null | undefined {
+  if (value === undefined) return null
+  if (value === null) return undefined
+  if (!isPlainObject(value)) return undefined
+  const keys = safeOwnKeys(value)
+  if (keys === null) return undefined
+  for (const key of keys) {
+    if (typeof key !== 'string' || !ALLOWED_ACB_KEYS.has(key)) return undefined
+  }
+  const itemsDesc = getOwnDataDescriptor(value, 'items')
+  if (!itemsDesc) return undefined
+  const items = parseAcbItemsArray(itemsDesc.value)
+  if (items === undefined) return undefined
+  const result: AlternativeContactButtonsConfig = { items }
+  const paidItemsDesc = getOwnDataDescriptor(value, 'paidItems')
+  if (paidItemsDesc !== null) {
+    const v = paidItemsDesc.value
+    if (v !== undefined && v !== null) {
+      const paidItems = parseAcbItemsArray(v)
+      if (paidItems === undefined) return undefined
+      if (paidItems.length === 0) return undefined
+      result.paidItems = paidItems
+    }
+  } else {
+    try {
+      if (Object.prototype.hasOwnProperty.call(value, 'paidItems')) return undefined
+    } catch { return undefined }
   }
   return result
 }

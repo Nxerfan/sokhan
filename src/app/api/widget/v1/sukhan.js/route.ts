@@ -152,6 +152,9 @@ ${POSITIONING_FN_SOURCE}
     pageVisibilityPopHandler: null, // popstate listener (for cleanup)
     pageVisibilityOrigPushState: null, // original history.pushState (for cleanup)
     pageVisibilityOrigReplaceState: null, // original history.replaceState (for cleanup)
+    // V2 alternative contact buttons state (Feature 9).
+    altContactItems: [],  // effective items from public config
+    altContactEl: null,   // .sk-alt-contact-links DOM container
   };
 
   // ============================================================
@@ -396,6 +399,75 @@ ${POSITIONING_FN_SOURCE}
     }
   } catch (e) {}
 
+  // ============================================================
+  // V2 Alternative Contact Buttons helpers (Feature 9).
+  //   The public config exposes 'alternativeContactButtons: { items: [...] }'
+  //   where each item is { kind, label, value }. The runtime renders a row of
+  //   anchor links inside the open panel — these links NEVER send a Sukhan
+  //   message, complete a pre-chat form, or bypass authorization. They are
+  //   plain <a> elements that the visitor's browser handles natively.
+  //
+  //   Behavior:
+  //     - Empty items array → no container is created (legacy behavior).
+  //     - The container is part of the widget root → hidden automatically
+  //       when Page Visibility hides the widget (Feature 8).
+  //     - Visible only when the panel is open + items.length > 0.
+  //     - Website links open in a new tab (target=_blank rel=noopener).
+  //     - tel:/mailto: links have no target/rel (native handler).
+  //     - Labels use textContent (never innerHTML) — XSS-safe.
+  // ============================================================
+  function __skBuildAltContactHref(item) {
+    if (!item || typeof item.kind !== 'string' || typeof item.value !== 'string') return '#';
+    switch (item.kind) {
+      case 'phone':   return 'tel:' + item.value;
+      case 'email':   return 'mailto:' + item.value;
+      case 'whatsapp': return 'https://wa.me/' + item.value.replace(/[^\\d]/g, '');
+      case 'telegram': return 'https://t.me/' + item.value;
+      case 'website': return item.value;
+      default: return '#';
+    }
+  }
+
+  // buildAltContactLinks: create the .sk-alt-contact-links container with one
+  // <a class="sk-alt-contact-link"> per item. Returns the container element.
+  // Idempotent across repeated mount/render cycles — each invocation produces
+  // a fresh container (the caller is responsible for replacing any prior one).
+  function buildAltContactLinks(items) {
+    var container = el('div', 'sk-alt-contact-links');
+    css(container, {
+      display: 'none', flexDirection: 'column', gap: '2px',
+      padding: '6px 8px', background: '#fff',
+      borderTop: '1px solid #f0eee9', flexShrink: '0',
+    });
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      if (!it || typeof it.kind !== 'string' || typeof it.label !== 'string' || typeof it.value !== 'string') continue;
+      var href = __skBuildAltContactHref(it);
+      var a = el('a', 'sk-alt-contact-link');
+      a.setAttribute('data-sk-alt-contact-kind', it.kind);
+      a.setAttribute('href', href);
+      // All https:// links (website, whatsapp, telegram) open in a new tab;
+      // tel:/mailto: use the native handler.
+      if (href.indexOf('https://') === 0) {
+        a.setAttribute('target', '_blank');
+        a.setAttribute('rel', 'noopener noreferrer');
+      }
+      // SECURITY: tenant-controlled label — use textContent, NEVER innerHTML.
+      a.textContent = it.label;
+      container.appendChild(a);
+    }
+    return container;
+  }
+
+  // updateAltContactLinks: toggle visibility based on the panel open state.
+  // Called from toggle(). The container itself is part of the widget root
+  // (so Page Visibility hides it automatically with the rest of the root).
+  function updateAltContactLinks() {
+    if (!state.altContactEl) return;
+    var show = state.open && state.altContactItems.length > 0;
+    state.altContactEl.style.display = show ? 'flex' : 'none';
+  }
+
   // ---- V2 Color application ----
   function applyColors(config) {
     if (!state.rootEl) return;
@@ -560,6 +632,25 @@ ${POSITIONING_FN_SOURCE}
     // The runtime evaluates these rules against window.location.pathname +
     // the detected device to decide whether to hide the widget root.
     state.pageVisibilityRules = (config.pageVisibility && config.pageVisibility.rules) || [];
+
+    // V2 alternative contact buttons: read the effective authorized items from
+    // the public config (Feature 9). Empty array for Free / unknown / no-V2-
+    // selection. The runtime renders one <a class="sk-alt-contact-link"> per
+    // item inside the panel; the links NEVER send a Sukhan message, complete
+    // a pre-chat form, or bypass authorization.
+    var altContactItems = (config.alternativeContactButtons && config.alternativeContactButtons.items) || [];
+    // Defensive copy + sanitize: keep only items with the expected shape so a
+    // malformed persisted config cannot break the render loop. The backend
+    // validates these too — this is defense-in-depth at the runtime boundary.
+    var safeAltItems = [];
+    for (var aci = 0; aci < altContactItems.length; aci++) {
+      var acItem = altContactItems[aci];
+      if (!acItem || typeof acItem !== 'object') continue;
+      if (typeof acItem.kind !== 'string' || typeof acItem.label !== 'string' || typeof acItem.value !== 'string') continue;
+      safeAltItems.push({ kind: acItem.kind, label: acItem.label, value: acItem.value });
+    }
+    state.altContactItems = safeAltItems;
+    state.altContactEl = safeAltItems.length > 0 ? buildAltContactLinks(safeAltItems) : null;
 
     // Build the preview bubble (.sk-message-preview). Positioned adjacent to
     // the launcher by positionPreview(). Hidden by default.
@@ -774,6 +865,12 @@ ${POSITIONING_FN_SOURCE}
     // While visible, the input bar + quick replies are hidden by
     // updatePreChatForm(); when hidden, the input bar is restored.
     if (state.preChatFormEl) panel.appendChild(state.preChatFormEl);
+    // V2 alternative contact links (Feature 9): appended just above the input
+    // bar so the visitor always sees them when the panel is open, even while
+    // the pre-chat form is visible (the links do NOT send a Sukhan message,
+    // complete a pre-chat form, or bypass authorization). Empty when the
+    // tenant has no buttons configured — no container is appended.
+    if (state.altContactEl) panel.appendChild(state.altContactEl);
     panel.appendChild(inputBar);
     root.appendChild(panel); root.appendChild(launcher); root.appendChild(previewEl);
     document.body.appendChild(root);
@@ -805,6 +902,7 @@ ${POSITIONING_FN_SOURCE}
       pulseDot.style.display = 'none';
       updatePreChatForm(); // may hide input + quick replies when form is shown
       updateQuickReplies();
+      updateAltContactLinks(); // V2 alternative contact buttons (Feature 9)
       // Only focus the input when the pre-chat form is NOT visible —
       // otherwise focusing the input would scroll past the form.
       var preChatVisible = state.preChatFormEl && state.preChatFormEl.style.display === 'flex';
@@ -816,6 +914,7 @@ ${POSITIONING_FN_SOURCE}
       applyPanelTransform();
       updatePreChatForm();
       updateQuickReplies();
+      updateAltContactLinks();
     }
   }
 
@@ -1478,7 +1577,15 @@ ${POSITIONING_FN_SOURCE}
       + '.sk-pre-chat-form{display:none;flex-direction:column;gap:8px;padding:16px;background:#f7f5f1;flex-shrink:0;}'
       + '.sk-pre-chat-form input{border:1px solid #ddd;border-radius:8px;padding:8px 12px;font-size:14px;width:100%;box-sizing:border-box;}'
       + '.sk-pre-chat-submit{background:#0E1116;color:#fff;border:none;border-radius:8px;padding:10px;cursor:pointer;font-size:14px;}'
-      + '.sk-pre-chat-error{color:#e53e3e;font-size:12px;display:none;}';
+      + '.sk-pre-chat-error{color:#e53e3e;font-size:12px;display:none;}'
+      // V2 alternative contact buttons (Feature 9) — anchor links inside the
+      // open panel. Plain <a> elements: never send a Sukhan message, complete
+      // a pre-chat form, or bypass authorization. The container is part of
+      // the widget root → hidden automatically when Page Visibility hides the
+      // widget. Hover affordance matches the rest of the panel surfaces.
+      + '.sk-alt-contact-links{box-sizing:border-box;}'
+      + '.sk-alt-contact-link{display:flex;align-items:center;gap:6px;padding:6px 12px;text-decoration:none;color:inherit;border-radius:8px;transition:background .15s;}'
+      + '.sk-alt-contact-link:hover{background:rgba(0,0,0,0.06);}';
     document.head.appendChild(style);
   }
 

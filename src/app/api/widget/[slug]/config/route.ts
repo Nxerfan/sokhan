@@ -40,6 +40,10 @@ import {
   resolveEffectivePageVisibility,
   type StoredPageVisibilityInput,
 } from '@/lib/widget/effective-page-visibility'
+import {
+  resolveEffectiveAlternativeContactButtons,
+  type StoredAlternativeContactInput,
+} from '@/lib/widget/effective-alternative-contacts'
 
 /** CORS headers for widget API responses. */
 function widgetHeaders(res: NextResponse): NextResponse {
@@ -239,6 +243,16 @@ export async function GET(
   }
   const effectivePageVisibility = resolveEffectivePageVisibility(pageVisibilityInput, entitlements)
 
+  // V2 alternative contact buttons: resolve effective items from stored V2 +
+  // entitlements. The public config exposes ONLY the effective authorized
+  // items — never paidItems. Free with stored paid-only items exposes only
+  // the first `max`. The public `alternativeContactButtons` contains ONLY
+  // `{ items }`.
+  const alternativeContactInput: StoredAlternativeContactInput = {
+    appearanceV2: widgetConfig.appearanceV2,
+  }
+  const effectiveAlternativeContactButtons = resolveEffectiveAlternativeContactButtons(alternativeContactInput, entitlements)
+
   const configWithPosition = { ...config, position: legacyPosition, accentColor: legacyAccent, launcherShape: legacyLauncherShape }
 
   // Build the response — conditionally include `colors` only when the tenant
@@ -282,6 +296,12 @@ export async function GET(
   // contains ONLY `{ rules }` (resolveEffectivePageVisibility never returns
   // paidRules).
   responseBody.pageVisibility = effectivePageVisibility
+  // V2 alternative contact buttons (additive — always present as { items }).
+  // Empty array for Free / unknown / no-V2-selection. Older consumers ignore
+  // the field. Never exposes paidItems — the public
+  // `alternativeContactButtons` object contains ONLY `{ items }`
+  // (resolveEffectiveAlternativeContactButtons never returns paidItems).
+  responseBody.alternativeContactButtons = effectiveAlternativeContactButtons
 
   // Additive: the safe public access-policy fields. Existing clients continue
   // working (additive top-level fields). NEVER expose the raw integration

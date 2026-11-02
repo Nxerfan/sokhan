@@ -190,6 +190,7 @@ export function mergePreChatFormPatch(
     ...(base.messagePreview ? { messagePreview: base.messagePreview } : {}),
     ...(base.quickReplies ? { quickReplies: base.quickReplies } : {}),
     ...(base.pageVisibility ? { pageVisibility: base.pageVisibility } : {}),
+    ...(base.alternativeContactButtons ? { alternativeContactButtons: base.alternativeContactButtons } : {}),
   }
 }
 
