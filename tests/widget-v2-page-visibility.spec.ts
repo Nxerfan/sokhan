@@ -21,7 +21,7 @@ const r = (pattern: string, action: 'show' | 'hide', match: 'exact' | 'prefix' =
 async function signup(page: Page, label: string) {
   const stamp = [process.pid, Date.now(), label].join('-')
   const email = 'visibility-' + stamp + '@test.com'
-  const created = await otpSignupPlaywright(page.request, DASHBOARD, email, 'Visibility ' + stamp)
+  const created = await otpSignupPlaywright(page.request, DASHBOARD, email, 'PV-' + label + '-' + stamp)
   expect(created.ok).toBe(true)
   const csrf = await page.request.get(DASHBOARD + '/api/auth/csrf')
   expect(csrf.ok()).toBe(true)
