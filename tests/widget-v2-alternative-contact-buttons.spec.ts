@@ -195,6 +195,8 @@ test.describe('Reviewer — Widget V2 Alternative Contact Buttons / Feature 9', 
         { items: [btn('website', 'Bad', 'javascript:alert(1)')] },
         { items: [btn('website', 'Bad', 'https://user:pass@example.com')] },
         { items: [btn('phone', 'Bad', 'tel:+12345')] },
+        { items: [btn('email', 'Bad', 'support@example.com?bcc=attacker%40outside.test')] },
+        { items: [btn('email', 'Bad', 'support@example.com%0D%0ABcc:attacker%40outside.test')] },
         { items: [PHONE, PHONE] },
         { items: [{ ...PHONE, onClick: 'alert(1)' }] },
       ]) {

@@ -128,6 +128,44 @@ describe('Reviewer — strict contact destination policy', () => {
     ]
     for (const x of invalid) expect(patch([x]).ok, JSON.stringify(x)).toBe(false)
   })
+  test('Reject mailto recipient query, fragment and encoded header injection on all validation layers', () => {
+    // This MUST be an email ADDRESS, not a tenant-controlled mailto URL.
+    // Otherwise clicking a contact button can prepopulate Bcc/body/subject
+    // without a visitor's intention. No display-only sanitization is enough.
+    const injected = [
+      'support@example.com?bcc=attacker%40outside.test',
+      'support@example.com?subject=Unexpected',
+      'support@example.com?body=Injected',
+      'support@example.com%0D%0ABcc:attacker%40outside.test',
+      'support@example.com#fragment',
+    ]
+    for (const value of injected) {
+      const contact = item('email', 'Email us', value)
+      expect(isValidAlternativeContactButton(contact), value).toBe(false)
+      expect(validateAlternativeContactButtonsPatch({
+        alternativeContactButtons: { items: [contact] },
+      }, pro).ok, value).toBe(false)
+      expect(parseAppearanceV2({
+        version: 1, alternativeContactButtons: { items: [contact] },
+      }), value).toBeNull()
+    }
+  })
+
+  test('Accessor-backed contact values are rejected without executing getters', () => {
+    let triggered = false
+    const raw = {
+      kind: 'email', label: 'Email us',
+      get value() { triggered = true; throw Error('Must not invoke getters') },
+    }
+    expect(() => isValidAlternativeContactButton(raw)).not.toThrow()
+    expect(triggered).toBe(false)
+    expect(isValidAlternativeContactButton(raw)).toBe(false)
+    expect(validateAlternativeContactButtonsPatch({
+      alternativeContactButtons: { items: [raw] },
+    }, pro).ok).toBe(false)
+    expect(triggered).toBe(false)
+  })
+
   test('Reject blank, multiline, whitespace-padded and overlong labels', () => {
     for (const label of ['', '   ', ' Email', 'Email ', 'Email\nnow', 'A'.repeat(41)]) {
       expect(patch([item('email', label, 'a@example.com')]).ok).toBe(false)
