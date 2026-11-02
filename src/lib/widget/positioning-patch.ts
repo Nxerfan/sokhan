@@ -282,6 +282,7 @@ export function mergePositioningPatch(
     ...(base.launcher ? { launcher: base.launcher } : {}),
     ...(base.attention ? { attention: base.attention } : {}),
     ...(base.messagePreview ? { messagePreview: base.messagePreview } : {}),
+    ...(base.quickReplies ? { quickReplies: base.quickReplies } : {}),
   }
 }
 
@@ -311,7 +312,7 @@ const OTHER_CUSTOMIZATION_KEYS = new Set([
   'defaultLocale',
 ])
 
-/** All recognized top-level PATCH fields (customization + positioning + colors + launcher + attention + messagePreview). */
+/** All recognized top-level PATCH fields (customization + positioning + colors + launcher + attention + messagePreview + quickReplies). */
 const ALL_RECOGNIZED_KEYS = new Set([
   ...OTHER_CUSTOMIZATION_KEYS,
   'positioning',
@@ -319,6 +320,7 @@ const ALL_RECOGNIZED_KEYS = new Set([
   'launcher',
   'attention',
   'messagePreview',
+  'quickReplies',
 ])
 
 /**

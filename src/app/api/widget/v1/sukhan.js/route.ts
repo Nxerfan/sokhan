@@ -134,6 +134,10 @@ ${POSITIONING_FN_SOURCE}
     previewEl: null,       // .sk-message-preview DOM element
     previewVisible: false,
     seenMessageIds: [],    // dedup across socket + poll + history
+    // V2 quick replies state.
+    quickRepliesItems: [],  // effective items from public config
+    quickRepliesEl: null,   // .sk-quick-replies DOM element
+    quickRepliesInFlight: false, // prevents duplicate sends
   };
 
   // ============================================================
@@ -511,6 +515,39 @@ ${POSITIONING_FN_SOURCE}
     typingEl.innerHTML = '<span style="display:inline-flex;gap:3px"><span class="sk-dot"></span><span class="sk-dot"></span><span class="sk-dot"></span></span>';
     bodyEl.appendChild(typingEl);
 
+    // V2 quick replies: suggestion buttons inside the open panel.
+    // Shown only when the panel is open + visitor authorized + NO visitor
+    // message has been persisted yet (including from history on reload).
+    var qrItems = (config.quickReplies && config.quickReplies.items) || [];
+    state.quickRepliesItems = qrItems;
+    var quickRepliesEl = el('div', 'sk-quick-replies');
+    css(quickRepliesEl, {
+      display: 'none', flexWrap: 'wrap', gap: '6px', padding: '8px 12px',
+      background: '#fff', borderTop: '1px solid #eee', flexShrink: '0',
+    });
+    for (var qi = 0; qi < qrItems.length; qi++) {
+      var qrBtn = el('button', 'sk-quick-reply');
+      qrBtn.textContent = qrItems[qi]; // XSS-safe: textContent, never innerHTML
+      css(qrBtn, {
+        border: '1px solid #ddd', background: '#f7f5f1', color: '#0E1116',
+        borderRadius: '16px', padding: '6px 14px', fontSize: '13px',
+        cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap',
+        maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis',
+      });
+      qrBtn.setAttribute('type', 'button');
+      qrBtn.onclick = (function(text) {
+        return function() {
+          if (state.quickRepliesInFlight) return;
+          state.quickRepliesInFlight = true;
+          inputEl.value = text;
+          sendMessage();
+          updateQuickReplies();
+        };
+      })(qrItems[qi]);
+      quickRepliesEl.appendChild(qrBtn);
+    }
+    state.quickRepliesEl = quickRepliesEl;
+
     // Input bar
     var inputBar = el('div', 'sk-input');
     css(inputBar, { display:'flex', padding:'10px 12px', background:'#fff', borderTop:'1px solid #eee', gap:'8px', flexShrink:'0' });
@@ -537,6 +574,7 @@ ${POSITIONING_FN_SOURCE}
     inputBar.appendChild(inputEl); inputBar.appendChild(sendBtn);
 
     panel.appendChild(header); panel.appendChild(bodyEl);
+    if (state.quickRepliesEl) panel.appendChild(state.quickRepliesEl);
 
     // Free-plan "Powered by" badge (CUST-F): the old condition
     // (!config.plan || config.plan === 'free') was ALWAYS true — the
@@ -577,10 +615,45 @@ ${POSITIONING_FN_SOURCE}
       applyPanelTransform();
       hidePreview(); // opening the conversation hides the preview
       pulseDot.style.display = 'none';
+      updateQuickReplies();
       setTimeout(function(){ inputEl && inputEl.focus(); }, 200);
     } else {
       css(panel, { opacity:'0', pointerEvents:'none' });
       applyPanelTransform();
+      updateQuickReplies();
+    }
+  }
+
+  // V2 quick replies: show suggestion buttons only when the panel is open,
+  // the visitor is authorized, and NO visitor message has been persisted yet
+  // (including from history on reload). After the first visitor message,
+  // suggestions are permanently hidden.
+  function updateQuickReplies(){
+    if (!state.quickRepliesEl) return;
+    var hasPersistedVisitorMsg = false;
+    if (state.messages && state.messages.length > 0) {
+      for (var i = 0; i < state.messages.length; i++) {
+        var m = state.messages[i];
+        if (!m || m.senderType !== 'contact') continue;
+        // Only count server-persisted messages (real id, not __local_).
+        if (m.id && String(m.id).indexOf('__local_') === 0) continue;
+        hasPersistedVisitorMsg = true; break;
+      }
+    }
+    var authorized = !!state.token;
+    var show = state.open && state.quickRepliesItems.length > 0 && !hasPersistedVisitorMsg && authorized;
+    state.quickRepliesEl.style.display = show ? 'flex' : 'none';
+    if (hasPersistedVisitorMsg && state.quickRepliesEl.childNodes.length > 0) {
+      while (state.quickRepliesEl.firstChild) state.quickRepliesEl.removeChild(state.quickRepliesEl.firstChild);
+    }
+    // Disable buttons while a send is in-flight (prevents duplicate sends).
+    if (show) {
+      var btns = state.quickRepliesEl.querySelectorAll('.sk-quick-reply');
+      for (var bi = 0; bi < btns.length; bi++) {
+        btns[bi].disabled = state.quickRepliesInFlight;
+        btns[bi].style.opacity = state.quickRepliesInFlight ? '0.5' : '1';
+        btns[bi].style.pointerEvents = state.quickRepliesInFlight ? 'none' : 'auto';
+      }
     }
   }
 
@@ -667,6 +740,8 @@ ${POSITIONING_FN_SOURCE}
       state.contactId = data.contactId;
       state.conversationId = data.conversationId;
       state.token = data.realtimeToken;
+      // Identity is now ready — Quick Replies may become visible.
+      updateQuickReplies();
       connectSocket();
       if (state.conversationId) loadMessages();
     })
@@ -794,6 +869,19 @@ ${POSITIONING_FN_SOURCE}
     var text = inputEl.value.trim();
     if (!text) return;
     inputEl.value = '';
+    // Centralized cleanup: ALWAYS reset in-flight + update buttons after
+    // every settled send attempt — success, HTTP 4xx/5xx, network failure,
+    // malformed JSON, or auth-policy rejection. This guarantees the buttons
+    // are never stuck disabled. On success, updateQuickReplies() removes
+    // the buttons (persisted message); on failure, it re-enables them
+    // (if the visitor remains authorized). If identity was cleared during
+    // error handling, the authorized gate in updateQuickReplies() keeps
+    // the buttons hidden — cleanup does NOT accidentally enable them for
+    // a different visitor.
+    var finalizeSend = function() {
+      state.quickRepliesInFlight = false;
+      updateQuickReplies();
+    };
     fetch(MESSAGES_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + state.token },
@@ -814,10 +902,10 @@ ${POSITIONING_FN_SOURCE}
       return r.json();
     })
     .then(function(data){
-      if (!data) return;
+      if (!data) { finalizeSend(); return; }
       if (data.message) {
         state.messages.push(data.message);
-        renderMessages();
+        renderMessages(); // calls updateQuickReplies() — removes buttons on success
       }
       if (data.conversationId && data.conversationId !== state.conversationId) {
         clearMessagePreviewState();
@@ -827,9 +915,11 @@ ${POSITIONING_FN_SOURCE}
         }
       }
       startPolling();
+      finalizeSend(); // clears in-flight; updateQuickReplies() is idempotent
     })
     .catch(function(e){
       if (inputEl) inputEl.value = text; // never silently lose the typed message
+      finalizeSend();
       console.error('[sukhan] send failed', e);
     });
   }
@@ -917,6 +1007,7 @@ ${POSITIONING_FN_SOURCE}
       bodyEl.insertBefore(bubble, typingEl);
     }
     scrollBody();
+    updateQuickReplies(); // hide suggestions after the first visitor message
   }
 
   function scrollBody(){ if (bodyEl) bodyEl.scrollTop = bodyEl.scrollHeight; }
@@ -1023,7 +1114,11 @@ ${POSITIONING_FN_SOURCE}
       // V2 message preview — bubble adjacent to the launcher.
       + '.sk-message-preview{box-sizing:border-box;}'
       + '.sk-message-preview-text{box-sizing:border-box;padding-right:20px;}'
-      + '.sk-message-preview-dismiss:hover{color:#0E1116;background:rgba(0,0,0,0.06);}';
+      + '.sk-message-preview-dismiss:hover{color:#0E1116;background:rgba(0,0,0,0.06);}'
+      // V2 quick replies — suggestion buttons inside the open panel.
+      + '.sk-quick-replies{box-sizing:border-box;}'
+      + '.sk-quick-reply{box-sizing:border-box;transition:background .15s ease;}'
+      + '.sk-quick-reply:hover{background:#e8e4dc;}';
     document.head.appendChild(style);
   }
 

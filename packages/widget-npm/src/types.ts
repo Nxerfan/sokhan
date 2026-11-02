@@ -98,6 +98,14 @@ export interface WidgetConfig {
     enabled: boolean
   }
   /**
+   * V2 quick replies (Phase 2 / Feature 6). Additive — the public config
+   * exposes only the effective authorized items. Older backends omit the
+   * field; the widget defaults to no suggestions.
+   */
+  quickReplies?: {
+    items: string[]
+  }
+  /**
    * Backend-supplied realtime endpoint config (additive field). The widget
    * uses this as the PRIMARY runtime source. Older backends omit the
    * field; the widget falls back to the documented hosted default.

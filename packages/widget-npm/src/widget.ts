@@ -310,6 +310,12 @@ interface WidgetInternalState {
   previewVisible: boolean
   /** Dedup set across socket + poll + history. */
   seenMessageIds: string[]
+  /** V2 quick replies — effective items from public config. */
+  quickRepliesItems: string[]
+  /** Quick replies DOM container. */
+  quickRepliesEl: HTMLElement | null
+  /** Prevents duplicate quick-reply sends while a POST is in-flight. */
+  quickRepliesInFlight: boolean
   /** The current panel side (left/right/center) from the geometry function. */
   panelSide: 'left' | 'right' | 'center'
   /** Resize listener reference (for cleanup on destroy). */
@@ -389,6 +395,9 @@ export class SukhanWidget implements SukhanInstance {
     previewEl: null,
     previewVisible: false,
     seenMessageIds: [],
+    quickRepliesItems: [],
+    quickRepliesEl: null,
+    quickRepliesInFlight: false,
     panelSide: 'right',
     resizeHandler: null,
   }
@@ -789,6 +798,51 @@ export class SukhanWidget implements SukhanInstance {
     this.typingEl = typingEl
     bodyEl.appendChild(typingEl)
 
+    // V2 quick replies: suggestion buttons inside the open panel.
+    // Shown only when the panel is open + visitor authorized + NO visitor
+    // message has been persisted yet (including from history on reload).
+    const qrItems = config.quickReplies?.items || []
+    this.state.quickRepliesItems = qrItems
+    const quickRepliesEl = el('div', 'sk-quick-replies')
+    css(quickRepliesEl, {
+      display: 'none',
+      flexWrap: 'wrap',
+      gap: '6px',
+      padding: '8px 12px',
+      background: '#fff',
+      borderTop: '1px solid #eee',
+      flexShrink: '0',
+    })
+    for (const qrText of qrItems) {
+      const qrBtn = el('button', 'sk-quick-reply') as HTMLButtonElement
+      // SECURITY: tenant-controlled text — use textContent, NEVER innerHTML.
+      qrBtn.textContent = qrText
+      css(qrBtn, {
+        border: '1px solid #ddd',
+        background: '#f7f5f1',
+        color: '#0E1116',
+        borderRadius: '16px',
+        padding: '6px 14px',
+        fontSize: '13px',
+        cursor: 'pointer',
+        fontFamily: 'inherit',
+        whiteSpace: 'nowrap',
+        maxWidth: '100%',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+      })
+      qrBtn.setAttribute('type', 'button')
+      qrBtn.onclick = () => {
+        if (this.state.quickRepliesInFlight) return
+        this.state.quickRepliesInFlight = true
+        this.inputEl.value = qrText
+        this.sendMessage()
+        this.updateQuickReplies()
+      }
+      quickRepliesEl.appendChild(qrBtn)
+    }
+    this.state.quickRepliesEl = quickRepliesEl
+
     const inputBar = el('div', 'sk-input')
     css(inputBar, {
       display: 'flex',
@@ -853,6 +907,7 @@ export class SukhanWidget implements SukhanInstance {
 
     panel.appendChild(header)
     panel.appendChild(bodyEl)
+    if (this.state.quickRepliesEl) this.panel.appendChild(this.state.quickRepliesEl)
 
     if (this.isFreePlan()) {
       const badge = el('a', 'sk-powered')
@@ -1530,6 +1585,11 @@ export class SukhanWidget implements SukhanInstance {
     } catch {
       // ignore — bodyEl may not exist pre-mount
     }
+    // Identity cleared → Quick Replies must hide immediately. With token and
+    // conversationId both null, `authorized` is false so the gate hides the
+    // suggestions without requiring the user to close and reopen the panel.
+    // Safe no-op if the panel element does not exist yet.
+    this.updateQuickReplies()
     // NOTE: memoryIdentityToken is cleared on logout (setIdentity(null)) but
     // PRESERVED across a refresh/bootstrap re-entry so site_user_only can
     // re-use a still-valid token. Callers that must clear it do so explicitly.
@@ -1549,6 +1609,9 @@ export class SukhanWidget implements SukhanInstance {
     if (data.direction === 'rtl' || data.direction === 'ltr') {
       this.state.dir = data.direction
     }
+    // Identity is now ready — Quick Replies may become visible without
+    // requiring the user to close and reopen the panel.
+    this.updateQuickReplies()
   }
 
   /** Render the login-required UI (simple card; login button if loginUrl). */
@@ -1683,6 +1746,7 @@ export class SukhanWidget implements SukhanInstance {
     })
     this.applyPanelTransform()
     this.pulseDot.style.display = 'none'
+    this.updateQuickReplies()
     setTimeout(() => this.inputEl && this.inputEl.focus(), 200)
   }
   close(): void {
@@ -1692,6 +1756,45 @@ export class SukhanWidget implements SukhanInstance {
       pointerEvents: 'none',
     })
     this.applyPanelTransform()
+    this.updateQuickReplies()
+  }
+
+  // V2 quick replies: show suggestion buttons only when the panel is open,
+  // the visitor is authorized, and NO visitor message has been persisted yet
+  // (including from history on reload). After the first visitor message,
+  // suggestions are permanently hidden.
+  private updateQuickReplies(): void {
+    if (!this.state.quickRepliesEl) return
+    // Only count server-persisted visitor messages (real id, not __local_).
+    // Optimistic placeholders (pending/failed) do NOT permanently hide
+    // suggestions — the buttons remain available until the server confirms.
+    const hasPersistedVisitorMsg = (this.state.messages || []).some(
+      (m) =>
+        m?.senderType === 'contact' &&
+        !(m.id && String(m.id).indexOf('__local_') === 0),
+    )
+    const authorized = !!this.state.token
+    const show =
+      this.state.open &&
+      this.state.quickRepliesItems.length > 0 &&
+      !hasPersistedVisitorMsg &&
+      authorized
+    this.state.quickRepliesEl.style.display = show ? 'flex' : 'none'
+    if (hasPersistedVisitorMsg && this.state.quickRepliesEl.childNodes.length > 0) {
+      while (this.state.quickRepliesEl.firstChild) {
+        this.state.quickRepliesEl.removeChild(this.state.quickRepliesEl.firstChild)
+      }
+    }
+    // Disable buttons while a send is in-flight (prevents duplicate sends).
+    if (show) {
+      const btns = this.state.quickRepliesEl.querySelectorAll('.sk-quick-reply')
+      for (let bi = 0; bi < btns.length; bi++) {
+        const btn = btns[bi] as HTMLButtonElement
+        btn.disabled = this.state.quickRepliesInFlight
+        btn.style.opacity = this.state.quickRepliesInFlight ? '0.5' : '1'
+        btn.style.pointerEvents = this.state.quickRepliesInFlight ? 'none' : 'auto'
+      }
+    }
   }
 
   // ---- V2 Message Preview helpers ----
@@ -1909,6 +2012,9 @@ export class SukhanWidget implements SukhanInstance {
           this.state.conversationId = data.conversationId
         }
         this.state.token = data.realtimeToken
+        // Identity is now ready — Quick Replies may become visible without
+        // requiring the user to close and reopen the panel.
+        this.updateQuickReplies()
         return data.realtimeToken
       }
       if (mode === 'verified_visitor') {
@@ -2041,6 +2147,7 @@ export class SukhanWidget implements SukhanInstance {
       .sendMessage(this.state.token, text)
       .then((data) => {
         if (this.destroyed) return // guard: destroy during async send
+        this.state.quickRepliesInFlight = false
         if (data.message) {
           // Central merge — POST response dedups against any socket
           // delivery of the same message id.
@@ -2062,6 +2169,8 @@ export class SukhanWidget implements SukhanInstance {
         // Never silently lose the typed message — restore it so the user
         // can retry. (Explicit retry remains safer than auto-resend.)
         if (this.inputEl) this.inputEl.value = text
+        this.state.quickRepliesInFlight = false
+        this.updateQuickReplies() // re-enable buttons after failure
         if (e instanceof SukhanApiError) {
           // Policy send errors → re-fetch config + trigger the correct
           // identity-upgrade flow. Do NOT auto-resend the message.
@@ -2222,6 +2331,7 @@ export class SukhanWidget implements SukhanInstance {
       body.insertBefore(bubble, this.typingEl)
     }
     this.scrollBody()
+    this.updateQuickReplies() // hide suggestions after the first visitor message
   }
 
   private scrollBody(): void {
@@ -2581,7 +2691,11 @@ export class SukhanWidget implements SukhanInstance {
       // V2 message preview — bubble adjacent to the launcher.
       '.sk-message-preview{box-sizing:border-box;}' +
       '.sk-message-preview-text{box-sizing:border-box;padding-right:20px;}' +
-      '.sk-message-preview-dismiss:hover{color:#0E1116;background:rgba(0,0,0,0.06);}'
+      '.sk-message-preview-dismiss:hover{color:#0E1116;background:rgba(0,0,0,0.06);}' +
+      // V2 quick replies — suggestion buttons inside the open panel.
+      '.sk-quick-replies{box-sizing:border-box;}' +
+      '.sk-quick-reply{box-sizing:border-box;transition:background .15s ease;}' +
+      '.sk-quick-reply:hover{background:#e8e4dc;}'
     document.head.appendChild(style)
   }
 

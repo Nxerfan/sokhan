@@ -200,6 +200,7 @@ export function mergeLauncherPatch(
     ...(base.colors ? { colors: base.colors } : {}),
     ...(base.attention ? { attention: base.attention } : {}),
     ...(base.messagePreview ? { messagePreview: base.messagePreview } : {}),
+    ...(base.quickReplies ? { quickReplies: base.quickReplies } : {}),
   }
 }
 

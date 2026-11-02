@@ -191,6 +191,10 @@ export const IDENTITY_STATEFUL_JS = String.raw`
     __sk_identity.otp = null;
     __sk_identity.resendInFlight = false;
     try { renderMessages(); } catch(e){}
+    // Identity lost — Quick Replies must immediately become non-interactive.
+    try { if (typeof updateQuickReplies === 'function') updateQuickReplies(); } catch(e){}
+    // Message Preview must also be cleared on identity loss.
+    try { if (typeof clearMessagePreviewState === 'function') clearMessagePreviewState(); } catch(e){}
   }
 
   // Single-flight config refresh (socket error + send error + refreshIdentity
@@ -307,7 +311,7 @@ export const IDENTITY_STATEFUL_JS = String.raw`
             .then(function(data){
               if (gen !== __sk_identity.generation - 1) return; // guard
               if (!data) { __sk_clearResume(); __sk_showVerificationForm(); return; }
-              state.contactId = data.contactId; state.conversationId = data.conversationId; state.token = data.realtimeToken;
+              state.contactId = data.contactId; state.conversationId = data.conversationId; state.token = data.realtimeToken; try { if (typeof updateQuickReplies === 'function') updateQuickReplies(); } catch(e){}
               __sk_identity.state = 'verified_ready';
               connectSocket(); if (state.conversationId) loadMessages();
             });
@@ -364,7 +368,7 @@ export const IDENTITY_STATEFUL_JS = String.raw`
       .then(function(data){
         if (gen !== __sk_identity.generation) return;
         if (!data) { __sk_clearResume(); __sk_showVerificationForm(); return; }
-        state.contactId = data.contactId; state.conversationId = data.conversationId; state.token = data.realtimeToken;
+        state.contactId = data.contactId; state.conversationId = data.conversationId; state.token = data.realtimeToken; try { if (typeof updateQuickReplies === 'function') updateQuickReplies(); } catch(e){}
         connectSocket(); if (state.conversationId) loadMessages();
       });
   }
@@ -379,7 +383,7 @@ export const IDENTITY_STATEFUL_JS = String.raw`
           if (gen !== __sk_identity.generation) return;
           if (!data) { __sk_identity.memoryToken = null; __sk_enterLoginRequired(); return; }
           __sk_identity.memoryToken = bearer;
-          state.contactId = data.contactId; state.conversationId = data.conversationId; state.token = data.realtimeToken;
+          state.contactId = data.contactId; state.conversationId = data.conversationId; state.token = data.realtimeToken; try { if (typeof updateQuickReplies === 'function') updateQuickReplies(); } catch(e){}
           __sk_identity.state = 'site_ready';
           connectSocket(); if (state.conversationId) loadMessages();
         });
@@ -410,7 +414,7 @@ export const IDENTITY_STATEFUL_JS = String.raw`
         .then(function(r){ if (!r.ok) return null; return r.json(); })
         .then(function(data){
           if (!data) { __sk_clearResume(); __sk_showVerificationForm(); if (cb) cb(null); return; }
-          state.token = data.realtimeToken; if (data.conversationId && !state.conversationId) state.conversationId = data.conversationId;
+          state.token = data.realtimeToken; if (data.conversationId && !state.conversationId) state.conversationId = data.conversationId; try { if (typeof updateQuickReplies === 'function') updateQuickReplies(); } catch(e){}
           if (cb) cb(data);
         })
         .catch(function(){ if (cb) cb(null); });
@@ -423,7 +427,7 @@ export const IDENTITY_STATEFUL_JS = String.raw`
         if (result === null || !result.authenticated || !result.token) { __sk_enterLoginRequired(); if (cb) cb(null); return; }
         fetch(CONTACT_URL, { method:'POST', headers:{'Content-Type':'application/json','Accept':'application/json','Authorization':'Bearer '+result.token}, body: JSON.stringify({}) })
           .then(function(r){ if (!r.ok) return null; return r.json(); })
-          .then(function(data){ if (!data) { if (cb) cb(null); return; } __sk_identity.memoryToken = result.token; state.token = data.realtimeToken; if (data.conversationId && !state.conversationId) state.conversationId = data.conversationId; if (cb) cb(data); })
+          .then(function(data){ if (!data) { if (cb) cb(null); return; } __sk_identity.memoryToken = result.token; state.token = data.realtimeToken; if (data.conversationId && !state.conversationId) state.conversationId = data.conversationId; try { if (typeof updateQuickReplies === 'function') updateQuickReplies(); } catch(e){} if (cb) cb(data); })
           .catch(function(){ if (cb) cb(null); });
       });
       return;

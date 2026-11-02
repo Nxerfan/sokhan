@@ -142,6 +142,7 @@ export function mergeMessagePreviewPatch(
     ...(base.colors ? { colors: base.colors } : {}),
     ...(base.launcher ? { launcher: base.launcher } : {}),
     ...(base.attention ? { attention: base.attention } : {}),
+    ...(base.quickReplies ? { quickReplies: base.quickReplies } : {}),
   }
 }
 
