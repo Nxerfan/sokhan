@@ -415,6 +415,50 @@ test.describe('Widget V2 Pre-chat Form — Feature 7 independent browser tests',
     }
   })
 
+  test('new required field invalidates incomplete old pre-chat metadata before first message', async ({ browser }) => {
+    const ownerCtx = await browser.newContext()
+    const visitorCtx = await browser.newContext()
+    let site: Awaited<ReturnType<typeof customer>> | undefined
+    try {
+      const owner = await ownerCtx.newPage()
+      const slug = await signup(owner, 'requirements-change')
+      await setAccessMode(owner, 'anonymous')
+      await patch(owner, { preChatForm: { fields: [{ key: 'name', required: true }] } })
+      site = await customer(visitorCtx, slug, 'slug')
+      await openChat(site.page)
+      await submitPreChat(site.page, slug, { name: 'Only Name' })
+
+      // No visitor message has been persisted. Owner strengthens the form
+      // requirement after the first form submission (still Free-allowed).
+      await patch(owner, { preChatForm: { fields: [
+        { key: 'name', required: true }, { key: 'email', required: true },
+      ] } })
+      const unauthorized = await site.page.request.post(BASE + '/api/widget/' + slug + '/messages', {
+        headers: { Authorization: 'Bearer ' + site.token },
+        data: { text: 'Must supply newly required email first' },
+      })
+      expect(unauthorized.status(), 'pre-chat completion must satisfy CURRENT required fields').toBe(403)
+      expect((await unauthorized.json()).error).toBe('pre_chat_required')
+
+      // A real updated submission with both required values must unlock
+      // the first message without fabricating authentication or verification.
+      const update = await site.page.request.post(BASE + '/api/widget/' + slug + '/pre-chat', {
+        headers: { Authorization: 'Bearer ' + site.token },
+        data: { values: { name: 'Only Name', email: 'customer@example.test' } },
+      })
+      expect(update.status()).toBe(200)
+      const nowAllowed = await site.page.request.post(BASE + '/api/widget/' + slug + '/messages', {
+        headers: { Authorization: 'Bearer ' + site.token },
+        data: { text: 'VALID_AFTER_CURRENT_REQUIRED_FIELDS' },
+      })
+      expect(nowAllowed.status()).toBe(200)
+    } finally {
+      if (site) await site.close()
+      await visitorCtx.close()
+      await ownerCtx.close()
+    }
+  })
+
   test('stale anonymous token cannot submit pre-chat after access policy becomes verified_visitor', async ({ browser }) => {
     const ownerCtx = await browser.newContext()
     const visitorCtx = await browser.newContext()
