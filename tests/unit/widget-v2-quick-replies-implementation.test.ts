@@ -517,3 +517,87 @@ describe('Developer — pending/failed/persisted message distinction (shouldDisa
     expect(shouldDisableQuickReplies({ hasPendingVisitorMessage: false, inFlight: false })).toBe(false) // enabled
   })
 })
+
+describe('Developer — HTTP rejection and settled-promise cleanup', () => {
+  test('HTTP 503 non-2xx: in-flight cleared after finalizeSend → buttons re-enabled', () => {
+    // 1. Click: in-flight set to true → disabled.
+    expect(shouldDisableQuickReplies({ hasPendingVisitorMessage: false, inFlight: true })).toBe(true)
+    // 2. HTTP 503 response: finalizeSend clears in-flight → enabled.
+    expect(shouldDisableQuickReplies({ hasPendingVisitorMessage: false, inFlight: false })).toBe(false)
+  })
+
+  test('HTTP 400/403/429/500: same cleanup as 503', () => {
+    // All non-2xx paths go through finalizeSend → in-flight cleared.
+    for (const _status of [400, 403, 429, 500, 503]) {
+      // During request: disabled.
+      expect(shouldDisableQuickReplies({ hasPendingVisitorMessage: false, inFlight: true })).toBe(true)
+      // After finalizeSend: enabled.
+      expect(shouldDisableQuickReplies({ hasPendingVisitorMessage: false, inFlight: false })).toBe(false)
+    }
+  })
+
+  test('network failure (catch): in-flight cleared → buttons re-enabled', () => {
+    // During fetch: disabled.
+    expect(shouldDisableQuickReplies({ hasPendingVisitorMessage: false, inFlight: true })).toBe(true)
+    // After catch: finalizeSend → enabled.
+    expect(shouldDisableQuickReplies({ hasPendingVisitorMessage: false, inFlight: false })).toBe(false)
+  })
+
+  test('malformed JSON response: in-flight cleared → buttons re-enabled', () => {
+    // r.json() throws → .catch() → finalizeSend.
+    expect(shouldDisableQuickReplies({ hasPendingVisitorMessage: false, inFlight: false })).toBe(false)
+  })
+
+  test('auth-policy rejection + recovery: identity lost → buttons stay hidden after cleanup', () => {
+    // Before rejection: authorized → buttons visible + enabled.
+    expect(shouldShowQuickReplies({
+      panelOpen: true, authorized: true, itemsCount: 2, hasVisitorMessage: false,
+    })).toBe(true)
+    // After auth-policy rejection: __sk_authorizationRecovery clears token.
+    // finalizeSend → updateQuickReplies → authorized=false → buttons hidden.
+    expect(shouldShowQuickReplies({
+      panelOpen: true, authorized: false, itemsCount: 2, hasVisitorMessage: false,
+    })).toBe(false)
+  })
+
+  test('repeated manual attempts: click → fail → click again → succeed', () => {
+    // 1st click: in-flight → disabled.
+    expect(shouldDisableQuickReplies({ hasPendingVisitorMessage: false, inFlight: true })).toBe(true)
+    // 1st fail: finalizeSend → enabled (no persisted message).
+    expect(shouldDisableQuickReplies({ hasPendingVisitorMessage: false, inFlight: false })).toBe(false)
+    expect(shouldShowQuickReplies({
+      panelOpen: true, authorized: true, itemsCount: 2, hasVisitorMessage: false,
+    })).toBe(true) // still visible
+    // 2nd click: in-flight → disabled.
+    expect(shouldDisableQuickReplies({ hasPendingVisitorMessage: false, inFlight: true })).toBe(true)
+    // 2nd success: persisted message → buttons removed permanently.
+    expect(shouldShowQuickReplies({
+      panelOpen: true, authorized: true, itemsCount: 2, hasVisitorMessage: true,
+    })).toBe(false)
+  })
+
+  test('successful persistence: finalizeSend is idempotent (buttons already removed)', () => {
+    // After success: renderMessages removes buttons → finalizeSend calls
+    // updateQuickReplies (no-op, buttons already gone) + clears in-flight.
+    // shouldShowQuickReplies returns false (persisted message exists).
+    expect(shouldShowQuickReplies({
+      panelOpen: true, authorized: true, itemsCount: 2, hasVisitorMessage: true,
+    })).toBe(false)
+    // shouldDisableQuickReplies: in-flight cleared, no pending → enabled
+    // (but buttons are already removed, so this is moot).
+    expect(shouldDisableQuickReplies({ hasPendingVisitorMessage: false, inFlight: false })).toBe(false)
+  })
+
+  test('identity loss during in-flight send: cleanup does NOT re-enable for new visitor', () => {
+    // During send: authorized=true, in-flight=true → visible but disabled.
+    expect(shouldShowQuickReplies({
+      panelOpen: true, authorized: true, itemsCount: 2, hasVisitorMessage: false,
+    })).toBe(true)
+    expect(shouldDisableQuickReplies({ hasPendingVisitorMessage: false, inFlight: true })).toBe(true)
+    // Identity cleared during error handling: authorized=false.
+    // finalizeSend → updateQuickReplies → show=false (not authorized).
+    expect(shouldShowQuickReplies({
+      panelOpen: true, authorized: false, itemsCount: 2, hasVisitorMessage: false,
+    })).toBe(false)
+  })
+})

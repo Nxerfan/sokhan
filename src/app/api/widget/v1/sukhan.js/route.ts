@@ -869,6 +869,19 @@ ${POSITIONING_FN_SOURCE}
     var text = inputEl.value.trim();
     if (!text) return;
     inputEl.value = '';
+    // Centralized cleanup: ALWAYS reset in-flight + update buttons after
+    // every settled send attempt — success, HTTP 4xx/5xx, network failure,
+    // malformed JSON, or auth-policy rejection. This guarantees the buttons
+    // are never stuck disabled. On success, updateQuickReplies() removes
+    // the buttons (persisted message); on failure, it re-enables them
+    // (if the visitor remains authorized). If identity was cleared during
+    // error handling, the authorized gate in updateQuickReplies() keeps
+    // the buttons hidden — cleanup does NOT accidentally enable them for
+    // a different visitor.
+    var finalizeSend = function() {
+      state.quickRepliesInFlight = false;
+      updateQuickReplies();
+    };
     fetch(MESSAGES_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + state.token },
@@ -889,11 +902,10 @@ ${POSITIONING_FN_SOURCE}
       return r.json();
     })
     .then(function(data){
-      if (!data) return;
-      state.quickRepliesInFlight = false;
+      if (!data) { finalizeSend(); return; }
       if (data.message) {
         state.messages.push(data.message);
-        renderMessages();
+        renderMessages(); // calls updateQuickReplies() — removes buttons on success
       }
       if (data.conversationId && data.conversationId !== state.conversationId) {
         clearMessagePreviewState();
@@ -903,11 +915,11 @@ ${POSITIONING_FN_SOURCE}
         }
       }
       startPolling();
+      finalizeSend(); // clears in-flight; updateQuickReplies() is idempotent
     })
     .catch(function(e){
       if (inputEl) inputEl.value = text; // never silently lose the typed message
-      state.quickRepliesInFlight = false;
-      updateQuickReplies(); // re-enable buttons after failure
+      finalizeSend();
       console.error('[sukhan] send failed', e);
     });
   }
