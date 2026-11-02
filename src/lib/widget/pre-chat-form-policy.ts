@@ -167,3 +167,38 @@ export function shouldRequirePreChat(
   if (hasCompletedForm) return false
   return true
 }
+
+/**
+ * Check whether the Contact's stored pre-chat metadata satisfies the CURRENT
+ * effective form's required fields. This is used to determine if the form has
+ * been "completed" — not just whether metadata exists, but whether the stored
+ * values satisfy the current requirements.
+ *
+ * A form is complete when:
+ *   1. The effective form has no fields (form not configured → vacuously complete).
+ *   2. Every required field in the effective form has a non-blank value in the
+ *      stored pre-chat metadata.
+ *
+ * Optional fields that are missing are fine. Extra fields in the stored
+ * metadata (e.g. formerly advanced fields after a downgrade) do NOT cause
+ * failure — only the CURRENT effective required fields matter.
+ *
+ * Pure TS — never throws, never accesses the database.
+ */
+export function isPreChatComplete(
+  effectiveForm: EffectiveFormConfig,
+  storedPreChat: Record<string, unknown> | null | undefined,
+): boolean {
+  if (!effectiveForm.fields || effectiveForm.fields.length === 0) return true
+  if (!storedPreChat || typeof storedPreChat !== 'object') return false
+
+  for (const field of effectiveForm.fields) {
+    if (!field.required) continue
+    const value = storedPreChat[field.key]
+    if (value === undefined || value === null) return false
+    if (typeof value !== 'string') return false
+    if (value.trim() === '') return false
+  }
+
+  return true
+}

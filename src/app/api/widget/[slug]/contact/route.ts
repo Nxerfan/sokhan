@@ -4,6 +4,9 @@ import { signToken } from '@/lib/realtime-token'
 import { verifyResumeCredential, verifyExternalIdentityToken } from '@/lib/widget-identity-tokens'
 import { parseAccessMode, parsePolicyVersion } from '@/lib/widget-access-policy'
 import { checkRateLimit, getClientIP } from '@/lib/rate-limit'
+import { getEntitlements } from '@/lib/payments/widget-entitlements'
+import { resolveEffectivePreChatForm } from '@/lib/widget/effective-pre-chat-form'
+import { isPreChatComplete } from '@/lib/widget/pre-chat-form-policy'
 
 /** CORS + rate-limit headers for widget API responses. */
 function widgetHeaders(res: NextResponse): NextResponse {
@@ -76,7 +79,7 @@ export async function POST(
 
 async function anonymousBootstrap(
   req: NextRequest,
-  tenant: { id: string; defaultLocale: string; defaultDirection: string },
+  tenant: { id: string; defaultLocale: string; defaultDirection: string; plan: string; widgetConfig: { appearanceV2: unknown } | null },
   slug: string,
   policyVersion: number,
 ) {
@@ -131,7 +134,7 @@ async function anonymousBootstrap(
   if ('identityConflict' in result && result.identityConflict) {
     return widgetHeaders(NextResponse.json({ error: 'identity_conflict' }, { status: 403 }))
   }
-  const { contact, existingConversation } = result as { contact: { id: string }; existingConversation: { id: string } | null }
+  const { contact, existingConversation } = result as { contact: { id: string; metadata: unknown }; existingConversation: { id: string } | null }
 
   const realtimeToken = signToken({
     type: 'visitor',
@@ -142,17 +145,31 @@ async function anonymousBootstrap(
     policyVersion,
   })
 
+  // Compute server-authoritative preChatCompleted from the contact's stored
+  // metadata + the CURRENT effective form. This survives reload before the
+  // first message — the client doesn't need to re-submit.
+  const entitlements = getEntitlements(tenant.plan)
+  const effectiveForm = resolveEffectivePreChatForm(
+    { appearanceV2: tenant.widgetConfig?.appearanceV2 },
+    entitlements,
+  )
+  const contactMetadata = (contact.metadata && typeof contact.metadata === 'object' && !Array.isArray(contact.metadata))
+    ? contact.metadata as Record<string, unknown>
+    : {}
+  const preChatCompleted = isPreChatComplete(effectiveForm, contactMetadata.preChat as Record<string, unknown> | undefined)
+
   return widgetHeaders(NextResponse.json({
     contactId: contact.id,
     conversationId: existingConversation?.id ?? null,
     realtimeToken,
     locale: tenant.defaultLocale,
     direction: tenant.defaultDirection,
+    preChatCompleted,
   }))
 }
 
 async function verifiedVisitorBootstrap(
-  tenant: { id: string; defaultLocale: string; defaultDirection: string },
+  tenant: { id: string; defaultLocale: string; defaultDirection: string; plan: string; widgetConfig: { appearanceV2: unknown } | null },
   slug: string,
   policyVersion: number,
   bearer: string,
@@ -192,17 +209,28 @@ async function verifiedVisitorBootstrap(
     policyVersion,
   })
 
+  const entitlements = getEntitlements(tenant.plan)
+  const effectiveForm = resolveEffectivePreChatForm(
+    { appearanceV2: tenant.widgetConfig?.appearanceV2 },
+    entitlements,
+  )
+  const contactMetadata = (contact.metadata && typeof contact.metadata === 'object' && !Array.isArray(contact.metadata))
+    ? contact.metadata as Record<string, unknown>
+    : {}
+  const preChatCompleted = isPreChatComplete(effectiveForm, contactMetadata.preChat as Record<string, unknown> | undefined)
+
   return widgetHeaders(NextResponse.json({
     contactId: contact.id,
     conversationId: existingConversation?.id ?? null,
     realtimeToken,
     locale: tenant.defaultLocale,
     direction: tenant.defaultDirection,
+    preChatCompleted,
   }))
 }
 
 async function siteUserBootstrap(
-  tenant: { id: string; defaultLocale: string; defaultDirection: string },
+  tenant: { id: string; defaultLocale: string; defaultDirection: string; plan: string; widgetConfig: { appearanceV2: unknown } | null },
   slug: string,
   policyVersion: number,
   bearer: string,
@@ -244,11 +272,22 @@ async function siteUserBootstrap(
     policyVersion,
   })
 
+  const entitlements = getEntitlements(tenant.plan)
+  const effectiveForm = resolveEffectivePreChatForm(
+    { appearanceV2: tenant.widgetConfig?.appearanceV2 },
+    entitlements,
+  )
+  const contactMetadata = (contact.metadata && typeof contact.metadata === 'object' && !Array.isArray(contact.metadata))
+    ? contact.metadata as Record<string, unknown>
+    : {}
+  const preChatCompleted = isPreChatComplete(effectiveForm, contactMetadata.preChat as Record<string, unknown> | undefined)
+
   return widgetHeaders(NextResponse.json({
     contactId: contact.id,
     conversationId: existingConversation?.id ?? null,
     realtimeToken,
     locale: tenant.defaultLocale,
     direction: tenant.defaultDirection,
+    preChatCompleted,
   }))
 }

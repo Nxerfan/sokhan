@@ -10,7 +10,7 @@ import { getRequestDomain, isDomainAllowed } from '@/lib/payments/domain-validat
 import { parseAccessMode, parsePolicyVersion, evaluateSendAuthorization, resolveLegacyTokenIdentity } from '@/lib/widget-access-policy'
 import { getEntitlements } from '@/lib/payments/widget-entitlements'
 import { resolveEffectivePreChatForm } from '@/lib/widget/effective-pre-chat-form'
-import { shouldRequirePreChat } from '@/lib/widget/pre-chat-form-policy'
+import { shouldRequirePreChat, isPreChatComplete } from '@/lib/widget/pre-chat-form-policy'
 
 const MAX_MESSAGE_LENGTH = 5000
 const MAX_MESSAGES_PER_CONVERSATION = 200
@@ -253,13 +253,16 @@ export async function POST(
           entitlements,
         )
 
-        // Check if the contact has completed the form (metadata.preChat exists).
+        // Validate stored pre-chat values against the CURRENT required fields.
+        // A truthy metadata.preChat is NOT sufficient — the owner may have
+        // added new required fields since the visitor last submitted.
         const fullContact = await db.contact.findUnique({
           where: { id: contactId },
           select: { metadata: true },
         })
         const contactMetadata = fullContact?.metadata as Record<string, unknown> | null
-        const hasCompletedForm = !!(contactMetadata && contactMetadata.preChat)
+        const storedPreChat = contactMetadata?.preChat as Record<string, unknown> | undefined
+        const hasCompletedForm = isPreChatComplete(effectiveForm, storedPreChat)
 
         if (shouldRequirePreChat(effectiveForm, hasPersistedVisitorMessage, hasCompletedForm)) {
           return { kind: 'pre_chat_required' as const }

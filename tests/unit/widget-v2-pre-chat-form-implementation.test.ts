@@ -19,7 +19,7 @@ import {
 } from '../../src/lib/widget/pre-chat-form-patch'
 import { resolveEffectivePreChatForm } from '../../src/lib/widget/effective-pre-chat-form'
 import {
-  validatePreChatSubmission, shouldRequirePreChat,
+  validatePreChatSubmission, shouldRequirePreChat, isPreChatComplete,
 } from '../../src/lib/widget/pre-chat-form-policy'
 import {
   PRE_CHAT_FIELD_KEYS,
@@ -381,5 +381,118 @@ describe('Developer — strict parseAppearanceV2 preChatForm', () => {
   test('empty fields is valid', () => {
     const v = parseAppearanceV2({ version: 1, preChatForm: { fields: [] } })
     expect(v?.preChatForm).toEqual({ fields: [] })
+  })
+})
+
+describe('Developer — isPreChatComplete: validate stored values against CURRENT required fields', () => {
+  const nameOnly = { fields: [{ key: 'name' as const, required: true }] }
+  const nameEmailRequired = { fields: [{ key: 'name' as const, required: true }, { key: 'email' as const, required: true }] }
+  const nameRequiredEmailOptional = { fields: [{ key: 'name' as const, required: true }, { key: 'email' as const, required: false }] }
+  const noFields = { fields: [] }
+
+  test('no fields configured → vacuously complete', () => {
+    expect(isPreChatComplete(noFields, null)).toBe(true)
+    expect(isPreChatComplete(noFields, undefined)).toBe(true)
+    expect(isPreChatComplete(noFields, {})).toBe(true)
+  })
+
+  test('null/undefined stored pre-chat → incomplete (when fields exist)', () => {
+    expect(isPreChatComplete(nameOnly, null)).toBe(false)
+    expect(isPreChatComplete(nameOnly, undefined)).toBe(false)
+  })
+
+  test('all required fields present and nonblank → complete', () => {
+    expect(isPreChatComplete(nameOnly, { name: 'Alice' })).toBe(true)
+    expect(isPreChatComplete(nameEmailRequired, { name: 'Alice', email: 'a@b.com' })).toBe(true)
+  })
+
+  test('required field missing → incomplete', () => {
+    expect(isPreChatComplete(nameEmailRequired, { name: 'Alice' })).toBe(false)
+    expect(isPreChatComplete(nameEmailRequired, { email: 'a@b.com' })).toBe(false)
+  })
+
+  test('required field blank → incomplete', () => {
+    expect(isPreChatComplete(nameOnly, { name: '' })).toBe(false)
+    expect(isPreChatComplete(nameOnly, { name: '  ' })).toBe(false)
+  })
+
+  test('optional field missing → still complete', () => {
+    expect(isPreChatComplete(nameRequiredEmailOptional, { name: 'Alice' })).toBe(true)
+  })
+
+  test('extra fields in stored metadata do NOT cause failure', () => {
+    // Downgrade scenario: formerly advanced fields (phone/company) are in the
+    // stored metadata but are NOT in the current effective form. The form is
+    // still complete because only CURRENT required fields matter.
+    expect(isPreChatComplete(nameOnly, { name: 'Alice', phone: '+1234', company: 'Acme' })).toBe(true)
+  })
+
+  test('non-string values for required fields → incomplete', () => {
+    expect(isPreChatComplete(nameOnly, { name: 42 })).toBe(false)
+    expect(isPreChatComplete(nameOnly, { name: null })).toBe(false)
+    expect(isPreChatComplete(nameOnly, { name: true })).toBe(false)
+  })
+
+  test('Bug C: old incomplete form (name only) does NOT satisfy new required email', () => {
+    // Visitor submitted { name: 'Only Name' } when only name was required.
+    // Owner adds email as required. The old metadata is insufficient.
+    expect(isPreChatComplete(nameEmailRequired, { name: 'Only Name' })).toBe(false)
+  })
+
+  test('Bug C: after re-submission with both values → complete', () => {
+    // Visitor re-submits with both name + email → satisfies current requirements.
+    expect(isPreChatComplete(nameEmailRequired, { name: 'Alice', email: 'alice@example.com' })).toBe(true)
+  })
+
+  test('Bug B: completed form survives reload (same required fields)', () => {
+    // Visitor completed the form. On reload, the /contact response computes
+    // preChatCompleted from the stored metadata + current effective form.
+    // Since the required fields haven't changed, the form is still complete.
+    expect(isPreChatComplete(nameEmailRequired, { name: 'Alice', email: 'alice@example.com' })).toBe(true)
+  })
+
+  test('Bug B: different visitor (no metadata) → incomplete', () => {
+    // A different visitor has no stored pre-chat metadata → form is required.
+    expect(isPreChatComplete(nameEmailRequired, null)).toBe(false)
+    expect(isPreChatComplete(nameEmailRequired, undefined)).toBe(false)
+  })
+
+  test('downgrade with formerly advanced values: basic required fields still satisfied', () => {
+    // Pro had name+email+phone+company all required. Downgrade to Free:
+    // effective form is name+email only. The stored values include phone+
+    // company (extra), but the CURRENT basic required fields (name+email)
+    // are present and nonblank → complete.
+    const basicForm = { fields: [{ key: 'name' as const, required: true }, { key: 'email' as const, required: true }] }
+    const storedWithExtras = { name: 'Alice', email: 'a@b.com', phone: '+1234', company: 'Acme' }
+    expect(isPreChatComplete(basicForm, storedWithExtras)).toBe(true)
+  })
+
+  test('stale async response after identity change: different contact metadata', () => {
+    // If identity changed (user-switch), the old contact's metadata is NOT
+    // the new contact's metadata. isPreChatComplete checks the STORED values
+    // passed to it — the caller (server) reads the CURRENT contact's metadata.
+    // If the new contact has no pre-chat → incomplete.
+    const newContactMetadata = undefined
+    expect(isPreChatComplete(nameEmailRequired, newContactMetadata)).toBe(false)
+  })
+
+  test('all required fields satisfied, optional fields present → complete', () => {
+    const allFields = { fields: [
+      { key: 'name' as const, required: true },
+      { key: 'email' as const, required: true },
+      { key: 'phone' as const, required: false },
+      { key: 'company' as const, required: false },
+    ] }
+    expect(isPreChatComplete(allFields, { name: 'A', email: 'a@b.com', phone: '+1', company: 'C' })).toBe(true)
+  })
+
+  test('all required fields satisfied, optional fields absent → complete', () => {
+    const allFields = { fields: [
+      { key: 'name' as const, required: true },
+      { key: 'email' as const, required: true },
+      { key: 'phone' as const, required: false },
+      { key: 'company' as const, required: false },
+    ] }
+    expect(isPreChatComplete(allFields, { name: 'A', email: 'a@b.com' })).toBe(true)
   })
 })
