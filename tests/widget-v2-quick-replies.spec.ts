@@ -455,6 +455,71 @@ test.describe('Widget V2 Quick Replies — Feature 6 only', () => {
     }
   })
 
+
+  // A transport abort enters Promise.catch. An HTTP non-2xx response
+  // can follow a DIFFERENT code path: response.ok false, resolved null.
+  // Both must clear in-flight suppression. Inject ERROR only, never success.
+  for (const surface of ['v1', 'npm'] as const) {
+    test(surface + ' HTTP 503 on first quick reply restores buttons for manual retry', async ({ browser }) => {
+      test.setTimeout(120_000)
+      const ownerCtx = await browser.newContext()
+      const visitorCtx = await browser.newContext({ viewport: { width: 320, height: 640 } })
+      let site: Awaited<ReturnType<typeof customer>> | undefined
+      try {
+        const owner = await ownerCtx.newPage()
+        const slug = await signup(owner, 'http-error-' + surface)
+        await setAccessMode(owner, 'anonymous')
+        await patch(owner, { quickReplies: { items: ['First', 'Second'] } })
+        site = await customer(visitorCtx, slug, surface)
+        const page = site.page
+        await page.locator('.sk-launcher').click()
+        await expect(page.locator('.sk-panel')).toHaveCSS('pointer-events', 'auto')
+        const buttons = page.locator('.sk-quick-reply')
+        await expect(buttons).toHaveCount(2)
+        await expect(buttons.first()).toBeEnabled()
+
+        let errorResponses = 0
+        await page.route('**/api/widget/' + slug + '/messages', async route => {
+          if (route.request().method() !== 'POST') {
+            await route.continue()
+            return
+          }
+          errorResponses++
+          await route.fulfill({
+            status: 503,
+            contentType: 'application/json',
+            headers: {
+              'Access-Control-Allow-Origin': new URL(page.url()).origin,
+              'Access-Control-Allow-Credentials': 'true',
+              'Cache-Control': 'no-store',
+            },
+            body: JSON.stringify({ error: 'temporary_unavailable' }),
+          })
+        })
+        const rejected = page.waitForResponse(res =>
+          res.request().method() === 'POST' &&
+          res.url().includes('/api/widget/' + slug + '/messages'),
+          { timeout: 20_000 },
+        )
+        await buttons.first().click()
+        const result = await rejected
+        expect(result.status()).toBe(503)
+        await result.finished()
+        expect(errorResponses).toBe(1)
+
+        // No server success, no persisted message: retry must remain possible.
+        await expect(buttons).toHaveCount(2)
+        await expect(buttons.first()).toBeEnabled({ timeout: 10_000 })
+        await expect(page.locator('.sk-msg.sk-vis p').filter({ hasText: 'First' }))
+          .toHaveCount(0)
+      } finally {
+        if (site) await site.close()
+        await visitorCtx.close()
+        await ownerCtx.close()
+      }
+    })
+  }
+
   test('XSS-looking quick reply stays text only, never creates HTML elements', async ({ browser }) => {
     const ownerCtx = await browser.newContext()
     const visitorCtx = await browser.newContext()
