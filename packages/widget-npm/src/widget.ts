@@ -337,6 +337,14 @@ interface WidgetInternalState {
   pageVisibilityOrigPushState: ((...args: unknown[]) => void) | null
   /** Original history.replaceState (restored on destroy). */
   pageVisibilityOrigReplaceState: ((...args: unknown[]) => void) | null
+  /** V2 alternative contact buttons — effective items from public config (Feature 9). */
+  altContactItems: Array<{
+    kind: 'phone' | 'email' | 'whatsapp' | 'telegram' | 'website'
+    label: string
+    value: string
+  }>
+  /** .sk-alt-contact-links DOM container (created in mount when items.length > 0). */
+  altContactEl: HTMLElement | null
   /** The current panel side (left/right/center) from the geometry function. */
   panelSide: 'left' | 'right' | 'center'
   /** Resize listener reference (for cleanup on destroy). */
@@ -427,6 +435,8 @@ export class SukhanWidget implements SukhanInstance {
     pageVisibilityPopHandler: null,
     pageVisibilityOrigPushState: null,
     pageVisibilityOrigReplaceState: null,
+    altContactItems: [],
+    altContactEl: null,
     panelSide: 'right',
     resizeHandler: null,
   }
@@ -596,6 +606,34 @@ export class SukhanWidget implements SukhanInstance {
     // The runtime evaluates these rules against window.location.pathname +
     // the detected device to decide whether to hide the widget root.
     this.state.pageVisibilityRules = config.pageVisibility?.rules ?? []
+    // V2 alternative contact buttons: read the effective authorized items from
+    // the public config (Feature 9). Empty array for Free / unknown / no-V2-
+    // selection. The runtime renders one <a class="sk-alt-contact-link"> per
+    // item inside the panel; the links NEVER send a Sukhan message, complete
+    // a pre-chat form, or bypass authorization.
+    const rawAltItems = config.alternativeContactButtons?.items ?? []
+    // Defensive copy + sanitize: keep only items with the expected shape so a
+    // malformed persisted config cannot break the render loop. The backend
+    // validates these too — this is defense-in-depth at the runtime boundary.
+    const ALLOWED_ALT_KINDS = new Set(['phone', 'email', 'whatsapp', 'telegram', 'website'])
+    const safeAltItems: Array<{
+      kind: 'phone' | 'email' | 'whatsapp' | 'telegram' | 'website'
+      label: string
+      value: string
+    }> = []
+    for (const raw of rawAltItems) {
+      if (!raw || typeof raw !== 'object') continue
+      const r = raw as Record<string, unknown>
+      if (typeof r.kind !== 'string' || !ALLOWED_ALT_KINDS.has(r.kind)) continue
+      if (typeof r.label !== 'string' || typeof r.value !== 'string') continue
+      safeAltItems.push({
+        kind: r.kind as 'phone' | 'email' | 'whatsapp' | 'telegram' | 'website',
+        label: r.label,
+        value: r.value,
+      })
+    }
+    this.state.altContactItems = safeAltItems
+    this.state.altContactEl = safeAltItems.length > 0 ? this.buildAltContactLinks(safeAltItems) : null
     const attentionClass = effectiveAttention !== 'none' ? ' sk-attention-' + effectiveAttention : ''
     const launcher = el('button', 'sk-launcher ' + shapeClass(effectiveShape) + attentionClass) as HTMLButtonElement
     launcher.setAttribute('aria-label', this.state.locale === 'fa' ? 'گفت‌وگو' : 'Open chat')
@@ -1001,6 +1039,13 @@ export class SukhanWidget implements SukhanInstance {
     // While visible, the input bar + quick replies are hidden by
     // updatePreChatForm(); when hidden, the input bar is restored.
     if (this.state.preChatFormEl) this.panel.appendChild(this.state.preChatFormEl)
+
+    // V2 alternative contact links (Feature 9): appended just above the input
+    // bar so the visitor always sees them when the panel is open, even while
+    // the pre-chat form is visible (the links do NOT send a Sukhan message,
+    // complete a pre-chat form, or bypass authorization). Empty when the
+    // tenant has no buttons configured — no container is appended.
+    if (this.state.altContactEl) this.panel.appendChild(this.state.altContactEl)
 
     panel.appendChild(inputBar)
     root.appendChild(panel)
@@ -1840,6 +1885,7 @@ export class SukhanWidget implements SukhanInstance {
     this.pulseDot.style.display = 'none'
     this.updatePreChatForm() // may hide input + quick replies when form is shown
     this.updateQuickReplies()
+    this.updateAltContactLinks() // V2 alternative contact buttons (Feature 9)
     // V2 page visibility: re-evaluate on open — the visitor may have
     // navigated since the last evaluation (SPA route change without a
     // popstate event). Cheap and idempotent.
@@ -1861,6 +1907,7 @@ export class SukhanWidget implements SukhanInstance {
     this.applyPanelTransform()
     this.updatePreChatForm()
     this.updateQuickReplies()
+    this.updateAltContactLinks()
     // V2 page visibility: re-evaluate on close (same rationale as open()).
     this.updatePageVisibility()
   }
@@ -3103,6 +3150,106 @@ export class SukhanWidget implements SukhanInstance {
     }
   }
 
+  // ============================================================
+  // V2 Alternative Contact Buttons (Feature 9).
+  //   The public config exposes `alternativeContactButtons: { items: [...] }`
+  //   where each item is { kind, label, value }. The runtime renders a row of
+  //   anchor links inside the open panel — these links NEVER send a Sukhan
+  //   message, complete a pre-chat form, or bypass authorization. They are
+  //   plain <a> elements that the visitor's browser handles natively.
+  //
+  //   Behavior:
+  //     - Empty items array → no container is created (legacy behavior).
+  //     - The container is part of the widget root → hidden automatically
+  //       when Page Visibility hides the widget (Feature 8).
+  //     - Visible only when the panel is open + items.length > 0.
+  //     - Website links open in a new tab (target=_blank rel=noopener).
+  //     - tel:/mailto: links have no target/rel (native handler).
+  //     - Labels use textContent (never innerHTML) — XSS-safe.
+  // ============================================================
+
+  /**
+   * Inlined alternative-contact href policy. Mirrors the pure TS
+   * `buildAlternativeContactHref` in `src/lib/widget/alternative-contact-types.ts`
+   * — kept inline so the NPM package has no cross-package dependency on the
+   * Sukhan backend code. Returns a safe destination URL string.
+   *
+   * Pure function — never throws, never accesses the DOM.
+   */
+  private __skBuildAltContactHref(item: {
+    kind: 'phone' | 'email' | 'whatsapp' | 'telegram' | 'website'
+    value: string
+  }): string {
+    if (!item || typeof item.kind !== 'string' || typeof item.value !== 'string') return '#'
+    switch (item.kind) {
+      case 'phone':
+        return 'tel:' + item.value
+      case 'email':
+        return 'mailto:' + item.value
+      case 'whatsapp':
+        return 'https://wa.me/' + item.value.replace(/[^\d]/g, '')
+      case 'telegram':
+        return 'https://t.me/' + item.value
+      case 'website':
+        return item.value
+      default:
+        return '#'
+    }
+  }
+
+  /**
+   * Create the .sk-alt-contact-links container with one
+   * <a class="sk-alt-contact-link"> per item. Returns the container element.
+   * Idempotent across repeated mount/render cycles — each invocation produces
+   * a fresh container (the caller is responsible for replacing any prior one).
+   */
+  private buildAltContactLinks(items: Array<{
+    kind: 'phone' | 'email' | 'whatsapp' | 'telegram' | 'website'
+    label: string
+    value: string
+  }>): HTMLElement {
+    const container = el('div', 'sk-alt-contact-links') as HTMLElement
+    css(container, {
+      display: 'none',
+      flexDirection: 'column',
+      gap: '2px',
+      padding: '6px 8px',
+      background: '#fff',
+      borderTop: '1px solid #f0eee9',
+      flexShrink: '0',
+    })
+    for (const it of items) {
+      if (!it || typeof it.kind !== 'string' || typeof it.label !== 'string' || typeof it.value !== 'string') {
+        continue
+      }
+      const href = this.__skBuildAltContactHref(it)
+      const a = el('a', 'sk-alt-contact-link') as HTMLAnchorElement
+      a.setAttribute('data-sk-alt-contact-kind', it.kind)
+      a.setAttribute('href', href)
+      // Website links open in a new tab; tel:/mailto: use the native handler.
+      if (it.kind === 'website') {
+        a.setAttribute('target', '_blank')
+        a.setAttribute('rel', 'noopener noreferrer')
+      }
+      // SECURITY: tenant-controlled label — use textContent, NEVER innerHTML.
+      a.textContent = it.label
+      container.appendChild(a)
+    }
+    return container
+  }
+
+  /**
+   * Toggle visibility based on the panel open state. Called from open() and
+   * close(). The container itself is part of the widget root (so Page
+   * Visibility hides it automatically with the rest of the root).
+   */
+  private updateAltContactLinks(): void {
+    if (!this.state.altContactEl) return
+    if (this.destroyed) return
+    const show = this.state.open && this.state.altContactItems.length > 0
+    this.state.altContactEl.style.display = show ? 'flex' : 'none'
+  }
+
   private injectStyles(accent: string): void {
     const style = el('style')
     style.textContent =
@@ -3146,7 +3293,15 @@ export class SukhanWidget implements SukhanInstance {
       '.sk-pre-chat-form{display:none;flex-direction:column;gap:8px;padding:16px;background:#f7f5f1;flex-shrink:0;}' +
       '.sk-pre-chat-form input{border:1px solid #ddd;border-radius:8px;padding:8px 12px;font-size:14px;width:100%;box-sizing:border-box;}' +
       '.sk-pre-chat-submit{background:#0E1116;color:#fff;border:none;border-radius:8px;padding:10px;cursor:pointer;font-size:14px;}' +
-      '.sk-pre-chat-error{color:#e53e3e;font-size:12px;display:none;}'
+      '.sk-pre-chat-error{color:#e53e3e;font-size:12px;display:none;}' +
+      // V2 alternative contact buttons (Feature 9) — anchor links inside the
+      // open panel. Plain <a> elements: never send a Sukhan message, complete
+      // a pre-chat form, or bypass authorization. The container is part of
+      // the widget root → hidden automatically when Page Visibility hides the
+      // widget. Hover affordance matches the rest of the panel surfaces.
+      '.sk-alt-contact-links{box-sizing:border-box;}' +
+      '.sk-alt-contact-link{display:flex;align-items:center;gap:6px;padding:6px 12px;text-decoration:none;color:inherit;border-radius:8px;transition:background .15s;}' +
+      '.sk-alt-contact-link:hover{background:rgba(0,0,0,0.06);}'
     document.head.appendChild(style)
   }
 

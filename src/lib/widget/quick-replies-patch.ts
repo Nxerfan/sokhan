@@ -207,6 +207,7 @@ export function mergeQuickRepliesPatch(
     ...(base.messagePreview ? { messagePreview: base.messagePreview } : {}),
     ...(base.preChatForm ? { preChatForm: base.preChatForm } : {}),
     ...(base.pageVisibility ? { pageVisibility: base.pageVisibility } : {}),
+    ...(base.alternativeContactButtons ? { alternativeContactButtons: base.alternativeContactButtons } : {}),
   }
 }
 

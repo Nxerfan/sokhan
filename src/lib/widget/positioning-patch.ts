@@ -285,6 +285,7 @@ export function mergePositioningPatch(
     ...(base.quickReplies ? { quickReplies: base.quickReplies } : {}),
     ...(base.preChatForm ? { preChatForm: base.preChatForm } : {}),
     ...(base.pageVisibility ? { pageVisibility: base.pageVisibility } : {}),
+    ...(base.alternativeContactButtons ? { alternativeContactButtons: base.alternativeContactButtons } : {}),
   }
 }
 
@@ -322,7 +323,7 @@ const ALL_RECOGNIZED_KEYS = new Set([
   'launcher',
   'attention',
   'messagePreview',
-  'quickReplies', 'preChatForm', 'pageVisibility',
+  'quickReplies', 'preChatForm', 'pageVisibility', 'alternativeContactButtons',
 ])
 
 /**
