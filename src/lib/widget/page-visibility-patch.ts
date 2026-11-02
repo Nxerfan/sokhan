@@ -204,6 +204,7 @@ export function mergePageVisibilityPatch(
     ...(base.quickReplies ? { quickReplies: base.quickReplies } : {}),
     ...(base.preChatForm ? { preChatForm: base.preChatForm } : {}),
     ...(base.alternativeContactButtons ? { alternativeContactButtons: base.alternativeContactButtons } : {}),
+    ...(base.smartAvoidance ? { smartAvoidance: base.smartAvoidance } : {}),
   }
 }
 

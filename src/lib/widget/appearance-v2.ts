@@ -207,6 +207,14 @@ export interface AlternativeContactButtonStored {
   value: string
 }
 
+/**
+ * Smart Avoidance configuration (Phase 2 / Feature 10). Additive — null =
+ * disabled (default).
+ */
+export interface SmartAvoidanceConfig {
+  enabled: boolean
+}
+
 /** The versioned appearance configuration. */
 export interface AppearanceV2 {
   version: typeof APPEARANCE_V2_VERSION
@@ -228,6 +236,8 @@ export interface AppearanceV2 {
   pageVisibility?: PageVisibilityConfig
   /** Alternative Contact Buttons (Phase 2 / Feature 9). Additive — null = no buttons. */
   alternativeContactButtons?: AlternativeContactButtonsConfig
+  /** Smart Avoidance (Phase 2 / Feature 10). Additive — null = disabled. */
+  smartAvoidance?: SmartAvoidanceConfig
 }
 
 /** The canonical default appearance (V2). */
@@ -272,7 +282,7 @@ export const DEFAULT_APPEARANCE_V2: AppearanceV2 = {
  */
 
 /** Allowed top-level keys in an AppearanceV2 object. */
-const ALLOWED_TOP_LEVEL_KEYS = new Set(['version', 'desktop', 'mobile', 'colors', 'launcher', 'attention', 'messagePreview', 'quickReplies', 'preChatForm', 'pageVisibility', 'alternativeContactButtons'])
+const ALLOWED_TOP_LEVEL_KEYS = new Set(['version', 'desktop', 'mobile', 'colors', 'launcher', 'attention', 'messagePreview', 'quickReplies', 'preChatForm', 'pageVisibility', 'alternativeContactButtons', 'smartAvoidance'])
 
 /**
  * Check if a value is a plain JSON-compatible object — prototype is exactly
@@ -562,6 +572,27 @@ export function parseAppearanceV2(value: unknown): AppearanceV2 | null {
   }
   if (alternativeContactButtons !== null && alternativeContactButtons !== undefined) {
     result.alternativeContactButtons = alternativeContactButtons
+  }
+
+  // Parse smartAvoidance if present.
+  const saDesc = getOwnDataDescriptor(value, 'smartAvoidance')
+  let saValue: unknown = undefined
+  if (saDesc !== null) {
+    saValue = saDesc.value
+  } else {
+    try {
+      if (Object.prototype.hasOwnProperty.call(value, 'smartAvoidance')) return null
+    } catch {
+      return null
+    }
+  }
+  let smartAvoidance: SmartAvoidanceConfig | null | undefined = undefined
+  if (saValue !== undefined) {
+    smartAvoidance = parseSmartAvoidanceConfig(saValue)
+    if (smartAvoidance === undefined) return null
+  }
+  if (smartAvoidance !== null && smartAvoidance !== undefined) {
+    result.smartAvoidance = smartAvoidance
   }
   return result
 }
@@ -1312,4 +1343,22 @@ function parseAlternativeContactButtonsConfig(value: unknown): AlternativeContac
     } catch { return undefined }
   }
   return result
+}
+
+const ALLOWED_SMART_AVOIDANCE_KEYS = new Set(['enabled'])
+
+function parseSmartAvoidanceConfig(value: unknown): SmartAvoidanceConfig | null | undefined {
+  if (value === undefined) return null
+  if (value === null) return undefined
+  if (!isPlainObject(value)) return undefined
+  const keys = safeOwnKeys(value)
+  if (keys === null) return undefined
+  for (const key of keys) {
+    if (typeof key !== 'string' || !ALLOWED_SMART_AVOIDANCE_KEYS.has(key)) return undefined
+  }
+  const enabledDesc = getOwnDataDescriptor(value, 'enabled')
+  if (!enabledDesc) return undefined
+  const enabledValue = enabledDesc.value
+  if (typeof enabledValue !== 'boolean') return undefined
+  return { enabled: enabledValue }
 }

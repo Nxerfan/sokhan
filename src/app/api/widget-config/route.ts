@@ -106,6 +106,17 @@ import {
   hasAlternativeContactButtonsField,
   type AlternativeContactButtonsPatchData,
 } from '@/lib/widget/alternative-contact-patch'
+import {
+  resolveEffectiveSmartAvoidance,
+  getStoredSmartAvoidance,
+  type StoredSmartAvoidanceInput,
+} from '@/lib/widget/effective-smart-avoidance'
+import {
+  validateSmartAvoidancePatch,
+  mergeSmartAvoidancePatch,
+  hasSmartAvoidanceField,
+  type SmartAvoidancePatchData,
+} from '@/lib/widget/smart-avoidance-patch'
 
 /**
  * GET /api/widget-config — dashboard widget configuration.
@@ -213,6 +224,17 @@ export async function GET() {
     }
     const effectiveAlternativeContactButtons = resolveEffectiveAlternativeContactButtons(alternativeContactInput, entitlements)
     const storedAlternativeContactButtons = getStoredAlternativeContactButtons(alternativeContactInput)
+
+    // V2 smart avoidance: resolve effective + stored (Feature 10).
+    // The dashboard `effective` must match the public widget. The raw stored
+    // preference is exposed ONLY via `stored` (for the dashboard to show
+    // "saved but locked / restore on upgrade"), NEVER as `effective` for
+    // Free (the resolver returns false for Free even if stored is true).
+    const smartAvoidanceInput: StoredSmartAvoidanceInput = {
+      appearanceV2: stored?.appearanceV2,
+    }
+    const effectiveSmartAvoidance = resolveEffectiveSmartAvoidance(smartAvoidanceInput, entitlements)
+    const storedSmartAvoidance = getStoredSmartAvoidance(smartAvoidanceInput)
 
     return {
       stored,
@@ -330,6 +352,16 @@ export async function GET() {
         effective: effectiveAlternativeContactButtons,
         stored: storedAlternativeContactButtons,
       },
+      // V2 smart avoidance: resolve effective + stored.
+      // The dashboard `effective` must match the public widget. The raw stored
+      // preference is exposed ONLY via `stored` (for the dashboard to show
+      // "saved but locked / restore on upgrade"), NEVER as `effective` for
+      // Free (the resolver returns false for Free even if stored is true).
+      smartAvoidance: {
+        entitlements: { enabled: entitlements?.smartAvoidance ?? false },
+        effective: effectiveSmartAvoidance,
+        stored: storedSmartAvoidance,
+      },
     } as const
   })
   if (!result) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
@@ -346,6 +378,7 @@ export async function GET() {
     preChatForm: result.result.preChatForm,
     pageVisibility: result.result.pageVisibility,
     alternativeContactButtons: result.result.alternativeContactButtons,
+    smartAvoidance: result.result.smartAvoidance,
   })
 }
 
@@ -491,6 +524,17 @@ const ALTERNATIVE_CONTACT_BUTTONS_ERROR_STATUS: Record<string, number> = {
   alt_contact_no_fields: 400,
 }
 
+/** Smart-avoidance-specific error codes → HTTP status mapping. */
+const SMART_AVOIDANCE_ERROR_STATUS: Record<string, number> = {
+  smart_avoidance_not_authorized: 403,  // unknown plan / no entitlement set
+  smart_avoidance_not_object: 400,
+  smart_avoidance_enabled_missing: 400,
+  smart_avoidance_enabled_invalid: 400,
+  smart_avoidance_not_allowed: 403,     // Free attempting a paid capability → 403
+  smart_avoidance_unexpected_key: 400,
+  smart_avoidance_no_fields: 400,
+}
+
 /**
  * PATCH /api/widget-config — update widget customization.
  *
@@ -547,12 +591,14 @@ export async function PATCH(req: NextRequest) {
     const hasPreChatForm = hasPreChatFormField(body)
     const hasPageVisibility = hasPageVisibilityField(body)
     const hasAlternativeContactButtons = hasAlternativeContactButtonsField(body)
+    const hasSmartAvoidance = hasSmartAvoidanceField(body)
     const hasOtherFields = hasOtherCustomizationFields(body)
 
     // Reject unrecognized top-level fields when the request contains
     // positioning, colors, launcher, attention, messagePreview, quickReplies,
-    // preChatForm, pageVisibility, or alternativeContactButtons.
-    if ((hasPositioning || hasColors || hasLauncher || hasAttention || hasMessagePreview || hasQuickReplies || hasPreChatForm || hasPageVisibility || hasAlternativeContactButtons) && hasUnrecognizedFields(body)) {
+    // preChatForm, pageVisibility, alternativeContactButtons, or
+    // smartAvoidance.
+    if ((hasPositioning || hasColors || hasLauncher || hasAttention || hasMessagePreview || hasQuickReplies || hasPreChatForm || hasPageVisibility || hasAlternativeContactButtons || hasSmartAvoidance) && hasUnrecognizedFields(body)) {
       return { badRequest: true as const, code: 'unrecognized_field' }
     }
 
@@ -650,6 +696,20 @@ export async function PATCH(req: NextRequest) {
         return { alternativeContactButtonsError: true as const, code: acbResult.code }
       }
       alternativeContactButtonsPatch = acbResult.data
+    }
+
+    // ---- Validate smart avoidance (if present) ----
+    // NOTE: smartAvoidance is deliberately NOT in OTHER_CUSTOMIZATION_KEYS —
+    // a Free PATCH containing ONLY smartAvoidance must reach THIS validation
+    // (→ 403 smart_avoidance_not_allowed), not the legacy 402 plan lock, so
+    // the dashboard gets the specific entitlement error.
+    let smartAvoidancePatch: SmartAvoidancePatchData | null = null
+    if (hasSmartAvoidance) {
+      const saResult = validateSmartAvoidancePatch({ smartAvoidance: body.smartAvoidance }, entitlements)
+      if (!saResult.ok) {
+        return { smartAvoidanceError: true as const, code: saResult.code }
+      }
+      smartAvoidancePatch = saResult.data
     }
 
     // ---- Validate + collect other customization fields (paid only) ----
@@ -859,6 +919,22 @@ export async function PATCH(req: NextRequest) {
       data.appearanceV2 = mergedAlternativeContactButtons as unknown as string // Prisma Json field
     }
 
+    // ---- Apply smart avoidance patch (if validated) ----
+    // Reads the already-merged appearanceV2 (from prior patches, if any) so
+    // all neighboring V2 capabilities are preserved.
+    if (smartAvoidancePatch) {
+      let baseAppearanceV2: unknown = data.appearanceV2 ?? undefined
+      if (baseAppearanceV2 === undefined) {
+        const existing = await db.widgetConfig.findUnique({
+          where: { tenantId: tid },
+          select: { appearanceV2: true },
+        })
+        baseAppearanceV2 = existing?.appearanceV2
+      }
+      const mergedSmartAvoidance = mergeSmartAvoidancePatch(baseAppearanceV2, smartAvoidancePatch, entitlements)
+      data.appearanceV2 = mergedSmartAvoidance as unknown as string // Prisma Json field
+    }
+
     if (Object.keys(data).length === 0) {
       return { badRequest: true as const, code: 'no_fields' }
     }
@@ -913,6 +989,10 @@ export async function PATCH(req: NextRequest) {
   }
   if ('alternativeContactButtonsError' in r) {
     const status = ALTERNATIVE_CONTACT_BUTTONS_ERROR_STATUS[r.code as string] ?? 400
+    return NextResponse.json({ error: r.code }, { status })
+  }
+  if ('smartAvoidanceError' in r) {
+    const status = SMART_AVOIDANCE_ERROR_STATUS[r.code as string] ?? 400
     return NextResponse.json({ error: r.code }, { status })
   }
   if ('badRequest' in r) return NextResponse.json({ error: r.code }, { status: 400 })

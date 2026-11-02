@@ -44,6 +44,10 @@ import {
   resolveEffectiveAlternativeContactButtons,
   type StoredAlternativeContactInput,
 } from '@/lib/widget/effective-alternative-contacts'
+import {
+  resolveEffectiveSmartAvoidance,
+  type StoredSmartAvoidanceInput,
+} from '@/lib/widget/effective-smart-avoidance'
 
 /** CORS headers for widget API responses. */
 function widgetHeaders(res: NextResponse): NextResponse {
@@ -253,6 +257,15 @@ export async function GET(
   }
   const effectiveAlternativeContactButtons = resolveEffectiveAlternativeContactButtons(alternativeContactInput, entitlements)
 
+  // V2 smart avoidance: resolve the effective entitlement-gated flag
+  // (Feature 10). The public config exposes ONLY `{ enabled }` — always
+  // false for Free / unknown plans / no-V2-selection, even when a stored
+  // paid-era preference exists. Older clients ignore the field.
+  const smartAvoidanceInput: StoredSmartAvoidanceInput = {
+    appearanceV2: widgetConfig.appearanceV2,
+  }
+  const effectiveSmartAvoidance = resolveEffectiveSmartAvoidance(smartAvoidanceInput, entitlements)
+
   const configWithPosition = { ...config, position: legacyPosition, accentColor: legacyAccent, launcherShape: legacyLauncherShape }
 
   // Build the response — conditionally include `colors` only when the tenant
@@ -302,6 +315,10 @@ export async function GET(
   // `alternativeContactButtons` object contains ONLY `{ items }`
   // (resolveEffectiveAlternativeContactButtons never returns paidItems).
   responseBody.alternativeContactButtons = effectiveAlternativeContactButtons
+  // V2 smart avoidance (additive — always present as { enabled }).
+  // `false` for Free / unknown / no-V2-selection. Older consumers ignore
+  // the field. Never exposes the raw stored preference.
+  responseBody.smartAvoidance = effectiveSmartAvoidance
 
   // Additive: the safe public access-policy fields. Existing clients continue
   // working (additive top-level fields). NEVER expose the raw integration

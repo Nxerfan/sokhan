@@ -191,6 +191,7 @@ export function mergePreChatFormPatch(
     ...(base.quickReplies ? { quickReplies: base.quickReplies } : {}),
     ...(base.pageVisibility ? { pageVisibility: base.pageVisibility } : {}),
     ...(base.alternativeContactButtons ? { alternativeContactButtons: base.alternativeContactButtons } : {}),
+    ...(base.smartAvoidance ? { smartAvoidance: base.smartAvoidance } : {}),
   }
 }
 
