@@ -166,6 +166,14 @@ ${POSITIONING_FN_SOURCE}
     // V2 alternative contact buttons state (Feature 9).
     altContactItems: [],  // effective items from public config
     altContactEl: null,   // .sk-alt-contact-links DOM container
+    // V2 smart avoidance state (Feature 10).
+    smartAvoidanceEnabled: false, // effective server-authoritative entitlement
+    smartAvoidanceApplied: false, // whether an avoidance shift is currently applied
+    smartAvoidanceBasePos: null,  // { left, bottom } base position — avoidance always starts here
+    smartAvoidanceMutationObserver: null, // MutationObserver on document.body (for cleanup)
+    smartAvoidanceResizeObserver: null,   // ResizeObserver on obstacle elements (for cleanup)
+    smartAvoidanceObstacleEls: [],        // currently observed obstacle elements
+    smartAvoidanceRaf: 0,                 // pending rAF/timeout handle (for cleanup)
   };
 
   // ============================================================
@@ -225,6 +233,11 @@ ${POSITIONING_FN_SOURCE}
     }
     // Reposition the preview bubble if it's visible (stays in viewport on resize).
     positionPreview();
+    // V2 smart avoidance (Feature 10): remember the ORIGINAL base position —
+    // the avoidance calculation always starts from this original position —
+    // then re-evaluate collisions against host-page obstacles.
+    state.smartAvoidanceBasePos = { left: result.left, bottom: result.bottom };
+    evaluateSmartAvoidance();
   }
 
   function applyPanelSide(side) {
@@ -400,6 +413,284 @@ ${POSITIONING_FN_SOURCE}
     if (typeof window !== 'undefined') {
       window.__sukhan_destroy_page_visibility = function() {
         teardownPageVisibility();
+      };
+    }
+  } catch (e) {}
+
+  // ============================================================
+  // V2 Smart Avoidance helpers (Feature 10).
+  //   The public config exposes 'smartAvoidance: { enabled }'. When enabled
+  //   the runtime shifts the launcher (a bounded CSS transform on the root)
+  //   out of the way of host-page obstacles:
+  //     - elements explicitly tagged with the 'data-sukhan-avoid' attribute
+  //     - fixed/sticky positioned host chrome (cookie banners, sticky bars)
+  //   The widget's own DOM (.sk-root descendants) is NEVER an obstacle, and
+  //   Smart Avoidance never forces the widget visible — a Page Visibility
+  //   hide (Feature 8) always wins: evaluation is skipped while the root is
+  //   hidden.
+  //
+  //   Geometry is deterministic: 8 candidate directions from the ORIGINAL
+  //   base position, minimum-shift binary search per direction, bounded by
+  //   a 240px maxShift + 12px gap, always inside the viewport. No solution
+  //   → zero shift (the configured placement is kept). Mirrors the pure TS
+  //   computeSmartAvoidanceShift (smart-avoidance-geometry.ts) — inlined
+  //   ES5 so the served script has no cross-package dependency.
+  // ============================================================
+  function __skComputeSmartAvoidanceShift(launcherRect, obstacleRects, viewport, options) {
+    var gap = Math.max(0, (options && typeof options.gap === 'number') ? options.gap : 12);
+    var maxShift = Math.max(0, (options && typeof options.maxShift === 'number') ? options.maxShift : 240);
+    function __skValidRect(r) {
+      return !!r &&
+        typeof r.left === 'number' && isFinite(r.left) &&
+        typeof r.top === 'number' && isFinite(r.top) &&
+        typeof r.right === 'number' && isFinite(r.right) &&
+        typeof r.bottom === 'number' && isFinite(r.bottom) &&
+        r.right > r.left && r.bottom > r.top;
+    }
+    function __skOverlaps(a, b, g) {
+      return a.right + g > b.left && a.left < b.right + g &&
+        a.bottom + g > b.top && a.top < b.bottom + g;
+    }
+    function __skInsideViewport(r) {
+      return r.left >= 0 && r.top >= 0 && r.right <= viewport.width && r.bottom <= viewport.height;
+    }
+    if (!__skValidRect(launcherRect)) return { dx: 0, dy: 0 };
+    // Filter to valid obstacle rects that actually overlap the launcher.
+    var active = [];
+    for (var oi = 0; oi < obstacleRects.length; oi++) {
+      var cand = obstacleRects[oi];
+      if (__skValidRect(cand) && __skOverlaps(launcherRect, cand, gap)) active.push(cand);
+    }
+    if (active.length === 0) return { dx: 0, dy: 0 };
+    // Candidate directions (deterministic order): up, down, left, right,
+    // then the four diagonals.
+    var directions = [
+      { x: 0, y: -1 }, { x: 0, y: 1 }, { x: -1, y: 0 }, { x: 1, y: 0 },
+      { x: -1, y: -1 }, { x: 1, y: -1 }, { x: -1, y: 1 }, { x: 1, y: 1 }
+    ];
+    var bestDx = 0, bestDy = 0, bestDistance = Infinity, found = false;
+    for (var di = 0; di < directions.length; di++) {
+      var dir = directions[di];
+      // Quick check: is maxShift in this direction sufficient + in viewport?
+      var maxRect = {
+        left: launcherRect.left + dir.x * maxShift,
+        top: launcherRect.top + dir.y * maxShift,
+        right: launcherRect.right + dir.x * maxShift,
+        bottom: launcherRect.bottom + dir.y * maxShift
+      };
+      if (!__skInsideViewport(maxRect)) continue;
+      var allClear = true;
+      for (var ci = 0; ci < active.length; ci++) {
+        var movedMax = {
+          left: launcherRect.left + dir.x * maxShift,
+          top: launcherRect.top + dir.y * maxShift,
+          right: launcherRect.right + dir.x * maxShift,
+          bottom: launcherRect.bottom + dir.y * maxShift
+        };
+        if (__skOverlaps(movedMax, active[ci], gap)) { allClear = false; break; }
+      }
+      if (!allClear) continue;
+      // Binary search for the minimum shift that clears all obstacles.
+      var lo = 0, hi = maxShift, minValid = -1;
+      while (lo < hi) {
+        var mid = Math.ceil((lo + hi) / 2);
+        var moved = {
+          left: launcherRect.left + dir.x * mid,
+          top: launcherRect.top + dir.y * mid,
+          right: launcherRect.right + dir.x * mid,
+          bottom: launcherRect.bottom + dir.y * mid
+        };
+        var clear = true;
+        for (var cj = 0; cj < active.length; cj++) {
+          if (__skOverlaps(moved, active[cj], gap)) { clear = false; break; }
+        }
+        if (clear) {
+          if (__skInsideViewport(moved)) { minValid = mid; hi = mid - 1; }
+          else { lo = mid + 1; }
+        } else {
+          lo = mid + 1;
+        }
+      }
+      if (minValid >= 0 && minValid <= maxShift) {
+        var dxx = dir.x * minValid, dyy = dir.y * minValid;
+        var dist = Math.sqrt(dxx * dxx + dyy * dyy);
+        if (dist < bestDistance) {
+          bestDistance = dist; bestDx = dxx; bestDy = dyy; found = true;
+        }
+      }
+    }
+    if (!found) return { dx: 0, dy: 0 };
+    // Verify the best result is valid (viewport bounds + no overlap).
+    var finalRect = {
+      left: launcherRect.left + bestDx,
+      top: launcherRect.top + bestDy,
+      right: launcherRect.right + bestDx,
+      bottom: launcherRect.bottom + bestDy
+    };
+    if (!__skInsideViewport(finalRect)) return { dx: 0, dy: 0 };
+    for (var fi = 0; fi < active.length; fi++) {
+      if (__skOverlaps(finalRect, active[fi], gap)) return { dx: 0, dy: 0 };
+    }
+    return { dx: bestDx, dy: bestDy };
+  }
+
+  // __skIsWidgetDom: the widget's own DOM (.sk-root descendants) is never
+  // an obstacle — walk up from the element to the document root.
+  function __skIsWidgetDom(elm) {
+    var n = elm;
+    while (n && n.nodeType === 1) {
+      if (n.classList && n.classList.contains('sk-root')) return true;
+      n = n.parentNode;
+    }
+    return false;
+  }
+
+  // __skCollectObstacleElements: bounded candidate list (≤20 elements):
+  // (a) every '[data-sukhan-avoid]' element, then (b) direct body children
+  // that are fixed/sticky positioned (host chrome like cookie banners and
+  // sticky bars). The widget's own DOM is always excluded.
+  function __skCollectObstacleElements() {
+    var candidates = [];
+    if (typeof document === 'undefined' || !document.body) return candidates;
+    var tagged = document.querySelectorAll('[data-sukhan-avoid]');
+    for (var i = 0; i < tagged.length && candidates.length < 20; i++) {
+      var t = tagged[i];
+      if (!t || __skIsWidgetDom(t)) continue;
+      if (candidates.indexOf(t) >= 0) continue;
+      candidates.push(t);
+    }
+    var bodyChildren = document.body.children;
+    for (var j = 0; j < bodyChildren.length && candidates.length < 20; j++) {
+      var bc = bodyChildren[j];
+      if (!bc || __skIsWidgetDom(bc)) continue;
+      if (candidates.indexOf(bc) >= 0) continue;
+      var pos = '';
+      try { pos = (window.getComputedStyle(bc).position || '') + ''; } catch (e) { pos = ''; }
+      if (pos !== 'fixed' && pos !== 'sticky') continue;
+      candidates.push(bc);
+    }
+    return candidates;
+  }
+
+  // __skSyncObstacleObservers: keep the ResizeObserver pointed at exactly
+  // the current obstacle set (observe new / unobserve removed). ResizeObserver
+  // fires an initial callback on observe — differential syncing prevents an
+  // observe→evaluate→observe loop.
+  function __skSyncObstacleObservers(elements) {
+    if (!state.smartAvoidanceResizeObserver) return;
+    var prev = state.smartAvoidanceObstacleEls || [];
+    var i;
+    for (i = 0; i < elements.length; i++) {
+      if (prev.indexOf(elements[i]) < 0) {
+        try { state.smartAvoidanceResizeObserver.observe(elements[i]); } catch (e) {}
+      }
+    }
+    for (i = 0; i < prev.length; i++) {
+      if (elements.indexOf(prev[i]) < 0) {
+        try { state.smartAvoidanceResizeObserver.unobserve(prev[i]); } catch (e) {}
+      }
+    }
+    state.smartAvoidanceObstacleEls = elements.slice();
+  }
+
+  // evaluateSmartAvoidance: measure the launcher at its ORIGINAL base
+  // position, collect obstacle rects, compute the bounded shift, and apply
+  // it as a CSS transform on the root (or clear the transform when no
+  // displacement is needed). Idempotent + deterministic.
+  function evaluateSmartAvoidance() {
+    if (!state.smartAvoidanceEnabled) return;
+    if (!state.rootEl || !state.config || !launcher) return;
+    // Page Visibility hide (Feature 8) always wins: while the root is
+    // hidden, skip evaluation entirely and never force the widget visible.
+    if (state.rootEl.style.display === 'none') return;
+    // Always start from the ORIGINAL configured position: drop any
+    // previously-applied avoidance shift before measuring (the geometry is
+    // recomputed from scratch on every evaluation — state.smartAvoidanceBasePos
+    // from applyPosition() is the anchor of truth for the configured spot).
+    state.rootEl.style.transform = '';
+    var launcherRect = launcher.getBoundingClientRect();
+    var candidates = __skCollectObstacleElements();
+    var rects = [];
+    for (var i = 0; i < candidates.length; i++) {
+      var r = candidates[i].getBoundingClientRect();
+      // Zero-size / hidden elements are not obstacles.
+      if (!(r.width > 0 && r.height > 0)) continue;
+      rects.push({ left: r.left, top: r.top, right: r.right, bottom: r.bottom });
+    }
+    __skSyncObstacleObservers(candidates);
+    var viewport = { width: window.innerWidth, height: window.innerHeight };
+    var result = __skComputeSmartAvoidanceShift(launcherRect, rects, viewport, { gap: 12, maxShift: 240 });
+    if (result.dx !== 0 || result.dy !== 0) {
+      state.rootEl.style.transform = 'translate(' + result.dx + 'px,' + result.dy + 'px)';
+      state.smartAvoidanceApplied = true;
+    } else {
+      state.rootEl.style.transform = '';
+      state.smartAvoidanceApplied = false;
+    }
+    // Diagnostic attribute — verifiable by browser tests. Does NOT match the
+    // MutationObserver attributeFilter ('data-sukhan-avoid') so it never
+    // re-triggers evaluation.
+    state.rootEl.setAttribute('data-sk-smart-avoidance', state.smartAvoidanceApplied ? 'applied' : 'clear');
+  }
+
+  // scheduleSmartAvoidance: coalesce bursts of DOM changes into a single
+  // evaluation per animation frame (requestAnimationFrame, with a setTimeout
+  // fallback for environments without rAF).
+  function scheduleSmartAvoidance() {
+    if (!state.smartAvoidanceEnabled) return;
+    if (state.smartAvoidanceRaf) return;
+    state.smartAvoidanceRaf = (typeof window.requestAnimationFrame === 'function'
+      ? window.requestAnimationFrame(function() { state.smartAvoidanceRaf = 0; evaluateSmartAvoidance(); })
+      : setTimeout(function() { state.smartAvoidanceRaf = 0; evaluateSmartAvoidance(); }, 16));
+  }
+
+  // setupSmartAvoidanceObservers: wire a MutationObserver on document.body
+  // (added/removed obstacle elements + data-sukhan-avoid attribute changes)
+  // and a ResizeObserver on detected obstacle elements. Idempotent — safe to
+  // call from mount() even if the widget re-mounts.
+  function setupSmartAvoidanceObservers() {
+    if (!state.smartAvoidanceEnabled) return;
+    if (typeof MutationObserver === 'function' && !state.smartAvoidanceMutationObserver && document.body) {
+      try {
+        var mo = new MutationObserver(function() { scheduleSmartAvoidance(); });
+        mo.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-sukhan-avoid'] });
+        state.smartAvoidanceMutationObserver = mo;
+      } catch (e) {}
+    }
+    if (typeof ResizeObserver === 'function' && !state.smartAvoidanceResizeObserver) {
+      state.smartAvoidanceResizeObserver = new ResizeObserver(function() { scheduleSmartAvoidance(); });
+    }
+  }
+
+  // teardownSmartAvoidance: disconnect observers, cancel any pending frame,
+  // and clear the applied shift. Keeps tests + host teardown deterministic.
+  function teardownSmartAvoidance() {
+    if (state.smartAvoidanceMutationObserver) {
+      try { state.smartAvoidanceMutationObserver.disconnect(); } catch (e) {}
+      state.smartAvoidanceMutationObserver = null;
+    }
+    if (state.smartAvoidanceResizeObserver) {
+      try { state.smartAvoidanceResizeObserver.disconnect(); } catch (e) {}
+      state.smartAvoidanceResizeObserver = null;
+    }
+    state.smartAvoidanceObstacleEls = [];
+    if (state.smartAvoidanceRaf) {
+      try { window.cancelAnimationFrame(state.smartAvoidanceRaf); } catch (e) {}
+      try { window.clearTimeout(state.smartAvoidanceRaf); } catch (e) {}
+      state.smartAvoidanceRaf = 0;
+    }
+    if (state.rootEl) {
+      state.rootEl.style.transform = '';
+      state.smartAvoidanceApplied = false;
+    }
+  }
+
+  // Expose teardown so a host page or test harness can deterministically
+  // remove Smart Avoidance observers after the widget is destroyed.
+  try {
+    if (typeof window !== 'undefined') {
+      window.__sukhan_destroy_smart_avoidance = function() {
+        teardownSmartAvoidance();
       };
     }
   } catch (e) {}
@@ -858,6 +1149,11 @@ ${POSITIONING_FN_SOURCE}
     // config (Feature 8). Empty array for Free / unknown / no-V2-selection.
     state.pageVisibilityRules = (config.pageVisibility && config.pageVisibility.rules) || [];
 
+    // V2 smart avoidance: read the effective server-authoritative entitlement
+    // (Feature 10). Free / unknown plans expose { enabled: false } — the
+    // launcher never shifts and host-page obstructions are ignored.
+    state.smartAvoidanceEnabled = !!(config.smartAvoidance && config.smartAvoidance.enabled);
+
     // V2 alternative contact buttons: read the effective authorized items from
     // the public config (Feature 9). Empty array for Free / unknown / no-V2-
     // selection. The runtime renders one <a class="sk-alt-contact-link"> per
@@ -1106,6 +1402,11 @@ ${POSITIONING_FN_SOURCE}
     // conversation history, reset visitor identity, or mark unread read.
     setupPageVisibilityListeners();
     updatePageVisibility();
+    // V2 smart avoidance: wire obstacle observers (Feature 10). The first
+    // evaluation already ran from applyPosition(); the MutationObserver +
+    // ResizeObserver keep the launcher clear of host-page obstacles that are
+    // added/removed/resized later. Never overrides a Page Visibility hide.
+    setupSmartAvoidanceObservers();
     // Apply V2 color tokens (additive — falls back to legacy colors if absent).
     applyColors(config);
 

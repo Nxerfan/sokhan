@@ -332,6 +332,19 @@
         "website": "Website"
       }
     },
+    "smartAvoidance": {
+      "title": "Smart Avoidance",
+      "hint": "Move the launcher out of the way of host-page elements (cookie banners, sticky bars) using bounded, deterministic collision geometry.",
+      "enable": "Enable smart avoidance",
+      "enableHint": "The launcher shifts only when something overlaps it, never more than 240px, and always stays inside the viewport.",
+      "upgradeHint": "Smart Avoidance is a BETA feature available on paid plans. Your saved preference is preserved and will restore on upgrade.",
+      "locked": "Smart Avoidance is a paid-plan feature. Your saved preference is preserved and will restore on upgrade.",
+      "save": "Save preference",
+      "discard": "Discard changes",
+      "dirty": "Unsaved changes",
+      "saveSuccess": "Preference saved",
+      "saveFail": "Failed to save preference"
+    },
     "avatarUrl": "Agent avatar URL",
     "logoUrl": "Logo URL",
     "greetingFa": "Greeting (Persian)",

@@ -166,6 +166,19 @@ export interface WidgetConfig {
     }>
   }
   /**
+   * V2 smart avoidance (Phase 2 / Feature 10). Additive — the public config
+   * exposes only the effective authorized boolean (`{ enabled }`), never the
+   * raw stored preference. Older backends omit the field; the widget defaults
+   * to disabled (the launcher stays exactly where the configured positioning
+   * places it). When enabled, the runtime shifts the launcher out of the way
+   * of host-page obstacles (elements tagged `data-sukhan-avoid` + fixed/sticky
+   * host chrome) using bounded deterministic collision geometry — never
+   * overriding a Page Visibility hide.
+   */
+  smartAvoidance?: {
+    enabled: boolean
+  }
+  /**
    * Backend-supplied realtime endpoint config (additive field). The widget
    * uses this as the PRIMARY runtime source. Older backends omit the
    * field; the widget falls back to the documented hosted default.

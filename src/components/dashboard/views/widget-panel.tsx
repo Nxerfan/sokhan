@@ -23,6 +23,7 @@ import { WidgetQuickRepliesPanel } from './widget-quick-replies-panel'
 import { WidgetPreChatFormPanel } from './widget-pre-chat-form-panel'
 import { WidgetPageVisibilityPanel } from './widget-page-visibility-panel'
 import { WidgetAltContactPanel } from './widget-alt-contact-panel'
+import { WidgetSmartAvoidancePanel } from './widget-smart-avoidance-panel'
 
 type WidgetConfig = {
   accentColor: string
@@ -155,6 +156,12 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
     effective: { items: Array<{ kind: 'phone' | 'email' | 'whatsapp' | 'telegram' | 'website'; label: string; value: string }> }
     stored: { items: Array<{ kind: 'phone' | 'email' | 'whatsapp' | 'telegram' | 'website'; label: string; value: string }>; paidItems?: Array<{ kind: 'phone' | 'email' | 'whatsapp' | 'telegram' | 'website'; label: string; value: string }> } | null
   } | null>(null)
+  // V2 smart avoidance data (from GET /api/widget-config `smartAvoidance` field).
+  const [smartAvoidance, setSmartAvoidance] = useState<{
+    entitlements: { enabled: boolean }
+    effective: { enabled: boolean }
+    stored: { enabled: boolean } | null
+  } | null>(null)
 
   const apiUrl = typeof window !== 'undefined' ? window.location.origin : HOSTED_API_URL
 
@@ -197,6 +204,8 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
     if (cfgData.pageVisibility) setPageVisibility(cfgData.pageVisibility)
     // V2 alternative contact buttons data.
     if (cfgData.alternativeContactButtons) setAlternativeContactButtons(cfgData.alternativeContactButtons)
+    // V2 smart avoidance data.
+    if (cfgData.smartAvoidance) setSmartAvoidance(cfgData.smartAvoidance)
     const domData = await domRes.json()
     setDomains(domData.domains ?? [])
     setDomainLimit(domData.limit ?? 0)
@@ -748,6 +757,15 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
           <WidgetAltContactPanel
             slug={slug}
             alternativeContactButtons={alternativeContactButtons}
+            defaultDirection={(config.defaultLocale === 'fa' ? 'rtl' : 'ltr') as 'rtl' | 'ltr'}
+            onReload={load}
+          />
+          {/* V2 Smart Avoidance — launcher collision avoidance against host-page
+              obstacles (Feature 10, BETA). Free plans are locked; the launcher
+              keeps its configured placement. */}
+          <WidgetSmartAvoidancePanel
+            slug={slug}
+            smartAvoidance={smartAvoidance}
             defaultDirection={(config.defaultLocale === 'fa' ? 'rtl' : 'ltr') as 'rtl' | 'ltr'}
             onReload={load}
           />
