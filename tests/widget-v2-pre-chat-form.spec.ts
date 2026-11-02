@@ -379,6 +379,42 @@ test.describe('Widget V2 Pre-chat Form — Feature 7 independent browser tests',
     }
   })
 
+  test('stale anonymous token cannot submit pre-chat after access policy becomes verified_visitor', async ({ browser }) => {
+    const ownerCtx = await browser.newContext()
+    const visitorCtx = await browser.newContext()
+    let site: Awaited<ReturnType<typeof customer>> | undefined
+    try {
+      const owner = await ownerCtx.newPage()
+      const slug = await signup(owner, 'stale-policy')
+      await setAccessMode(owner, 'anonymous')
+      await patch(owner, { preChatForm: { fields: [{ key: 'name', required: true }] } })
+      site = await customer(visitorCtx, slug, 'slug')
+      const oldToken = site.token // real anonymous token issued by /contact
+      // Change the live tenant authorization policy AFTER the visitor
+      // obtained this token. Only current-policy authorization can reject it.
+      await setAccessMode(owner, 'verified_visitor')
+      const deniedMessage = await site.page.request.post(BASE + '/api/widget/' + slug + '/messages', {
+        headers: { Authorization: 'Bearer ' + oldToken },
+        data: { text: 'stale identity must not send' },
+      })
+      expect(deniedMessage.status()).toBe(403)
+      expect((await deniedMessage.json()).error).not.toBe('pre_chat_required')
+
+      // The Pre-chat endpoint writes Contact.metadata; it MUST enforce the
+      // same CURRENT identity/access-policy boundary as /messages. A signed
+      // anonymous token that is no longer authorized cannot modify metadata.
+      const staleSubmit = await site.page.request.post(BASE + '/api/widget/' + slug + '/pre-chat', {
+        headers: { Authorization: 'Bearer ' + oldToken },
+        data: { values: { name: 'Unauthorized overwrite' } },
+      })
+      expect(staleSubmit.status(), 'old anonymous token must not mutate Contact metadata after verified policy switch').toBe(403)
+    } finally {
+      if (site) await site.close()
+      await visitorCtx.close()
+      await ownerCtx.close()
+    }
+  })
+
   test('pre-chat endpoint rejects missing/foreign bearer and malformed values, no profile spoofing', async ({ browser }) => {
     const ownerCtx = await browser.newContext()
     const otherOwnerCtx = await browser.newContext()
