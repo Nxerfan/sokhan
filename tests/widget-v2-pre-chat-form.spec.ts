@@ -459,6 +459,53 @@ test.describe('Widget V2 Pre-chat Form — Feature 7 independent browser tests',
     }
   })
 
+  test('existing visitor with a CLOSED prior conversation is not forced into newly enabled pre-chat', async ({ browser }) => {
+    const ownerCtx = await browser.newContext()
+    const visitorCtx = await browser.newContext()
+    let site: Awaited<ReturnType<typeof customer>> | undefined
+    try {
+      const owner = await ownerCtx.newPage()
+      const slug = await signup(owner, 'closed-prior-conversation')
+      await setAccessMode(owner, 'anonymous')
+      // Initially NO form. The real visitor sends an actual message that
+      // persists and creates a conversation.
+      site = await customer(visitorCtx, slug, 'slug')
+      const endpoint = BASE + '/api/widget/' + slug + '/messages'
+      const sent = await site.page.request.post(endpoint, {
+        headers: { Authorization: 'Bearer ' + site.token },
+        data: { text: 'A real prior visitor message' },
+      })
+      expect(sent.status(), await sent.text()).toBe(200)
+      const { conversationId } = await sent.json()
+      expect(conversationId).toBeTruthy()
+
+      // An authenticated owner closes the EXISTING conversation through
+      // its actual dashboard API. This must not erase visitor history.
+      const closed = await owner.request.patch(BASE + '/api/conversations/' + conversationId, {
+        data: { status: 'closed' },
+      })
+      expect(closed.status(), await closed.text()).toBe(200)
+      const details = await owner.request.get(BASE + '/api/conversations/' + conversationId)
+      expect(details.ok()).toBe(true)
+      expect((await details.json()).conversation.status).toBe('closed')
+
+      // Pre-chat is enabled only AFTER the visitor's persisted prior message.
+      // A historical visitor must not be treated as a new first-time sender
+      // just because their latest conversation is now closed.
+      await patch(owner, { preChatForm: { fields: [{ key: 'name', required: true }] } })
+      const reply = await site.page.request.post(endpoint, {
+        headers: { Authorization: 'Bearer ' + site.token },
+        data: { text: 'Existing visitor after conversation closed' },
+      })
+      expect(reply.status(), 'closed historical conversation must count as previously persisted visitor history').toBe(200)
+      expect((await reply.json()).conversationId).toBeTruthy()
+    } finally {
+      if (site) await site.close()
+      await visitorCtx.close()
+      await ownerCtx.close()
+    }
+  })
+
   test('stale anonymous token cannot submit pre-chat after access policy becomes verified_visitor', async ({ browser }) => {
     const ownerCtx = await browser.newContext()
     const visitorCtx = await browser.newContext()
