@@ -143,6 +143,7 @@ export function mergeMessagePreviewPatch(
     ...(base.launcher ? { launcher: base.launcher } : {}),
     ...(base.attention ? { attention: base.attention } : {}),
     ...(base.quickReplies ? { quickReplies: base.quickReplies } : {}),
+    ...(base.preChatForm ? { preChatForm: base.preChatForm } : {}),
   }
 }
 

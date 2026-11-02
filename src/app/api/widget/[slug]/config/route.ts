@@ -32,6 +32,10 @@ import {
   resolveEffectiveQuickReplies,
   type StoredQuickRepliesInput,
 } from '@/lib/widget/effective-quick-replies'
+import {
+  resolveEffectivePreChatForm,
+  type StoredPreChatFormInput,
+} from '@/lib/widget/effective-pre-chat-form'
 
 /** CORS headers for widget API responses. */
 function widgetHeaders(res: NextResponse): NextResponse {
@@ -214,6 +218,14 @@ export async function GET(
   }
   const effectiveQuickReplies = resolveEffectiveQuickReplies(quickRepliesInput, entitlements)
 
+  // V2 pre-chat form: resolve effective fields from stored V2 + entitlements.
+  // The public config exposes ONLY the effective authorized fields — never
+  // paidFields. Free with stored advanced-only fields exposes only name/email.
+  const preChatFormInput: StoredPreChatFormInput = {
+    appearanceV2: widgetConfig.appearanceV2,
+  }
+  const effectivePreChatForm = resolveEffectivePreChatForm(preChatFormInput, entitlements)
+
   const configWithPosition = { ...config, position: legacyPosition, accentColor: legacyAccent, launcherShape: legacyLauncherShape }
 
   // Build the response — conditionally include `colors` only when the tenant
@@ -247,6 +259,10 @@ export async function GET(
   // Empty array for Free / unknown / no-V2-selection. Older consumers ignore
   // the field. Never exposes paidItems.
   responseBody.quickReplies = effectiveQuickReplies
+  // V2 pre-chat form (additive — always present as { fields }).
+  // Empty array for Free / unknown / no-V2-selection. Older consumers ignore
+  // the field. Never exposes paidFields.
+  responseBody.preChatForm = effectivePreChatForm
 
   // Additive: the safe public access-policy fields. Existing clients continue
   // working (additive top-level fields). NEVER expose the raw integration

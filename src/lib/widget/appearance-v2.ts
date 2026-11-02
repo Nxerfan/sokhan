@@ -156,6 +156,22 @@ export interface QuickRepliesConfig {
   paidItems?: string[]
 }
 
+/**
+ * Pre-chat Form configuration (Phase 2 / Feature 7). Additive — null = no form.
+ * - `fields`: the active field configuration.
+ * - `paidFields`: preserved advanced selection for downgrade/upgrade restore.
+ */
+export interface PreChatFormConfig {
+  fields: PreChatFormField[]
+  paidFields?: PreChatFormField[]
+}
+
+/** A single pre-chat form field. */
+export interface PreChatFormField {
+  key: 'name' | 'email' | 'phone' | 'company'
+  required: boolean
+}
+
 /** The versioned appearance configuration. */
 export interface AppearanceV2 {
   version: typeof APPEARANCE_V2_VERSION
@@ -171,6 +187,8 @@ export interface AppearanceV2 {
   messagePreview?: MessagePreviewConfig
   /** Quick Replies (Phase 2 / Feature 6). Additive — null = no suggested replies. */
   quickReplies?: QuickRepliesConfig
+  /** Pre-chat Form (Phase 2 / Feature 7). Additive — null = no form. */
+  preChatForm?: PreChatFormConfig
 }
 
 /** The canonical default appearance (V2). */
@@ -215,7 +233,7 @@ export const DEFAULT_APPEARANCE_V2: AppearanceV2 = {
  */
 
 /** Allowed top-level keys in an AppearanceV2 object. */
-const ALLOWED_TOP_LEVEL_KEYS = new Set(['version', 'desktop', 'mobile', 'colors', 'launcher', 'attention', 'messagePreview', 'quickReplies'])
+const ALLOWED_TOP_LEVEL_KEYS = new Set(['version', 'desktop', 'mobile', 'colors', 'launcher', 'attention', 'messagePreview', 'quickReplies', 'preChatForm'])
 
 /**
  * Check if a value is a plain JSON-compatible object — prototype is exactly
@@ -442,6 +460,27 @@ export function parseAppearanceV2(value: unknown): AppearanceV2 | null {
   }
   if (quickReplies !== null && quickReplies !== undefined) {
     result.quickReplies = quickReplies
+  }
+
+  // Parse preChatForm if present (read from descriptor to bypass Proxy get).
+  const preChatFormDesc = getOwnDataDescriptor(value, 'preChatForm')
+  let preChatFormValue: unknown = undefined
+  if (preChatFormDesc !== null) {
+    preChatFormValue = preChatFormDesc.value
+  } else {
+    try {
+      if (Object.prototype.hasOwnProperty.call(value, 'preChatForm')) return null
+    } catch {
+      return null
+    }
+  }
+  let preChatForm: PreChatFormConfig | null | undefined = undefined
+  if (preChatFormValue !== undefined) {
+    preChatForm = parsePreChatFormConfig(preChatFormValue)
+    if (preChatForm === undefined) return null
+  }
+  if (preChatForm !== null && preChatForm !== undefined) {
+    result.preChatForm = preChatForm
   }
   return result
 }
@@ -897,4 +936,77 @@ function parseQuickRepliesConfig(value: unknown): QuickRepliesConfig | null | un
  */
 export function hasAppearanceV2(value: unknown): boolean {
   return parseAppearanceV2(value) !== null
+}
+
+const ALLOWED_PRE_CHAT_KEYS = new Set(['fields', 'paidFields'])
+const ALLOWED_PRE_CHAT_FIELD_KEYS_SET = new Set(['name', 'email', 'phone', 'company'])
+
+function parsePreChatFormField(raw: unknown): PreChatFormField | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+  const keys = safeOwnKeys(raw)
+  if (keys === null) return undefined
+  if (keys.length !== 2) return undefined
+  let hasKey = false, hasRequired = false
+  for (const k of keys) {
+    if (k === 'key') hasKey = true
+    else if (k === 'required') hasRequired = true
+    else return undefined
+  }
+  if (!hasKey || !hasRequired) return undefined
+  const keyDesc = getOwnDataDescriptor(raw, 'key')
+  if (!keyDesc) return undefined
+  const keyValue = keyDesc.value
+  if (typeof keyValue !== 'string' || !ALLOWED_PRE_CHAT_FIELD_KEYS_SET.has(keyValue)) return undefined
+  const reqDesc = getOwnDataDescriptor(raw, 'required')
+  if (!reqDesc) return undefined
+  const reqValue = reqDesc.value
+  if (typeof reqValue !== 'boolean') return undefined
+  return { key: keyValue as PreChatFormField['key'], required: reqValue }
+}
+
+function parsePreChatFormFieldsArray(arr: unknown): PreChatFormField[] | undefined {
+  if (!Array.isArray(arr)) return undefined
+  const fields: PreChatFormField[] = []
+  const seenKeys = new Set<string>()
+  for (const raw of arr) {
+    const field = parsePreChatFormField(raw)
+    if (field === undefined) return undefined
+    if (seenKeys.has(field.key)) return undefined
+    seenKeys.add(field.key)
+    fields.push(field)
+  }
+  return fields
+}
+
+function parsePreChatFormConfig(value: unknown): PreChatFormConfig | null | undefined {
+  if (value === undefined) return null
+  if (value === null) return undefined
+  if (!isPlainObject(value)) return undefined
+  const keys = safeOwnKeys(value)
+  if (keys === null) return undefined
+  for (const key of keys) {
+    if (typeof key !== 'string' || !ALLOWED_PRE_CHAT_KEYS.has(key)) return undefined
+  }
+  const fieldsDesc = getOwnDataDescriptor(value, 'fields')
+  if (!fieldsDesc) return undefined
+  const fields = parsePreChatFormFieldsArray(fieldsDesc.value)
+  if (fields === undefined) return undefined
+  const result: PreChatFormConfig = { fields }
+  const paidFieldsDesc = getOwnDataDescriptor(value, 'paidFields')
+  if (paidFieldsDesc !== null) {
+    const v = paidFieldsDesc.value
+    if (v !== undefined && v !== null) {
+      const paidFields = parsePreChatFormFieldsArray(v)
+      if (paidFields === undefined) return undefined
+      if (paidFields.length === 0) return undefined
+      result.paidFields = paidFields
+    }
+  } else {
+    try {
+      if (Object.prototype.hasOwnProperty.call(value, 'paidFields')) return undefined
+    } catch {
+      return undefined
+    }
+  }
+  return result
 }

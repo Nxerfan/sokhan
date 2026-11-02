@@ -20,6 +20,7 @@ import { WidgetLauncherPanel } from './widget-launcher-panel'
 import { WidgetAttentionPanel } from './widget-attention-panel'
 import { WidgetMessagePreviewPanel } from './widget-message-preview-panel'
 import { WidgetQuickRepliesPanel } from './widget-quick-replies-panel'
+import { WidgetPreChatFormPanel } from './widget-pre-chat-form-panel'
 
 type WidgetConfig = {
   accentColor: string
@@ -133,6 +134,12 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
     effective: { items: string[] }
     stored: { items: string[]; paidItems?: string[] } | null
   } | null>(null)
+  // V2 pre-chat form data (from GET /api/widget-config `preChatForm` field).
+  const [preChatForm, setPreChatForm] = useState<{
+    entitlements: { preChatForm: 'none' | 'basic' | 'advanced' }
+    effective: { fields: Array<{ key: 'name' | 'email' | 'phone' | 'company'; required: boolean }> }
+    stored: { fields: Array<{ key: 'name' | 'email' | 'phone' | 'company'; required: boolean }>; paidFields?: Array<{ key: 'name' | 'email' | 'phone' | 'company'; required: boolean }> } | null
+  } | null>(null)
 
   const apiUrl = typeof window !== 'undefined' ? window.location.origin : HOSTED_API_URL
 
@@ -169,6 +176,8 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
     if (cfgData.messagePreview) setMessagePreview(cfgData.messagePreview)
     // V2 quick replies data.
     if (cfgData.quickReplies) setQuickReplies(cfgData.quickReplies)
+    // V2 pre-chat form data.
+    if (cfgData.preChatForm) setPreChatForm(cfgData.preChatForm)
     const domData = await domRes.json()
     setDomains(domData.domains ?? [])
     setDomainLimit(domData.limit ?? 0)
@@ -697,6 +706,13 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
           <WidgetQuickRepliesPanel
             slug={slug}
             quickReplies={quickReplies}
+            defaultDirection={(config.defaultLocale === 'fa' ? 'rtl' : 'ltr') as 'rtl' | 'ltr'}
+            onReload={load}
+          />
+          {/* V2 Pre-chat Form — configurable visitor form before first message. */}
+          <WidgetPreChatFormPanel
+            slug={slug}
+            preChatForm={preChatForm}
             defaultDirection={(config.defaultLocale === 'fa' ? 'rtl' : 'ltr') as 'rtl' | 'ltr'}
             onReload={load}
           />
