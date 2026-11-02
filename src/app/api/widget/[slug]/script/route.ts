@@ -158,6 +158,11 @@ ${POSITIONING_FN_SOURCE}
     preChatFormEl: null,    // .sk-pre-chat-form DOM container
     preChatCompleted: false, // whether the form was successfully submitted
     preChatInFlight: false,  // prevents double submission
+    // V2 page visibility state (Feature 8).
+    pageVisibilityRules: [], // effective rules from public config
+    pageVisibilityPopHandler: null, // popstate listener (for cleanup)
+    pageVisibilityOrigPushState: null, // original history.pushState (for cleanup)
+    pageVisibilityOrigReplaceState: null, // original history.replaceState (for cleanup)
   };
 
   // ============================================================
@@ -255,6 +260,9 @@ ${POSITIONING_FN_SOURCE}
         state.effectivePos = newPos;
       }
       applyPosition();
+      // V2 page visibility: re-evaluate on resize because the device may
+      // switch between desktop/mobile (device-specific rules apply differently).
+      updatePageVisibility();
     };
     state.resizeHandler = handler;
     try {
@@ -271,6 +279,127 @@ ${POSITIONING_FN_SOURCE}
     } catch (e) {}
     state.resizeHandler = null;
   }
+
+  // ============================================================
+  // V2 Page Visibility helpers (Feature 8).
+  //   The public config exposes 'pageVisibility: { rules: [...] }' where
+  //   each rule is { pattern, match, action, device? }. The runtime
+  //   evaluates the current page's visibility against these rules using
+  //   window.location.pathname + the detected device.
+  //
+  //   Behavior:
+  //     - No rules → always visible (default 'show').
+  //     - Hide overrides show when both match.
+  //     - Hiding the widget toggles 'display:none' on the root element —
+  //       it does NOT erase conversation history, reset visitor identity,
+  //       or mark unread messages as read.
+  //     - Re-evaluated on popstate, pushState/replaceState interception,
+  //       and resize (device may switch desktop↔mobile).
+  // ============================================================
+  function __skEvaluatePageVisibility(rules, pathname, device) {
+    if (!rules || rules.length === 0) return 'show';
+    var hasShow = false, hasHide = false;
+    for (var i = 0; i < rules.length; i++) {
+      var r = rules[i];
+      if (!r) continue;
+      if (r.device && r.device !== device) continue;
+      var matches = r.match === 'prefix'
+        ? (pathname === r.pattern || pathname.indexOf(r.pattern + '/') === 0 || (r.pattern.charAt(r.pattern.length-1) === '/' && pathname.indexOf(r.pattern) === 0))
+        : pathname === r.pattern;
+      if (matches) { if (r.action === 'hide') hasHide = true; else hasShow = true; }
+    }
+    if (hasHide) return 'hide';
+    return 'show';
+  }
+
+  // __skOnPageChange: single callback wired to popstate + the patched
+  // history methods. Re-evaluates the current page's visibility. Bounded
+  // with a setTimeout(0) flush so a burst of pushState/replaceState calls
+  // collapses into one evaluation.
+  var __skPageChangeScheduled = false;
+  function __skOnPageChange() {
+    if (__skPageChangeScheduled) return;
+    __skPageChangeScheduled = true;
+    setTimeout(function() {
+      __skPageChangeScheduled = false;
+      updatePageVisibility();
+    }, 0);
+  }
+
+  // updatePageVisibility: read the current pathname + device, evaluate
+  // the rules, and toggle the root element's display. Safe to call
+  // before mount completes (no-op when state.rootEl is null).
+  function updatePageVisibility() {
+    if (!state.rootEl) return;
+    var rules = state.pageVisibilityRules || [];
+    var pathname = (window.location && window.location.pathname) || '/';
+    var device = __skDetectDevice();
+    var result = __skEvaluatePageVisibility(rules, pathname, device);
+    if (result === 'hide') {
+      state.rootEl.style.display = 'none';
+    } else {
+      state.rootEl.style.display = '';
+    }
+    // Diagnostic attribute — verifiable by browser tests.
+    state.rootEl.setAttribute('data-sk-page-visibility', result);
+  }
+
+  // setupPageVisibilityListeners: wire popstate + patch history methods.
+  // Idempotent — safe to call from mount() even if the widget re-mounts.
+  function setupPageVisibilityListeners() {
+    if (state.pageVisibilityPopHandler) return; // already wired
+    state.pageVisibilityPopHandler = __skOnPageChange;
+    try {
+      window.addEventListener('popstate', __skOnPageChange);
+    } catch (e) {}
+    if (typeof history !== 'undefined' && history.pushState && !state.pageVisibilityOrigPushState) {
+      state.pageVisibilityOrigPushState = history.pushState;
+      history.pushState = function() {
+        var ret = state.pageVisibilityOrigPushState.apply(this, arguments);
+        __skOnPageChange();
+        return ret;
+      };
+    }
+    if (typeof history !== 'undefined' && history.replaceState && !state.pageVisibilityOrigReplaceState) {
+      state.pageVisibilityOrigReplaceState = history.replaceState;
+      history.replaceState = function() {
+        var ret = state.pageVisibilityOrigReplaceState.apply(this, arguments);
+        __skOnPageChange();
+        return ret;
+      };
+    }
+  }
+
+  // teardownPageVisibility: remove popstate listener + restore the
+  // original history methods. The slug runtime is a one-shot embed (no
+  // formal destroy()), but exposing cleanup keeps tests + future SPA
+  // host integrations deterministic.
+  function teardownPageVisibility() {
+    if (state.pageVisibilityPopHandler) {
+      try {
+        window.removeEventListener('popstate', state.pageVisibilityPopHandler);
+      } catch (e) {}
+      state.pageVisibilityPopHandler = null;
+    }
+    if (state.pageVisibilityOrigPushState && typeof history !== 'undefined') {
+      try { history.pushState = state.pageVisibilityOrigPushState; } catch (e) {}
+      state.pageVisibilityOrigPushState = null;
+    }
+    if (state.pageVisibilityOrigReplaceState && typeof history !== 'undefined') {
+      try { history.replaceState = state.pageVisibilityOrigReplaceState; } catch (e) {}
+      state.pageVisibilityOrigReplaceState = null;
+    }
+  }
+
+  // Expose teardown so a host page or test harness can deterministically
+  // restore the original history methods after the widget is destroyed.
+  try {
+    if (typeof window !== 'undefined') {
+      window.__sukhan_destroy_page_visibility = function() {
+        teardownPageVisibility();
+      };
+    }
+  } catch (e) {}
 
   // ---- V2 Color application ----
   function applyColors(config) {
@@ -653,6 +782,10 @@ ${POSITIONING_FN_SOURCE}
     // stable) but remains hidden when disabled.
     state.messagePreviewEnabled = !!(config.messagePreview && config.messagePreview.enabled);
 
+    // V2 page visibility: read the effective authorized rules from the public
+    // config (Feature 8). Empty array for Free / unknown / no-V2-selection.
+    state.pageVisibilityRules = (config.pageVisibility && config.pageVisibility.rules) || [];
+
     // Build the preview bubble (.sk-message-preview). Positioned adjacent to
     // the launcher by positionPreview(). Hidden by default.
     var previewEl = el('div', 'sk-message-preview');
@@ -871,6 +1004,11 @@ ${POSITIONING_FN_SOURCE}
     // could not be set earlier because the panel DOM element didn't exist yet).
     applyPosition();
     setupResizeListener();
+    // V2 page visibility: wire navigation listeners + evaluate the current
+    // page AFTER the root is mounted. Toggling display does NOT erase
+    // conversation history, reset visitor identity, or mark unread read.
+    setupPageVisibilityListeners();
+    updatePageVisibility();
     // Apply V2 color tokens (additive — falls back to legacy colors if absent).
     applyColors(config);
 

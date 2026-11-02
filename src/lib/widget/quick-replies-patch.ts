@@ -206,6 +206,7 @@ export function mergeQuickRepliesPatch(
     ...(base.attention ? { attention: base.attention } : {}),
     ...(base.messagePreview ? { messagePreview: base.messagePreview } : {}),
     ...(base.preChatForm ? { preChatForm: base.preChatForm } : {}),
+    ...(base.pageVisibility ? { pageVisibility: base.pageVisibility } : {}),
   }
 }
 

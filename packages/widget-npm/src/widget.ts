@@ -324,6 +324,19 @@ interface WidgetInternalState {
   preChatCompleted: boolean
   /** Prevents double submission while the pre-chat POST is in-flight. */
   preChatInFlight: boolean
+  /** V2 page visibility — effective rules from public config (Feature 8). */
+  pageVisibilityRules: Array<{
+    pattern: string
+    match: string
+    action: string
+    device?: string
+  }>
+  /** popstate listener reference (for cleanup on destroy). */
+  pageVisibilityPopHandler: (() => void) | null
+  /** Original history.pushState (restored on destroy). */
+  pageVisibilityOrigPushState: ((...args: unknown[]) => void) | null
+  /** Original history.replaceState (restored on destroy). */
+  pageVisibilityOrigReplaceState: ((...args: unknown[]) => void) | null
   /** The current panel side (left/right/center) from the geometry function. */
   panelSide: 'left' | 'right' | 'center'
   /** Resize listener reference (for cleanup on destroy). */
@@ -410,6 +423,10 @@ export class SukhanWidget implements SukhanInstance {
     preChatFormEl: null,
     preChatCompleted: false,
     preChatInFlight: false,
+    pageVisibilityRules: [],
+    pageVisibilityPopHandler: null,
+    pageVisibilityOrigPushState: null,
+    pageVisibilityOrigReplaceState: null,
     panelSide: 'right',
     resizeHandler: null,
   }
@@ -574,6 +591,11 @@ export class SukhanWidget implements SukhanInstance {
     // appears. The preview DOM is always created (so the class contract is
     // stable) but remains hidden when disabled.
     this.state.messagePreviewEnabled = !!(config.messagePreview?.enabled)
+    // V2 page visibility: read the effective authorized rules from the public
+    // config (Feature 8). Empty array for Free / unknown / no-V2-selection.
+    // The runtime evaluates these rules against window.location.pathname +
+    // the detected device to decide whether to hide the widget root.
+    this.state.pageVisibilityRules = config.pageVisibility?.rules ?? []
     const attentionClass = effectiveAttention !== 'none' ? ' sk-attention-' + effectiveAttention : ''
     const launcher = el('button', 'sk-launcher ' + shapeClass(effectiveShape) + attentionClass) as HTMLButtonElement
     launcher.setAttribute('aria-label', this.state.locale === 'fa' ? 'گفت‌وگو' : 'Open chat')
@@ -990,6 +1012,11 @@ export class SukhanWidget implements SukhanInstance {
     // could not be set earlier because the panel DOM element didn't exist yet).
     this.applyPosition()
     this.setupResizeListener()
+    // V2 page visibility: wire navigation listeners + evaluate the current
+    // page AFTER the root is mounted. Toggling display does NOT erase
+    // conversation history, reset visitor identity, or mark unread read.
+    this.setupPageVisibilityListeners()
+    this.updatePageVisibility()
 
     // Apply V2 color tokens from `config.colors.tokens` (additive). Falls
     // back to the hardcoded brand colors set above when `config.colors` is
@@ -1813,6 +1840,10 @@ export class SukhanWidget implements SukhanInstance {
     this.pulseDot.style.display = 'none'
     this.updatePreChatForm() // may hide input + quick replies when form is shown
     this.updateQuickReplies()
+    // V2 page visibility: re-evaluate on open — the visitor may have
+    // navigated since the last evaluation (SPA route change without a
+    // popstate event). Cheap and idempotent.
+    this.updatePageVisibility()
     // Only focus the input when the pre-chat form is NOT visible —
     // otherwise focusing the input would scroll past the form.
     const preChatVisible =
@@ -1830,6 +1861,8 @@ export class SukhanWidget implements SukhanInstance {
     this.applyPanelTransform()
     this.updatePreChatForm()
     this.updateQuickReplies()
+    // V2 page visibility: re-evaluate on close (same rationale as open()).
+    this.updatePageVisibility()
   }
 
   // V2 quick replies: show suggestion buttons only when the panel is open,
@@ -2887,6 +2920,9 @@ export class SukhanWidget implements SukhanInstance {
         this.state.effectivePositioning = newPos
       }
       this.applyPosition()
+      // V2 page visibility: re-evaluate on resize because the device may
+      // switch between desktop/mobile (device-specific rules apply differently).
+      this.updatePageVisibility()
     }
     this.state.resizeHandler = handler
     try {
@@ -2908,6 +2944,163 @@ export class SukhanWidget implements SukhanInstance {
       // ignore
     }
     this.state.resizeHandler = null
+  }
+
+  // ============================================================
+  // V2 Page Visibility (Feature 8).
+  //   The public config exposes `pageVisibility: { rules: [...] }` where
+  //   each rule is { pattern, match, action, device? }. The runtime
+  //   evaluates the current page's visibility against these rules using
+  //   `window.location.pathname` + the detected device.
+  //
+  //   Behavior:
+  //     - No rules → always visible (default 'show').
+  //     - Hide overrides show when both match.
+  //     - Hiding the widget toggles `display:none` on the root element —
+  //       it does NOT erase conversation history, reset visitor identity,
+  //       or mark unread messages as read.
+  //     - Re-evaluated on popstate, pushState/replaceState interception,
+  //       open(), close(), and resize (device may switch desktop↔mobile).
+  // ============================================================
+
+  /**
+   * Inlined page-visibility policy. Mirrors the pure TS
+   * `evaluatePageVisibility` in `src/lib/widget/page-visibility-types.ts`
+   * — kept inline so the NPM package has no cross-package dependency on
+   * the Sukhan backend code. Returns 'show' or 'hide'.
+   *
+   * Pure function — never throws, never accesses the DOM.
+   */
+  private __skEvaluatePageVisibility(
+    rules: Array<{ pattern: string; match: string; action: string; device?: string }>,
+    pathname: string,
+    device: 'desktop' | 'mobile',
+  ): 'show' | 'hide' {
+    if (!rules || rules.length === 0) return 'show'
+    let hasShow = false
+    let hasHide = false
+    for (let i = 0; i < rules.length; i++) {
+      const r = rules[i]
+      if (!r) continue
+      if (r.device && r.device !== device) continue
+      const matches = r.match === 'prefix'
+        ? (pathname === r.pattern
+            || pathname.indexOf(r.pattern + '/') === 0
+            || (r.pattern.charAt(r.pattern.length - 1) === '/' && pathname.indexOf(r.pattern) === 0))
+        : pathname === r.pattern
+      if (matches) {
+        if (r.action === 'hide') hasHide = true
+        else hasShow = true
+      }
+    }
+    if (hasHide) return 'hide'
+    return 'show'
+  }
+
+  /**
+   * Single callback wired to popstate + the patched history methods.
+   * Re-evaluates the current page's visibility. Coalesces synchronous
+   * navigation bursts into one evaluation via setTimeout(0).
+   */
+  private pageChangeScheduled = false
+  private __skOnPageChange = (): void => {
+    if (this.pageChangeScheduled) return
+    this.pageChangeScheduled = true
+    setTimeout(() => {
+      this.pageChangeScheduled = false
+      this.updatePageVisibility()
+    }, 0)
+  }
+
+  /**
+   * Read the current pathname + device, evaluate the rules, and toggle
+   * the root element's display. Safe to call before mount completes
+   * (no-op when `this.rootEl` is null). Idempotent.
+   *
+   * IMPORTANT: hiding the widget does NOT erase conversation history,
+   * reset visitor identity, or mark unread messages as read. It ONLY
+   * toggles `display` on the root element.
+   */
+  private updatePageVisibility(): void {
+    if (!this.rootEl) return
+    if (this.destroyed) return
+    const rules = this.state.pageVisibilityRules ?? []
+    const pathname = (typeof window !== 'undefined' && window.location && window.location.pathname) || '/'
+    const device: 'desktop' | 'mobile' = this.detectMobile() ? 'mobile' : 'desktop'
+    const result = this.__skEvaluatePageVisibility(rules, pathname, device)
+    if (result === 'hide') {
+      this.rootEl.style.display = 'none'
+    } else {
+      this.rootEl.style.display = ''
+    }
+    // Diagnostic attribute — verifiable by browser tests.
+    this.rootEl.setAttribute('data-sk-page-visibility', result)
+  }
+
+  /**
+   * Wire popstate + patch history.pushState/replaceState to intercept
+   * SPA client-side navigation. Idempotent — safe to call from mount()
+   * even if the widget re-mounts. Stores the original history methods
+   * so teardownPageVisibility() can restore them.
+   */
+  private setupPageVisibilityListeners(): void {
+    if (this.state.pageVisibilityPopHandler) return // already wired
+    this.state.pageVisibilityPopHandler = this.__skOnPageChange
+    try {
+      window.addEventListener('popstate', this.__skOnPageChange)
+    } catch {
+      // ignore
+    }
+    if (typeof history !== 'undefined' && history.pushState && !this.state.pageVisibilityOrigPushState) {
+      const orig: typeof history.pushState = history.pushState.bind(history) as typeof history.pushState
+      this.state.pageVisibilityOrigPushState = orig as unknown as ((...args: unknown[]) => void)
+      const self = this
+      history.pushState = function (data: unknown, unused: string, url?: string | URL | null): void {
+        orig(data, unused, url)
+        self.__skOnPageChange()
+      } as typeof history.pushState
+    }
+    if (typeof history !== 'undefined' && history.replaceState && !this.state.pageVisibilityOrigReplaceState) {
+      const orig: typeof history.replaceState = history.replaceState.bind(history) as typeof history.replaceState
+      this.state.pageVisibilityOrigReplaceState = orig as unknown as ((...args: unknown[]) => void)
+      const self = this
+      history.replaceState = function (data: unknown, unused: string, url?: string | URL | null): void {
+        orig(data, unused, url)
+        self.__skOnPageChange()
+      } as typeof history.replaceState
+    }
+  }
+
+  /**
+   * Remove the popstate listener + restore the original history methods.
+   * Called from destroy(). Idempotent.
+   */
+  private teardownPageVisibility(): void {
+    const handler = this.state.pageVisibilityPopHandler
+    if (handler) {
+      try {
+        window.removeEventListener('popstate', handler)
+      } catch {
+        // ignore
+      }
+      this.state.pageVisibilityPopHandler = null
+    }
+    if (this.state.pageVisibilityOrigPushState && typeof history !== 'undefined') {
+      try {
+        history.pushState = this.state.pageVisibilityOrigPushState as typeof history.pushState
+      } catch {
+        // ignore
+      }
+      this.state.pageVisibilityOrigPushState = null
+    }
+    if (this.state.pageVisibilityOrigReplaceState && typeof history !== 'undefined') {
+      try {
+        history.replaceState = this.state.pageVisibilityOrigReplaceState as typeof history.replaceState
+      } catch {
+        // ignore
+      }
+      this.state.pageVisibilityOrigReplaceState = null
+    }
   }
 
   private injectStyles(accent: string): void {
@@ -2979,6 +3172,8 @@ export class SukhanWidget implements SukhanInstance {
     this.clearIdentityState()
     // 0. Remove resize/orientation listener
     this.teardownResizeListener()
+    // 0b. Remove V2 page visibility listeners + restore history methods.
+    this.teardownPageVisibility()
     // 1. Clear polling interval
     this.stopPolling()
     // 2. Clear typing timer

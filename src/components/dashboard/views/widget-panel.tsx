@@ -21,6 +21,7 @@ import { WidgetAttentionPanel } from './widget-attention-panel'
 import { WidgetMessagePreviewPanel } from './widget-message-preview-panel'
 import { WidgetQuickRepliesPanel } from './widget-quick-replies-panel'
 import { WidgetPreChatFormPanel } from './widget-pre-chat-form-panel'
+import { WidgetPageVisibilityPanel } from './widget-page-visibility-panel'
 
 type WidgetConfig = {
   accentColor: string
@@ -140,6 +141,12 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
     effective: { fields: Array<{ key: 'name' | 'email' | 'phone' | 'company'; required: boolean }> }
     stored: { fields: Array<{ key: 'name' | 'email' | 'phone' | 'company'; required: boolean }>; paidFields?: Array<{ key: 'name' | 'email' | 'phone' | 'company'; required: boolean }> } | null
   } | null>(null)
+  // V2 page visibility data (from GET /api/widget-config `pageVisibility` field).
+  const [pageVisibility, setPageVisibility] = useState<{
+    entitlements: { pageVisibility: 'none' | 'basic' | 'advanced' }
+    effective: { rules: Array<{ pattern: string; match: 'exact' | 'prefix'; action: 'show' | 'hide'; device?: 'desktop' | 'mobile' }> }
+    stored: { rules: Array<{ pattern: string; match: 'exact' | 'prefix'; action: 'show' | 'hide'; device?: 'desktop' | 'mobile' }>; paidRules?: Array<{ pattern: string; match: 'exact' | 'prefix'; action: 'show' | 'hide'; device?: 'desktop' | 'mobile' }> } | null
+  } | null>(null)
 
   const apiUrl = typeof window !== 'undefined' ? window.location.origin : HOSTED_API_URL
 
@@ -178,6 +185,8 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
     if (cfgData.quickReplies) setQuickReplies(cfgData.quickReplies)
     // V2 pre-chat form data.
     if (cfgData.preChatForm) setPreChatForm(cfgData.preChatForm)
+    // V2 page visibility data.
+    if (cfgData.pageVisibility) setPageVisibility(cfgData.pageVisibility)
     const domData = await domRes.json()
     setDomains(domData.domains ?? [])
     setDomainLimit(domData.limit ?? 0)
@@ -713,6 +722,13 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
           <WidgetPreChatFormPanel
             slug={slug}
             preChatForm={preChatForm}
+            defaultDirection={(config.defaultLocale === 'fa' ? 'rtl' : 'ltr') as 'rtl' | 'ltr'}
+            onReload={load}
+          />
+          {/* V2 Page Visibility — hide/show the widget on specific URL paths (Feature 8). */}
+          <WidgetPageVisibilityPanel
+            slug={slug}
+            pageVisibility={pageVisibility}
             defaultDirection={(config.defaultLocale === 'fa' ? 'rtl' : 'ltr') as 'rtl' | 'ltr'}
             onReload={load}
           />
