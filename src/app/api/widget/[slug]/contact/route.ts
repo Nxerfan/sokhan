@@ -4,6 +4,9 @@ import { signToken } from '@/lib/realtime-token'
 import { verifyResumeCredential, verifyExternalIdentityToken } from '@/lib/widget-identity-tokens'
 import { parseAccessMode, parsePolicyVersion } from '@/lib/widget-access-policy'
 import { checkRateLimit, getClientIP } from '@/lib/rate-limit'
+import { getEntitlements } from '@/lib/payments/widget-entitlements'
+import { resolveEffectivePreChatForm } from '@/lib/widget/effective-pre-chat-form'
+import { isPreChatComplete } from '@/lib/widget/pre-chat-form-policy'
 
 /** CORS + rate-limit headers for widget API responses. */
 function widgetHeaders(res: NextResponse): NextResponse {
@@ -76,7 +79,7 @@ export async function POST(
 
 async function anonymousBootstrap(
   req: NextRequest,
-  tenant: { id: string; defaultLocale: string; defaultDirection: string },
+  tenant: { id: string; defaultLocale: string; defaultDirection: string; plan: string; widgetConfig: { appearanceV2: unknown } | null },
   slug: string,
   policyVersion: number,
 ) {
@@ -131,7 +134,7 @@ async function anonymousBootstrap(
   if ('identityConflict' in result && result.identityConflict) {
     return widgetHeaders(NextResponse.json({ error: 'identity_conflict' }, { status: 403 }))
   }
-  const { contact, existingConversation } = result as { contact: { id: string }; existingConversation: { id: string } | null }
+  const { contact, existingConversation } = result as { contact: { id: string; metadata: unknown }; existingConversation: { id: string } | null }
 
   const realtimeToken = signToken({
     type: 'visitor',
@@ -142,17 +145,52 @@ async function anonymousBootstrap(
     policyVersion,
   })
 
+  // Compute server-authoritative preChatCompleted. A returning visitor with
+  // a previously persisted VISITOR message in ANY conversation (open/closed/
+  // resolved/pending) is exempt from the form — they already started a chat
+  // before the form was configured. Only the visitor's OWN messages count.
+  const entitlements = getEntitlements(tenant.plan)
+  const effectiveForm = resolveEffectivePreChatForm(
+    { appearanceV2: tenant.widgetConfig?.appearanceV2 },
+    entitlements,
+  )
+  const contactMetadata = (contact.metadata && typeof contact.metadata === 'object' && !Array.isArray(contact.metadata))
+    ? contact.metadata as Record<string, unknown>
+    : {}
+
+  // Check if this contact has ANY persisted visitor message across ALL
+  // conversations (any status). Uses take:1 for an efficient existence check.
+  const visitorMessageCount = await withTenant(tenant.id, async () => {
+    return db.message.count({
+      where: {
+        senderType: 'contact',
+        conversation: { contactId: contact.id, tenantId: tenant.id },
+      },
+      take: 1,
+    })
+  })
+  const hasPersistedVisitorMessage = visitorMessageCount > 0
+
+  // Form is completed if: (a) the visitor already has a persisted message
+  // (exempt — pre-dates the form), or (b) the stored pre-chat values satisfy
+  // the CURRENT effective form's required fields.
+  const preChatCompleted = hasPersistedVisitorMessage || isPreChatComplete(
+    effectiveForm,
+    contactMetadata.preChat as Record<string, unknown> | undefined,
+  )
+
   return widgetHeaders(NextResponse.json({
     contactId: contact.id,
     conversationId: existingConversation?.id ?? null,
     realtimeToken,
     locale: tenant.defaultLocale,
     direction: tenant.defaultDirection,
+    preChatCompleted,
   }))
 }
 
 async function verifiedVisitorBootstrap(
-  tenant: { id: string; defaultLocale: string; defaultDirection: string },
+  tenant: { id: string; defaultLocale: string; defaultDirection: string; plan: string; widgetConfig: { appearanceV2: unknown } | null },
   slug: string,
   policyVersion: number,
   bearer: string,
@@ -192,17 +230,37 @@ async function verifiedVisitorBootstrap(
     policyVersion,
   })
 
+  const entitlements = getEntitlements(tenant.plan)
+  const effectiveForm = resolveEffectivePreChatForm(
+    { appearanceV2: tenant.widgetConfig?.appearanceV2 },
+    entitlements,
+  )
+  const contactMetadata = (contact.metadata && typeof contact.metadata === 'object' && !Array.isArray(contact.metadata))
+    ? contact.metadata as Record<string, unknown>
+    : {}
+  // Historical visitor message exemption (same as anonymous bootstrap).
+  const visitorMsgCount = await withTenant(tenant.id, async () => {
+    return db.message.count({
+      where: { senderType: 'contact', conversation: { contactId: contact.id, tenantId: tenant.id } },
+      take: 1,
+    })
+  })
+  const preChatCompleted = visitorMsgCount > 0 || isPreChatComplete(
+    effectiveForm, contactMetadata.preChat as Record<string, unknown> | undefined,
+  )
+
   return widgetHeaders(NextResponse.json({
     contactId: contact.id,
     conversationId: existingConversation?.id ?? null,
     realtimeToken,
     locale: tenant.defaultLocale,
     direction: tenant.defaultDirection,
+    preChatCompleted,
   }))
 }
 
 async function siteUserBootstrap(
-  tenant: { id: string; defaultLocale: string; defaultDirection: string },
+  tenant: { id: string; defaultLocale: string; defaultDirection: string; plan: string; widgetConfig: { appearanceV2: unknown } | null },
   slug: string,
   policyVersion: number,
   bearer: string,
@@ -244,11 +302,31 @@ async function siteUserBootstrap(
     policyVersion,
   })
 
+  const entitlements = getEntitlements(tenant.plan)
+  const effectiveForm = resolveEffectivePreChatForm(
+    { appearanceV2: tenant.widgetConfig?.appearanceV2 },
+    entitlements,
+  )
+  const contactMetadata = (contact.metadata && typeof contact.metadata === 'object' && !Array.isArray(contact.metadata))
+    ? contact.metadata as Record<string, unknown>
+    : {}
+  // Historical visitor message exemption (same as anonymous bootstrap).
+  const visitorMsgCount = await withTenant(tenant.id, async () => {
+    return db.message.count({
+      where: { senderType: 'contact', conversation: { contactId: contact.id, tenantId: tenant.id } },
+      take: 1,
+    })
+  })
+  const preChatCompleted = visitorMsgCount > 0 || isPreChatComplete(
+    effectiveForm, contactMetadata.preChat as Record<string, unknown> | undefined,
+  )
+
   return widgetHeaders(NextResponse.json({
     contactId: contact.id,
     conversationId: existingConversation?.id ?? null,
     realtimeToken,
     locale: tenant.defaultLocale,
     direction: tenant.defaultDirection,
+    preChatCompleted,
   }))
 }

@@ -221,6 +221,7 @@ export function mergeAttentionPatch(
     ...(base.launcher ? { launcher: base.launcher } : {}),
     ...(base.messagePreview ? { messagePreview: base.messagePreview } : {}),
     ...(base.quickReplies ? { quickReplies: base.quickReplies } : {}),
+    ...(base.preChatForm ? { preChatForm: base.preChatForm } : {}),
   }
 }
 

@@ -205,6 +205,7 @@ export function mergeQuickRepliesPatch(
     ...(base.launcher ? { launcher: base.launcher } : {}),
     ...(base.attention ? { attention: base.attention } : {}),
     ...(base.messagePreview ? { messagePreview: base.messagePreview } : {}),
+    ...(base.preChatForm ? { preChatForm: base.preChatForm } : {}),
   }
 }
 

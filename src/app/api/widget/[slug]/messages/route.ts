@@ -8,6 +8,9 @@ import { withTenant } from '@/lib/db'
 import { checkMessageLimit } from '@/lib/payments/free-plan'
 import { getRequestDomain, isDomainAllowed } from '@/lib/payments/domain-validation'
 import { parseAccessMode, parsePolicyVersion, evaluateSendAuthorization, resolveLegacyTokenIdentity } from '@/lib/widget-access-policy'
+import { getEntitlements } from '@/lib/payments/widget-entitlements'
+import { resolveEffectivePreChatForm } from '@/lib/widget/effective-pre-chat-form'
+import { shouldRequirePreChat, isPreChatComplete } from '@/lib/widget/pre-chat-form-policy'
 
 const MAX_MESSAGE_LENGTH = 5000
 const MAX_MESSAGES_PER_CONVERSATION = 200
@@ -218,6 +221,59 @@ export async function POST(
       return { kind: 'message_limit' as const, reason: messageCheck.reason ?? 'message_limit' }
     }
 
+    // === Pre-chat Form server-side gate (Feature 7) ===
+    // Before persisting the visitor's first message, check if a pre-chat form
+    // is required and has not been completed. This is a SERVER-SIDE check —
+    // the client cannot bypass it.
+    //
+    // An existing visitor with a previously persisted VISITOR message in ANY
+    // conversation (open, pending, resolved, closed) is exempt — they already
+    // started a conversation before the form was configured. Only the visitor's
+    // OWN messages count (senderType: 'contact'); agent/AI/system messages do
+    // NOT exempt the visitor.
+    {
+      // Efficient existence query: check if this contact has ANY persisted
+      // visitor message across ALL their conversations (any status). Uses
+      // a bounded count (take: 1) so it doesn't load full message histories.
+      const visitorMessageCount = await db.message.count({
+        where: {
+          senderType: 'contact',
+          conversation: {
+            contactId,
+            tenantId,
+          },
+        },
+        take: 1,
+      })
+      const hasPersistedVisitorMessage = visitorMessageCount > 0
+
+      if (!hasPersistedVisitorMessage) {
+        // Resolve the effective pre-chat form from the tenant's config + plan.
+        const widgetConfig = await db.widgetConfig.findUnique({
+          where: { tenantId },
+          select: { appearanceV2: true },
+        })
+        const entitlements = getEntitlements(tokenTenant.plan)
+        const effectiveForm = resolveEffectivePreChatForm(
+          { appearanceV2: widgetConfig?.appearanceV2 },
+          entitlements,
+        )
+
+        // Validate stored pre-chat values against the CURRENT required fields.
+        const fullContact = await db.contact.findUnique({
+          where: { id: contactId },
+          select: { metadata: true },
+        })
+        const contactMetadata = fullContact?.metadata as Record<string, unknown> | null
+        const storedPreChat = contactMetadata?.preChat as Record<string, unknown> | undefined
+        const hasCompletedForm = isPreChatComplete(effectiveForm, storedPreChat)
+
+        if (shouldRequirePreChat(effectiveForm, hasPersistedVisitorMessage, hasCompletedForm)) {
+          return { kind: 'pre_chat_required' as const }
+        }
+      }
+    }
+
     // Find or create the conversation. tenantId is auto-injected by the
     // fail-closed extension; passing it explicitly is defense-in-depth.
     let conversation = await db.conversation.findFirst({
@@ -278,6 +334,9 @@ export async function POST(
   }
   if (result.kind === 'message_limit') {
     return widgetHeaders(NextResponse.json({ error: result.reason }, { status: 403 }))
+  }
+  if (result.kind === 'pre_chat_required') {
+    return widgetHeaders(NextResponse.json({ error: 'pre_chat_required' }, { status: 403 }))
   }
   if (result.kind !== 'ok') {
     // Unreachable — exhaustiveness guard

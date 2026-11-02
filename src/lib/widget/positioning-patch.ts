@@ -283,6 +283,7 @@ export function mergePositioningPatch(
     ...(base.attention ? { attention: base.attention } : {}),
     ...(base.messagePreview ? { messagePreview: base.messagePreview } : {}),
     ...(base.quickReplies ? { quickReplies: base.quickReplies } : {}),
+    ...(base.preChatForm ? { preChatForm: base.preChatForm } : {}),
   }
 }
 
@@ -320,7 +321,7 @@ const ALL_RECOGNIZED_KEYS = new Set([
   'launcher',
   'attention',
   'messagePreview',
-  'quickReplies',
+  'quickReplies', 'preChatForm',
 ])
 
 /**

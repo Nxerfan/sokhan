@@ -229,6 +229,7 @@ export function mergeColorPatch(
     ...(base.attention ? { attention: base.attention } : {}),
     ...(base.messagePreview ? { messagePreview: base.messagePreview } : {}),
     ...(base.quickReplies ? { quickReplies: base.quickReplies } : {}),
+    ...(base.preChatForm ? { preChatForm: base.preChatForm } : {}),
   }
 }
 

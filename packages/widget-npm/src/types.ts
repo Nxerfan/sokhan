@@ -106,6 +106,17 @@ export interface WidgetConfig {
     items: string[]
   }
   /**
+   * V2 pre-chat form (Phase 2 / Feature 7). Additive — the public config
+   * exposes only the effective authorized fields (`name`/`email` on Free,
+   * plus `phone`/`company` on advanced plans). Older backends omit the
+   * field; the widget defaults to no form (no first-message gate).
+   * `paidFields` is NEVER exposed to the browser — only the effective
+   * `fields` array reaches the runtime.
+   */
+  preChatForm?: {
+    fields: Array<{ key: string; required: boolean }>
+  }
+  /**
    * Backend-supplied realtime endpoint config (additive field). The widget
    * uses this as the PRIMARY runtime source. Older backends omit the
    * field; the widget falls back to the documented hosted default.
@@ -155,6 +166,14 @@ export interface IdentifyResponse {
   realtimeToken: string
   locale: string
   direction: 'rtl' | 'ltr'
+  /**
+   * Optional backend-supplied flag indicating the contact has already
+   * completed the pre-chat form (e.g. on a reload after a prior submission).
+   * When true, the widget marks `preChatCompleted` so the form does not
+   * reappear. Older backends omit the field; the widget falls back to the
+   * hasPersistedVisitorMessage gate.
+   */
+  preChatCompleted?: boolean
 }
 
 /**

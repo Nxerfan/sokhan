@@ -247,6 +247,26 @@
       "locked": "Quick Replies are a paid-plan feature.",
       "upgradeHint": "Quick Replies are available on paid plans (up to 10 buttons)."
     },
+    "preChatForm": {
+      "title": "Pre-chat Form",
+      "hint": "Collect visitor information before they send their first message.",
+      "save": "Save form",
+      "discard": "Discard changes",
+      "dirty": "Unsaved changes",
+      "saveSuccess": "Pre-chat form saved",
+      "saveFail": "Failed to save pre-chat form",
+      "locked": "This field is a paid-plan feature. Your selection is preserved and will restore on upgrade.",
+      "limitExceeded": "You've reached the maximum number of fields for your plan.",
+      "required": "Required",
+      "optional": "Optional",
+      "upgradeHint": "Pre-chat Form fields beyond name and email are available on paid plans.",
+      "fields": {
+        "name": "Name",
+        "email": "Email",
+        "phone": "Phone",
+        "company": "Company"
+      }
+    },
     "avatarUrl": "Agent avatar URL",
     "logoUrl": "Logo URL",
     "greetingFa": "Greeting (Persian)",

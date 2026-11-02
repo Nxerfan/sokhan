@@ -1,0 +1,40 @@
+name: Pre-chat Form — test harness preflight
+on:
+  push:
+    branches:
+      - feat/widget-v2-pre-chat-form
+    paths:
+      - tests/unit/widget-v2-pre-chat-form.test.ts
+      - tests/widget-v2-pre-chat-form.spec.ts
+      - .github/workflows/pre-chat-form-preflight.yml
+
+jobs:
+  test-harness-preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+      - name: Parse independent Unit and Browser TypeScript suites
+        run: |
+          node --input-type=module <<'NODE'
+          import ts from 'typescript'
+          import { readFileSync } from 'node:fs'
+          for (const file of [
+            'tests/unit/widget-v2-pre-chat-form.test.ts',
+            'tests/widget-v2-pre-chat-form.spec.ts',
+          ]) {
+            const tree = ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+            if (tree.parseDiagnostics.length) {
+              for (const d of tree.parseDiagnostics)
+                console.error(ts.flattenDiagnosticMessageText(d.messageText, '\n'))
+              throw Error('Invalid test syntax: ' + file)
+            }
+            console.log('Syntax OK: ' + file)
+          }
+          NODE
+      - name: Discover focused Playwright tests (no fabricated backend, DB or Docker)
+        run: bunx playwright test tests/widget-v2-pre-chat-form.spec.ts --list

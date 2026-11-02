@@ -195,6 +195,11 @@ export const IDENTITY_STATEFUL_JS = String.raw`
     try { if (typeof updateQuickReplies === 'function') updateQuickReplies(); } catch(e){}
     // Message Preview must also be cleared on identity loss.
     try { if (typeof clearMessagePreviewState === 'function') clearMessagePreviewState(); } catch(e){}
+    // Pre-chat Form completion must reset on identity clear (SPA user-switch /
+    // policy recovery) so a fresh identity doesn't carry over the previous
+    // visitor's completed-form flag. The hook is typeof-guarded so older
+    // scripts that don't define clearPreChatForm are unaffected.
+    try { if (typeof clearPreChatForm === 'function') clearPreChatForm(); } catch(e){}
   }
 
   // Single-flight config refresh (socket error + send error + refreshIdentity

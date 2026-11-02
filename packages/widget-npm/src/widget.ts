@@ -316,6 +316,14 @@ interface WidgetInternalState {
   quickRepliesEl: HTMLElement | null
   /** Prevents duplicate quick-reply sends while a POST is in-flight. */
   quickRepliesInFlight: boolean
+  /** V2 pre-chat form — effective fields from public config. */
+  preChatFormFields: Array<{ key: string; required: boolean }>
+  /** Pre-chat form DOM container (.sk-pre-chat-form). */
+  preChatFormEl: HTMLElement | null
+  /** Whether the pre-chat form was successfully submitted. */
+  preChatCompleted: boolean
+  /** Prevents double submission while the pre-chat POST is in-flight. */
+  preChatInFlight: boolean
   /** The current panel side (left/right/center) from the geometry function. */
   panelSide: 'left' | 'right' | 'center'
   /** Resize listener reference (for cleanup on destroy). */
@@ -398,6 +406,10 @@ export class SukhanWidget implements SukhanInstance {
     quickRepliesItems: [],
     quickRepliesEl: null,
     quickRepliesInFlight: false,
+    preChatFormFields: [],
+    preChatFormEl: null,
+    preChatCompleted: false,
+    preChatInFlight: false,
     panelSide: 'right',
     resizeHandler: null,
   }
@@ -411,6 +423,7 @@ export class SukhanWidget implements SukhanInstance {
   private launcher!: HTMLButtonElement
   private panel!: HTMLElement
   private pulseDot!: HTMLElement
+  private inputBar!: HTMLElement
   private pollTimer: ReturnType<typeof setInterval> | null = null
   private csatShown = false
   private rootEl: HTMLElement | null = null
@@ -852,6 +865,7 @@ export class SukhanWidget implements SukhanInstance {
       gap: '8px',
       flexShrink: '0',
     })
+    this.inputBar = inputBar
     const inputEl = el('input') as HTMLInputElement
     inputEl.setAttribute(
       'placeholder',
@@ -905,6 +919,39 @@ export class SukhanWidget implements SukhanInstance {
     inputBar.appendChild(inputEl)
     inputBar.appendChild(sendBtn)
 
+    // V2 pre-chat form: collect visitor details (name/email/phone/company)
+    // BEFORE the first message. Shown only when the panel is open + visitor
+    // authorized + no persisted visitor message + form not yet completed.
+    // The server gates the first visitor message on a successful pre-chat
+    // submission when fields are configured (returns 403 pre_chat_required).
+    // SECURITY: visitor-supplied values are read via input.value (never
+    // innerHTML) and submitted as JSON; error messages use textContent.
+    const preChatFields = config.preChatForm?.fields || []
+    this.state.preChatFormFields = preChatFields
+    const preChatFormEl = el('div', 'sk-pre-chat-form') as HTMLElement
+    for (const f of preChatFields) {
+      if (!f || typeof f.key !== 'string') continue
+      const fieldInput = el('input', 'sk-pre-chat-field-' + f.key) as HTMLInputElement
+      if (f.key === 'email') fieldInput.setAttribute('type', 'email')
+      else if (f.key === 'phone') fieldInput.setAttribute('type', 'tel')
+      else fieldInput.setAttribute('type', 'text')
+      fieldInput.setAttribute('placeholder', this.preChatFieldLabel(f.key))
+      fieldInput.setAttribute('autocomplete', 'off')
+      if (f.required) fieldInput.setAttribute('aria-required', 'true')
+      preChatFormEl.appendChild(fieldInput)
+    }
+    const preChatErrorEl = el('div', 'sk-pre-chat-error') as HTMLElement
+    preChatFormEl.appendChild(preChatErrorEl)
+    const preChatSubmitBtn = el(
+      'button',
+      'sk-pre-chat-submit',
+      this.state.locale === 'fa' ? 'شروع گفت‌وگو' : 'Start chat',
+    ) as HTMLButtonElement
+    preChatSubmitBtn.setAttribute('type', 'button')
+    preChatSubmitBtn.onclick = () => this.submitPreChatForm()
+    preChatFormEl.appendChild(preChatSubmitBtn)
+    this.state.preChatFormEl = preChatFormEl
+
     panel.appendChild(header)
     panel.appendChild(bodyEl)
     if (this.state.quickRepliesEl) this.panel.appendChild(this.state.quickRepliesEl)
@@ -928,6 +975,10 @@ export class SukhanWidget implements SukhanInstance {
       badge.textContent = POWERED_BY[this.state.locale]
       panel.appendChild(badge)
     }
+    // Pre-chat form sits between quick replies/badge and the input bar.
+    // While visible, the input bar + quick replies are hidden by
+    // updatePreChatForm(); when hidden, the input bar is restored.
+    if (this.state.preChatFormEl) this.panel.appendChild(this.state.preChatFormEl)
 
     panel.appendChild(inputBar)
     root.appendChild(panel)
@@ -1590,6 +1641,10 @@ export class SukhanWidget implements SukhanInstance {
     // suggestions without requiring the user to close and reopen the panel.
     // Safe no-op if the panel element does not exist yet.
     this.updateQuickReplies()
+    // Pre-chat Form completion must reset on identity clear (SPA user-switch /
+    // policy recovery) so a fresh identity doesn't carry over the previous
+    // visitor's completed-form flag. Safe no-op pre-mount.
+    this.clearPreChatForm()
     // NOTE: memoryIdentityToken is cleared on logout (setIdentity(null)) but
     // PRESERVED across a refresh/bootstrap re-entry so site_user_only can
     // re-use a still-valid token. Callers that must clear it do so explicitly.
@@ -1612,6 +1667,16 @@ export class SukhanWidget implements SukhanInstance {
     // Identity is now ready — Quick Replies may become visible without
     // requiring the user to close and reopen the panel.
     this.updateQuickReplies()
+    // V2 pre-chat form: if the backend reports the contact has already
+    // completed pre-chat (e.g. on a reload after a prior submission), mark
+    // completed so the form does not reappear. The flag is optional —
+    // older backends omit it and the form visibility is governed by the
+    // hasPersistedVisitorMessage gate instead.
+    if (data.preChatCompleted === true) {
+      this.state.preChatCompleted = true
+    }
+    // Re-evaluate pre-chat form visibility now that the token is set.
+    this.updatePreChatForm()
   }
 
   /** Render the login-required UI (simple card; login button if loginUrl). */
@@ -1746,8 +1811,15 @@ export class SukhanWidget implements SukhanInstance {
     })
     this.applyPanelTransform()
     this.pulseDot.style.display = 'none'
+    this.updatePreChatForm() // may hide input + quick replies when form is shown
     this.updateQuickReplies()
-    setTimeout(() => this.inputEl && this.inputEl.focus(), 200)
+    // Only focus the input when the pre-chat form is NOT visible —
+    // otherwise focusing the input would scroll past the form.
+    const preChatVisible =
+      !!this.state.preChatFormEl && this.state.preChatFormEl.style.display === 'flex'
+    if (!preChatVisible) {
+      setTimeout(() => this.inputEl && this.inputEl.focus(), 200)
+    }
   }
   close(): void {
     this.state.open = false
@@ -1756,6 +1828,7 @@ export class SukhanWidget implements SukhanInstance {
       pointerEvents: 'none',
     })
     this.applyPanelTransform()
+    this.updatePreChatForm()
     this.updateQuickReplies()
   }
 
@@ -1795,6 +1868,185 @@ export class SukhanWidget implements SukhanInstance {
         btn.style.pointerEvents = this.state.quickRepliesInFlight ? 'none' : 'auto'
       }
     }
+  }
+
+  // ---- V2 Pre-chat Form helpers ----
+  /**
+   * Bilingual placeholder label for a pre-chat field key.
+   * SECURITY: fixed brand strings only — never tenant-controlled content.
+   */
+  private preChatFieldLabel(key: string): string {
+    const fa: Record<string, string> = { name: 'نام', email: 'ایمیل', phone: 'تلفن', company: 'شرکت' }
+    const en: Record<string, string> = { name: 'Name', email: 'Email', phone: 'Phone', company: 'Company' }
+    const map = this.state.locale === 'en' ? en : fa
+    return map[key] || key
+  }
+
+  /**
+   * True when a server-persisted visitor message exists (real id, not __local_).
+   * Mirrors the gate in updateQuickReplies — a persisted visitor message means
+   * the visitor already started the conversation, so the pre-chat form is not
+   * required (the server has already accepted their first message).
+   */
+  private hasPersistedVisitorMessage(): boolean {
+    return (this.state.messages || []).some(
+      (m) =>
+        m?.senderType === 'contact' &&
+        !(m.id && String(m.id).indexOf('__local_') === 0),
+    )
+  }
+
+  /**
+   * updatePreChatForm: decide whether to show the form based on the current
+   * state. Called from open(), close(), renderMessages(), and
+   * applyBootstrapResponse() — similar to updateQuickReplies(). When the form
+   * is visible, the input bar and quick replies are hidden; when hidden, the
+   * input bar is restored (quick replies remain governed by updateQuickReplies()).
+   */
+  private updatePreChatForm(): void {
+    if (!this.state.preChatFormEl) return
+    const hasMsg = this.hasPersistedVisitorMessage()
+    const show =
+      this.state.open &&
+      !!this.state.token &&
+      this.state.preChatFormFields.length > 0 &&
+      !this.state.preChatCompleted &&
+      !hasMsg
+    this.state.preChatFormEl.style.display = show ? 'flex' : 'none'
+    if (show) {
+      // Hide the input bar + quick replies while the form is visible.
+      if (this.inputBar) this.inputBar.style.display = 'none'
+      if (this.state.quickRepliesEl) this.state.quickRepliesEl.style.display = 'none'
+    } else {
+      // Restore the input bar (quick replies handled by updateQuickReplies).
+      if (this.inputBar) this.inputBar.style.display = 'flex'
+    }
+  }
+
+  /** Direct visibility toggles used by the submit handler. */
+  private showPreChatForm(): void {
+    if (!this.state.preChatFormEl) return
+    this.state.preChatFormEl.style.display = 'flex'
+    if (this.inputBar) this.inputBar.style.display = 'none'
+    if (this.state.quickRepliesEl) this.state.quickRepliesEl.style.display = 'none'
+  }
+
+  private hidePreChatForm(): void {
+    if (!this.state.preChatFormEl) return
+    this.state.preChatFormEl.style.display = 'none'
+    if (this.inputBar) this.inputBar.style.display = 'flex'
+  }
+
+  /**
+   * submitPreChatForm: collect visitor-supplied values from the configured
+   * fields and POST them to the pre-chat endpoint. On success (200): mark
+   * completed + hide form + restore input/quick replies. On failure (4xx):
+   * show a safe error message, preserve typed values, re-enable the submit
+   * button. SECURITY: values are read via input.value (never innerHTML) and
+   * sent as JSON; the error element uses textContent (never innerHTML).
+   */
+  private submitPreChatForm(): void {
+    if (this.destroyed) return
+    if (this.state.preChatInFlight) return // prevent double submission
+    if (!this.state.preChatFormEl || !this.state.token) return
+    const values: Record<string, string> = {}
+    for (const f of this.state.preChatFormFields) {
+      if (!f || typeof f.key !== 'string') continue
+      const input = this.state.preChatFormEl.querySelector(
+        '.sk-pre-chat-field-' + f.key,
+      ) as HTMLInputElement | null
+      if (input) {
+        const v = (input.value || '').trim()
+        if (v !== '') values[f.key] = v
+      }
+    }
+    // Clear any prior error before submitting.
+    const errEl = this.state.preChatFormEl.querySelector(
+      '.sk-pre-chat-error',
+    ) as HTMLElement | null
+    if (errEl) {
+      errEl.textContent = ''
+      errEl.style.display = 'none'
+    }
+    // Disable submit while in-flight (prevents double submission).
+    this.state.preChatInFlight = true
+    const submitBtn = this.state.preChatFormEl.querySelector(
+      '.sk-pre-chat-submit',
+    ) as HTMLButtonElement | null
+    if (submitBtn) {
+      submitBtn.disabled = true
+      submitBtn.style.opacity = '0.6'
+      submitBtn.style.cursor = 'default'
+    }
+    const preChatUrl =
+      this.api.apiUrl + '/api/widget/' + this.api.slug + '/pre-chat'
+    fetch(preChatUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer ' + this.state.token,
+      },
+      body: JSON.stringify({ values }),
+    })
+      .then((r) => {
+        if (!r.ok) {
+          // Parse a safe error code from the JSON body; never log headers or
+          // the raw response body. The body may contain { error: '...' }.
+          return r
+            .json()
+            .catch(() => ({}))
+            .then((b: { error?: unknown }) => {
+              const code =
+                b && typeof b.error === 'string' ? b.error : 'http_' + r.status
+              throw new Error('pre_chat_failed_' + code)
+            })
+        }
+        return r.json()
+      })
+      .then(() => {
+        if (this.destroyed) return
+        this.state.preChatCompleted = true
+        this.state.preChatInFlight = false
+        this.hidePreChatForm()
+        // Restore the input bar + re-evaluate quick replies.
+        if (this.inputBar) this.inputBar.style.display = 'flex'
+        this.updateQuickReplies()
+        setTimeout(() => this.inputEl && this.inputEl.focus(), 100)
+      })
+      .catch((e: unknown) => {
+        if (this.destroyed) return
+        this.state.preChatInFlight = false
+        // Re-enable submit so the visitor can retry.
+        if (submitBtn) {
+          submitBtn.disabled = false
+          submitBtn.style.opacity = '1'
+          submitBtn.style.cursor = 'pointer'
+        }
+        // Show a safe bilingual error message. Values are preserved (inputs
+        // are not cleared) so the visitor can correct + resubmit.
+        const safeMsg =
+          this.state.locale === 'fa'
+            ? 'ثبت ناموفق بود — دوباره تلاش کنید'
+            : 'Submission failed — please try again'
+        if (errEl) {
+          errEl.textContent = safeMsg // XSS-safe: textContent, never innerHTML
+          errEl.style.display = 'block'
+        }
+        // Safe error log — only the safe error code, never the token.
+        const safeErr = e instanceof Error ? e.message : 'unknown'
+        // eslint-disable-next-line no-console
+        console.error('[sukhan] pre-chat submit failed:', safeErr)
+      })
+  }
+
+  /**
+   * clearPreChatForm: reset on identity clear (called from clearIdentityState).
+   * Resets the completed + in-flight flags so a fresh identity (SPA user-switch
+   * / policy recovery) starts clean.
+   */
+  private clearPreChatForm(): void {
+    this.state.preChatCompleted = false
+    this.state.preChatInFlight = false
   }
 
   // ---- V2 Message Preview helpers ----
@@ -2332,6 +2584,7 @@ export class SukhanWidget implements SukhanInstance {
     }
     this.scrollBody()
     this.updateQuickReplies() // hide suggestions after the first visitor message
+    this.updatePreChatForm() // hide form after the first persisted visitor message
   }
 
   private scrollBody(): void {
@@ -2695,7 +2948,12 @@ export class SukhanWidget implements SukhanInstance {
       // V2 quick replies — suggestion buttons inside the open panel.
       '.sk-quick-replies{box-sizing:border-box;}' +
       '.sk-quick-reply{box-sizing:border-box;transition:background .15s ease;}' +
-      '.sk-quick-reply:hover{background:#e8e4dc;}'
+      '.sk-quick-reply:hover{background:#e8e4dc;}' +
+      // V2 pre-chat form — visitor details collected before the first message.
+      '.sk-pre-chat-form{display:none;flex-direction:column;gap:8px;padding:16px;background:#f7f5f1;flex-shrink:0;}' +
+      '.sk-pre-chat-form input{border:1px solid #ddd;border-radius:8px;padding:8px 12px;font-size:14px;width:100%;box-sizing:border-box;}' +
+      '.sk-pre-chat-submit{background:#0E1116;color:#fff;border:none;border-radius:8px;padding:10px;cursor:pointer;font-size:14px;}' +
+      '.sk-pre-chat-error{color:#e53e3e;font-size:12px;display:none;}'
     document.head.appendChild(style)
   }
 

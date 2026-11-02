@@ -73,6 +73,17 @@ import {
   hasQuickRepliesField,
   type QuickRepliesPatchData,
 } from '@/lib/widget/quick-replies-patch'
+import {
+  resolveEffectivePreChatForm,
+  getStoredPreChatForm,
+  type StoredPreChatFormInput,
+} from '@/lib/widget/effective-pre-chat-form'
+import {
+  validatePreChatFormPatch,
+  mergePreChatFormPatch,
+  hasPreChatFormField,
+  type PreChatFormPatchData,
+} from '@/lib/widget/pre-chat-form-patch'
 
 /**
  * GET /api/widget-config — dashboard widget configuration.
@@ -150,6 +161,16 @@ export async function GET() {
     }
     const effectiveQuickReplies = resolveEffectiveQuickReplies(quickRepliesInput, entitlements)
     const storedQuickReplies = getStoredQuickReplies(quickRepliesInput)
+
+    // V2 pre-chat form: resolve effective + stored.
+    // The dashboard `effective` must match the public widget. The raw stored
+    // `paidFields` is exposed ONLY via `stored` (for restore-on-upgrade),
+    // NEVER as `effective` for Free (the resolver filters to name/email).
+    const preChatFormInput: StoredPreChatFormInput = {
+      appearanceV2: stored?.appearanceV2,
+    }
+    const effectivePreChatForm = resolveEffectivePreChatForm(preChatFormInput, entitlements)
+    const storedPreChatForm = getStoredPreChatForm(preChatFormInput)
 
     return {
       stored,
@@ -240,6 +261,15 @@ export async function GET() {
         effective: effectiveQuickReplies,
         stored: storedQuickReplies,
       },
+      // V2 pre-chat form: resolve effective + stored.
+      // The dashboard `effective` must match the public widget. The raw stored
+      // `paidFields` is exposed ONLY via `stored` (for restore-on-upgrade),
+      // NEVER as `effective` for Free (the resolver filters to name/email).
+      preChatForm: {
+        entitlements: { preChatForm: entitlements?.preChatForm ?? 'none' },
+        effective: effectivePreChatForm,
+        stored: storedPreChatForm,
+      },
     } as const
   })
   if (!result) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
@@ -253,6 +283,7 @@ export async function GET() {
     attention: result.result.attention,
     messagePreview: result.result.messagePreview,
     quickReplies: result.result.quickReplies,
+    preChatForm: result.result.preChatForm,
   })
 }
 
@@ -357,6 +388,20 @@ const QUICK_REPLIES_ERROR_STATUS: Record<string, number> = {
   quick_replies_no_fields: 400,
 }
 
+/** Pre-chat-form-specific error codes → HTTP status mapping. */
+const PRE_CHAT_FORM_ERROR_STATUS: Record<string, number> = {
+  pre_chat_form_not_authorized: 403,
+  pre_chat_form_not_object: 400,
+  pre_chat_form_fields_missing: 400,
+  pre_chat_form_fields_not_array: 400,
+  pre_chat_form_field_invalid: 400,
+  pre_chat_form_not_allowed: 403,
+  pre_chat_form_limit_exceeded: 403,
+  pre_chat_form_duplicate_key: 400,
+  pre_chat_form_unexpected_key: 400,
+  pre_chat_form_no_fields: 400,
+}
+
 /**
  * PATCH /api/widget-config — update widget customization.
  *
@@ -410,11 +455,13 @@ export async function PATCH(req: NextRequest) {
     const hasAttention = hasAttentionField(body)
     const hasMessagePreview = hasMessagePreviewField(body)
     const hasQuickReplies = hasQuickRepliesField(body)
+    const hasPreChatForm = hasPreChatFormField(body)
     const hasOtherFields = hasOtherCustomizationFields(body)
 
     // Reject unrecognized top-level fields when the request contains
-    // positioning, colors, launcher, attention, messagePreview, or quickReplies.
-    if ((hasPositioning || hasColors || hasLauncher || hasAttention || hasMessagePreview || hasQuickReplies) && hasUnrecognizedFields(body)) {
+    // positioning, colors, launcher, attention, messagePreview, quickReplies,
+    // or preChatForm.
+    if ((hasPositioning || hasColors || hasLauncher || hasAttention || hasMessagePreview || hasQuickReplies || hasPreChatForm) && hasUnrecognizedFields(body)) {
       return { badRequest: true as const, code: 'unrecognized_field' }
     }
 
@@ -482,6 +529,16 @@ export async function PATCH(req: NextRequest) {
         return { quickRepliesError: true as const, code: qrResult.code }
       }
       quickRepliesPatch = qrResult.data
+    }
+
+    // ---- Validate pre-chat form (if present) ----
+    let preChatFormPatch: PreChatFormPatchData | null = null
+    if (hasPreChatForm) {
+      const pcfResult = validatePreChatFormPatch({ preChatForm: body.preChatForm }, entitlements)
+      if (!pcfResult.ok) {
+        return { preChatFormError: true as const, code: pcfResult.code }
+      }
+      preChatFormPatch = pcfResult.data
     }
 
     // ---- Validate + collect other customization fields (paid only) ----
@@ -643,6 +700,22 @@ export async function PATCH(req: NextRequest) {
       data.appearanceV2 = mergedQuickReplies as unknown as string // Prisma Json field
     }
 
+    // ---- Apply pre-chat form patch (if validated) ----
+    // Reads the already-merged appearanceV2 (from prior patches, if any) so
+    // all neighboring V2 capabilities are preserved.
+    if (preChatFormPatch) {
+      let baseAppearanceV2: unknown = data.appearanceV2 ?? undefined
+      if (baseAppearanceV2 === undefined) {
+        const existing = await db.widgetConfig.findUnique({
+          where: { tenantId: tid },
+          select: { appearanceV2: true },
+        })
+        baseAppearanceV2 = existing?.appearanceV2
+      }
+      const mergedPreChatForm = mergePreChatFormPatch(baseAppearanceV2, preChatFormPatch, entitlements)
+      data.appearanceV2 = mergedPreChatForm as unknown as string // Prisma Json field
+    }
+
     if (Object.keys(data).length === 0) {
       return { badRequest: true as const, code: 'no_fields' }
     }
@@ -685,6 +758,10 @@ export async function PATCH(req: NextRequest) {
   }
   if ('quickRepliesError' in r) {
     const status = QUICK_REPLIES_ERROR_STATUS[r.code as string] ?? 400
+    return NextResponse.json({ error: r.code }, { status })
+  }
+  if ('preChatFormError' in r) {
+    const status = PRE_CHAT_FORM_ERROR_STATUS[r.code as string] ?? 400
     return NextResponse.json({ error: r.code }, { status })
   }
   if ('badRequest' in r) return NextResponse.json({ error: r.code }, { status: 400 })

@@ -75,6 +75,10 @@ export function buildScript(_origin: string, slug: string, disablePolling: boole
   var CONTACT_URL = API_URL + "/api/widget/" + SLUG + "/contact";
   var MESSAGES_URL = API_URL + "/api/widget/" + SLUG + "/messages";
   var CSAT_URL = API_URL + "/api/widget/" + SLUG + "/csat";
+  // V2 pre-chat form: visitor details submitted BEFORE the first message.
+  // The server gates the first visitor message on a successful pre-chat
+  // submission when fields are configured (returns 403 pre_chat_required).
+  var PRE_CHAT_URL = API_URL + "/api/widget/" + SLUG + "/pre-chat";
   var SOCKET_IO_JS = API_URL ? API_URL + "/socket.io.min.js" : "/socket.io.min.js";
   // SOCKET_URL is resolved server-side and baked in.
   //   - docker/dev (no env, VERCEL!=1) -> the runtime expression
@@ -149,6 +153,11 @@ ${POSITIONING_FN_SOURCE}
     // V2 quick replies state.
     quickRepliesItems: [],  // effective items from public config
     quickRepliesEl: null,   // .sk-quick-replies DOM element
+    // V2 pre-chat form state.
+    preChatFormFields: [],  // effective fields from public config
+    preChatFormEl: null,    // .sk-pre-chat-form DOM container
+    preChatCompleted: false, // whether the form was successfully submitted
+    preChatInFlight: false,  // prevents double submission
   };
 
   // ============================================================
@@ -576,7 +585,7 @@ ${POSITIONING_FN_SOURCE}
   }
 
   // ---- DOM refs (created in mount) ----
-  var bodyEl, inputEl, sendBtn, typingEl, launcher, panel, pulseDot;
+  var bodyEl, inputEl, sendBtn, typingEl, launcher, panel, pulseDot, inputBar;
 
   function mount(config){
     if (window.__sukhan_mounted) return;
@@ -781,7 +790,7 @@ ${POSITIONING_FN_SOURCE}
     state.quickRepliesEl = quickRepliesEl;
 
     // Input bar
-    var inputBar = el('div', 'sk-input');
+    inputBar = el('div', 'sk-input');
     css(inputBar, { display:'flex', padding:'10px 12px', background:'#fff', borderTop:'1px solid #eee', gap:'8px', flexShrink:'0' });
     inputEl = el('input');
     inputEl.setAttribute('placeholder', state.locale === 'fa' ? 'پیام بنویسید…' : 'Type a message…');
@@ -805,6 +814,36 @@ ${POSITIONING_FN_SOURCE}
     };
     inputBar.appendChild(inputEl); inputBar.appendChild(sendBtn);
 
+    // V2 pre-chat form: collect visitor details (name/email/phone/company)
+    // BEFORE the first message. Shown only when the panel is open + visitor
+    // authorized + no persisted visitor message + form not yet completed.
+    // The server gates the first visitor message on a successful pre-chat
+    // submission when fields are configured (returns 403 pre_chat_required).
+    // SECURITY: visitor-supplied values are read via input.value (never
+    // innerHTML) and submitted as JSON; error messages use textContent.
+    var preChatFields = (config.preChatForm && config.preChatForm.fields) || [];
+    state.preChatFormFields = preChatFields;
+    var preChatFormEl = el('div', 'sk-pre-chat-form');
+    for (var pci = 0; pci < preChatFields.length; pci++) {
+      var pcf = preChatFields[pci];
+      if (!pcf || typeof pcf.key !== 'string') continue;
+      var pcfInput = el('input', 'sk-pre-chat-field-' + pcf.key);
+      if (pcf.key === 'email') pcfInput.setAttribute('type', 'email');
+      else if (pcf.key === 'phone') pcfInput.setAttribute('type', 'tel');
+      else pcfInput.setAttribute('type', 'text');
+      pcfInput.setAttribute('placeholder', preChatFieldLabel(pcf.key, state.locale));
+      pcfInput.setAttribute('autocomplete', 'off');
+      if (pcf.required) pcfInput.setAttribute('aria-required', 'true');
+      preChatFormEl.appendChild(pcfInput);
+    }
+    var preChatErrorEl = el('div', 'sk-pre-chat-error');
+    preChatFormEl.appendChild(preChatErrorEl);
+    var preChatSubmitBtn = el('button', 'sk-pre-chat-submit', state.locale === 'fa' ? 'شروع گفت‌وگو' : 'Start chat');
+    preChatSubmitBtn.setAttribute('type', 'button');
+    preChatSubmitBtn.onclick = submitPreChatForm;
+    preChatFormEl.appendChild(preChatSubmitBtn);
+    state.preChatFormEl = preChatFormEl;
+
     panel.appendChild(header); panel.appendChild(bodyEl);
     if (state.quickRepliesEl) panel.appendChild(state.quickRepliesEl);
     // Free-plan contract (CUST-F): render the "Powered by Sukhan" badge
@@ -820,6 +859,10 @@ ${POSITIONING_FN_SOURCE}
       badge.textContent = state.locale === 'fa' ? 'نیرو گرفته از سُخن' : 'Powered by Sukhan';
       panel.appendChild(badge);
     }
+    // Pre-chat form sits between quick replies/badge and the input bar.
+    // While visible, the input bar + quick replies are hidden by
+    // updatePreChatForm(); when hidden, the input bar is restored.
+    if (state.preChatFormEl) panel.appendChild(state.preChatFormEl);
     panel.appendChild(inputBar);
     root.appendChild(panel); root.appendChild(launcher); root.appendChild(previewEl);
     document.body.appendChild(root);
@@ -844,11 +887,18 @@ ${POSITIONING_FN_SOURCE}
       applyPanelTransform();
       pulseDot.style.display = 'none';
       hidePreview(); // opening the conversation hides the preview
+      updatePreChatForm(); // may hide input + quick replies when form is shown
       updateQuickReplies();
-      setTimeout(function(){ inputEl && inputEl.focus(); }, 200);
+      // Only focus the input when the pre-chat form is NOT visible —
+      // otherwise focusing the input would scroll past the form.
+      var preChatVisible = state.preChatFormEl && state.preChatFormEl.style.display === 'flex';
+      if (!preChatVisible) {
+        setTimeout(function(){ inputEl && inputEl.focus(); }, 200);
+      }
     } else {
       css(panel, { opacity:'0', pointerEvents:'none' });
       applyPanelTransform();
+      updatePreChatForm();
       updateQuickReplies();
     }
   }
@@ -896,6 +946,155 @@ ${POSITIONING_FN_SOURCE}
         btns[bi].style.pointerEvents = hasPendingVisitorMsg ? 'none' : 'auto';
       }
     }
+  }
+
+  // ---- V2 Pre-chat Form helpers ----
+  // Bilingual placeholder labels for the four supported field keys.
+  // SECURITY: fixed brand strings only — never tenant-controlled content.
+  function preChatFieldLabel(key, locale){
+    var fa = { name: 'نام', email: 'ایمیل', phone: 'تلفن', company: 'شرکت' };
+    var en = { name: 'Name', email: 'Email', phone: 'Phone', company: 'Company' };
+    var map = locale === 'en' ? en : fa;
+    return map[key] || key;
+  }
+
+  // True when a server-persisted visitor message exists (real id, not __local_).
+  // Mirrors the gate in updateQuickReplies — a persisted visitor message means
+  // the visitor already started the conversation, so the pre-chat form is not
+  // required (the server has already accepted their first message).
+  function hasPersistedVisitorMessage(){
+    if (!state.messages || state.messages.length === 0) return false;
+    for (var i = 0; i < state.messages.length; i++) {
+      var m = state.messages[i];
+      if (!m || m.senderType !== 'contact') continue;
+      if (m.id && String(m.id).indexOf('__local_') === 0) continue; // optimistic placeholder
+      return true;
+    }
+    return false;
+  }
+
+  // updatePreChatForm: decide whether to show the form based on the current
+  // state. Called from toggle(), renderMessages(), and identifyVisitor() —
+  // similar to updateQuickReplies(). When the form is visible, the input bar
+  // and quick replies are hidden; when hidden, the input bar is restored
+  // (quick replies remain governed by updateQuickReplies()).
+  function updatePreChatForm(){
+    if (!state.preChatFormEl) return;
+    var hasMsg = hasPersistedVisitorMessage();
+    var show = state.open && !!state.token
+      && state.preChatFormFields.length > 0
+      && !state.preChatCompleted
+      && !hasMsg;
+    state.preChatFormEl.style.display = show ? 'flex' : 'none';
+    if (show) {
+      // Hide the input bar + quick replies while the form is visible.
+      if (inputBar) inputBar.style.display = 'none';
+      if (state.quickRepliesEl) state.quickRepliesEl.style.display = 'none';
+    } else {
+      // Restore the input bar (quick replies handled by updateQuickReplies).
+      if (inputBar) inputBar.style.display = 'flex';
+    }
+  }
+
+  // showPreChatForm / hidePreChatForm: direct visibility toggles used by the
+  // submit handler. updatePreChatForm() is the authoritative gate; these are
+  // narrow helpers for the post-submit transition.
+  function showPreChatForm(){
+    if (!state.preChatFormEl) return;
+    state.preChatFormEl.style.display = 'flex';
+    if (inputBar) inputBar.style.display = 'none';
+    if (state.quickRepliesEl) state.quickRepliesEl.style.display = 'none';
+  }
+
+  function hidePreChatForm(){
+    if (!state.preChatFormEl) return;
+    state.preChatFormEl.style.display = 'none';
+    if (inputBar) inputBar.style.display = 'flex';
+  }
+
+  // submitPreChatForm: collect visitor-supplied values from the configured
+  // fields and POST them to the pre-chat endpoint. On success (200): mark
+  // completed + hide form + restore input/quick replies. On failure (4xx):
+  // show a safe error message, preserve typed values, re-enable the submit
+  // button. SECURITY: values are read via input.value (never innerHTML) and
+  // sent as JSON; the error element uses textContent (never innerHTML).
+  function submitPreChatForm(){
+    if (state.preChatInFlight) return; // prevent double submission
+    if (!state.preChatFormEl || !state.token) return;
+    var values = {};
+    for (var i = 0; i < state.preChatFormFields.length; i++) {
+      var f = state.preChatFormFields[i];
+      if (!f || typeof f.key !== 'string') continue;
+      var input = state.preChatFormEl.querySelector('.sk-pre-chat-field-' + f.key);
+      if (input) {
+        var v = (input.value || '').trim();
+        if (v !== '') values[f.key] = v;
+      }
+    }
+    // Clear any prior error before submitting.
+    var errEl = state.preChatFormEl.querySelector('.sk-pre-chat-error');
+    if (errEl) { errEl.textContent = ''; errEl.style.display = 'none'; }
+    // Disable submit while in-flight (prevents double submission).
+    state.preChatInFlight = true;
+    var submitBtn = state.preChatFormEl.querySelector('.sk-pre-chat-submit');
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.style.opacity = '0.6';
+      submitBtn.style.cursor = 'default';
+    }
+    fetch(PRE_CHAT_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + state.token },
+      body: JSON.stringify({ values: values })
+    })
+    .then(function(r){
+      if (!r.ok) {
+        // Parse a safe error code from the JSON body; never log headers or
+        // the raw response body. The body may contain { error: '...' }.
+        return r.json().catch(function(){ return {}; }).then(function(b){
+          var code = (b && typeof b.error === 'string') ? b.error : ('http_' + r.status);
+          throw new Error('pre_chat_failed_' + code);
+        });
+      }
+      return r.json();
+    })
+    .then(function(){
+      state.preChatCompleted = true;
+      state.preChatInFlight = false;
+      hidePreChatForm();
+      // Restore the input bar + re-evaluate quick replies.
+      if (inputBar) inputBar.style.display = 'flex';
+      updateQuickReplies();
+      setTimeout(function(){ if (inputEl) inputEl.focus(); }, 100);
+    })
+    .catch(function(e){
+      state.preChatInFlight = false;
+      // Re-enable submit so the visitor can retry.
+      if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.style.opacity = '1';
+        submitBtn.style.cursor = 'pointer';
+      }
+      // Show a safe bilingual error message. Values are preserved (inputs
+      // are not cleared) so the visitor can correct + resubmit.
+      var safeMsg = state.locale === 'fa'
+        ? 'ثبت ناموفق بود — دوباره تلاش کنید'
+        : 'Submission failed — please try again';
+      if (errEl) {
+        errEl.textContent = safeMsg; // XSS-safe: textContent, never innerHTML
+        errEl.style.display = 'block';
+      }
+      // Safe error log — only the safe error code, never the token.
+      console.error('[sukhan] pre-chat submit failed:', e && e.message ? e.message : 'unknown');
+    });
+  }
+
+  // clearPreChatForm: reset on identity clear (__sk_clearIdentityState calls
+  // this via a typeof guard). Resets the completed + in-flight flags so a
+  // fresh identity (SPA user-switch / policy recovery) starts clean.
+  function clearPreChatForm(){
+    state.preChatCompleted = false;
+    state.preChatInFlight = false;
   }
 
   // ---- V2 Message Preview helpers ----
@@ -997,6 +1196,16 @@ ${POSITIONING_FN_SOURCE}
       // Identity is now ready — Quick Replies may become visible without
       // requiring the user to close and reopen the panel.
       updateQuickReplies();
+      // V2 pre-chat form: if the backend reports the contact has already
+      // completed pre-chat (e.g. on a reload after a prior submission), mark
+      // completed so the form does not reappear. The flag is optional —
+      // older backends omit it and the form visibility is governed by the
+      // hasPersistedVisitorMessage gate instead.
+      if (data && data.preChatCompleted === true) {
+        state.preChatCompleted = true;
+      }
+      // Re-evaluate pre-chat form visibility now that the token is set.
+      updatePreChatForm();
 
       // WARM UP the socket connection IMMEDIATELY after identification —
       // BEFORE any conversation exists. This fixes the race condition where
@@ -1655,6 +1864,7 @@ ${POSITIONING_FN_SOURCE}
     }
     scrollBody();
     updateQuickReplies(); // hide suggestions after the first visitor message
+    updatePreChatForm(); // hide form after the first persisted visitor message
   }
 
   function scrollBody(){
@@ -1786,7 +1996,12 @@ ${POSITIONING_FN_SOURCE}
       // V2 quick replies — suggestion buttons inside the open panel.
       + '.sk-quick-replies{box-sizing:border-box;}'
       + '.sk-quick-reply{box-sizing:border-box;transition:background .15s ease;}'
-      + '.sk-quick-reply:hover{background:#e8e4dc;}';
+      + '.sk-quick-reply:hover{background:#e8e4dc;}'
+      // V2 pre-chat form — visitor details collected before the first message.
+      + '.sk-pre-chat-form{display:none;flex-direction:column;gap:8px;padding:16px;background:#f7f5f1;flex-shrink:0;}'
+      + '.sk-pre-chat-form input{border:1px solid #ddd;border-radius:8px;padding:8px 12px;font-size:14px;width:100%;box-sizing:border-box;}'
+      + '.sk-pre-chat-submit{background:#0E1116;color:#fff;border:none;border-radius:8px;padding:10px;cursor:pointer;font-size:14px;}'
+      + '.sk-pre-chat-error{color:#e53e3e;font-size:12px;display:none;}';
     document.head.appendChild(style);
   }
 
