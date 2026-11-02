@@ -163,6 +163,11 @@ ${POSITIONING_FN_SOURCE}
     smartAvoidanceResizeObserver: null,   // ResizeObserver on obstacle elements (for cleanup)
     smartAvoidanceObstacleEls: [],        // currently observed obstacle elements
     smartAvoidanceRaf: 0,                 // pending rAF/timeout handle (for cleanup)
+    // V2 context chat state (Feature 11, BETA).
+    contextChatEnabled: false, // effective server-authoritative entitlement
+    contextChatPending: null,  // { pathname, title } — explicit per-message opt-in (in-memory only)
+    contextChatRowEl: null,    // .sk-context-chat DOM row (share control)
+    contextChatIndicatorEl: null, // data-testid=context-chat-indicator (only while pending)
   };
 
   // ============================================================
@@ -329,6 +334,14 @@ ${POSITIONING_FN_SOURCE}
     setTimeout(function() {
       __skPageChangeScheduled = false;
       updatePageVisibility();
+      // V2 Context Chat (Feature 11): SPA navigation invalidates a pending
+      // page attachment — never silently attach a STALE snapshot of the
+      // previous page. The visitor must explicitly re-share the new page.
+      if (state.contextChatPending && window.location && typeof window.location.pathname === 'string') {
+        if (window.location.pathname !== state.contextChatPending.pathname) {
+          clearContextChatPending();
+        }
+      }
     }, 0);
   }
 
@@ -766,6 +779,150 @@ ${POSITIONING_FN_SOURCE}
   } catch (e) {}
 
   // ============================================================
+  // V2 Context Chat helpers (Feature 11, BETA).
+  //   The public config exposes 'contextChat: { enabled }' — the effective
+  //   server-authoritative entitlement. When enabled, the visitor may
+  //   EXPLICITLY opt in to attaching the current page (title + pathname
+  //   ONLY) to their NEXT outgoing message. There is NO automatic scraping:
+  //   nothing is captured until the share action is clicked, the pending
+  //   attachment is consumed by the first successfully persisted message,
+  //   and it is preserved on a failed send so the visitor can explicitly
+  //   retry. The capture is bounded-validated in the browser (mirroring the
+  //   server contract in src/lib/widget/context-chat-types.ts) and
+  //   re-validated server-side before persistence — the server NEVER trusts
+  //   the client's pre-validation. The full URL, the query string,
+  //   the hash, cookies and storage are NEVER read or transmitted.
+  // ============================================================
+  function __skContextChatValidPathname(pathname) {
+    if (typeof pathname !== 'string') return false;
+    if (pathname.length === 0 || pathname.length > 240) return false;
+    if (pathname.charAt(0) !== '/') return false;
+    if (pathname.charAt(1) === '/') return false;
+    if (pathname.indexOf('?') >= 0 || pathname.indexOf('#') >= 0 || pathname.indexOf('\\\\') >= 0) return false;
+    var i, ch, c;
+    for (i = 0; i < pathname.length; i++) {
+      c = pathname.charCodeAt(i);
+      if (c <= 0x1f || (c >= 0x7f && c <= 0x9f)) return false;
+      ch = pathname.charAt(i);
+      if (ch === ' ' || ch === '\t') return false;
+    }
+    if (pathname.indexOf('%') >= 0) {
+      var decoded;
+      try { decoded = decodeURIComponent(pathname); } catch (e) { return false; }
+      for (i = 0; i < decoded.length; i++) {
+        c = decoded.charCodeAt(i);
+        if (c <= 0x1f || (c >= 0x7f && c <= 0x9f) || c === 0x2028 || c === 0x2029) return false;
+        ch = decoded.charAt(i);
+        if (ch === '?' || ch === '#' || ch === '\\\\') return false;
+      }
+    }
+    return true;
+  }
+
+  function __skContextChatValidTitle(title) {
+    if (typeof title !== 'string') return false;
+    if (title.length === 0 || title !== title.trim()) return false;
+    var i, c;
+    for (i = 0; i < title.length; i++) {
+      c = title.charCodeAt(i);
+      if (c <= 0x1f || (c >= 0x7f && c <= 0x9f) || c === 0x2028 || c === 0x2029) return false;
+    }
+    // BETA strictness: reject angle brackets outright (markup-like text).
+    if (title.indexOf('<') >= 0 || title.indexOf('>') >= 0) return false;
+    // Bounded to 120 Unicode code points (surrogate pairs count as ONE).
+    var cp = 0;
+    for (i = 0; i < title.length; i++) {
+      cp++;
+      var hi = title.charCodeAt(i);
+      if (hi >= 0xd800 && hi <= 0xdbff && i + 1 < title.length) {
+        var lo = title.charCodeAt(i + 1);
+        if (lo >= 0xdc00 && lo <= 0xdfff) i++;
+      }
+    }
+    if (cp > 120) return false;
+    return true;
+  }
+
+  // captureContextChatPage: read ONLY window.location.pathname +
+  // document.title, bounded-validate them, and set the pending attachment.
+  // Returns true when an attachment was captured (silent no-op otherwise).
+  function captureContextChatPage() {
+    if (!state.contextChatEnabled) return false;
+    var pathname = (window.location && typeof window.location.pathname === 'string') ? window.location.pathname : '';
+    var title = (document && typeof document.title === 'string') ? document.title : '';
+    if (!__skContextChatValidPathname(pathname)) return false;
+    if (!__skContextChatValidTitle(title)) return false;
+    setContextChatPending({ pathname: pathname, title: title });
+    return true;
+  }
+
+  // setContextChatPending: store the pending attachment + render the visible
+  // indicator chip (data-testid=context-chat-indicator). The chip is REMOVED
+  // from the DOM when the attachment is cleared/consumed.
+  function setContextChatPending(ctx) {
+    state.contextChatPending = ctx;
+    renderContextChatIndicator();
+  }
+
+  // clearContextChatPending: drop the pending attachment + remove the
+  // indicator chip from the DOM (explicit cancel / stale-page cleanup /
+  // one-shot consumption after successful persistence).
+  function clearContextChatPending() {
+    state.contextChatPending = null;
+    renderContextChatIndicator();
+  }
+
+  function renderContextChatIndicator() {
+    var row = state.contextChatRowEl;
+    if (!row) return;
+    var existing = state.contextChatIndicatorEl;
+    if (!state.contextChatPending) {
+      if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
+      state.contextChatIndicatorEl = null;
+      return;
+    }
+    if (existing) {
+      // Refresh the existing chip's text (re-capture of the current page).
+      var t = existing.querySelector('.sk-context-chat-title');
+      var p = existing.querySelector('.sk-context-chat-path');
+      if (t) t.textContent = state.contextChatPending.title; // XSS-safe: textContent
+      if (p) p.textContent = state.contextChatPending.pathname; // XSS-safe: textContent
+      return;
+    }
+    var chip = el('div', 'sk-context-chat-indicator');
+    chip.setAttribute('data-testid', 'context-chat-indicator');
+    var label = el('span', 'sk-context-chat-label');
+    label.textContent = state.locale === 'fa' ? 'این پیام شامل صفحه فعلی می‌شود:' : 'This message will include the current page:';
+    var titleEl = el('span', 'sk-context-chat-title');
+    titleEl.textContent = state.contextChatPending.title; // XSS-safe: textContent
+    var pathEl = el('span', 'sk-context-chat-path');
+    pathEl.textContent = state.contextChatPending.pathname; // XSS-safe: textContent
+    pathEl.setAttribute('dir', 'ltr');
+    var clearBtn = el('button', 'sk-context-chat-clear');
+    clearBtn.setAttribute('type', 'button');
+    clearBtn.setAttribute('data-testid', 'context-chat-clear');
+    clearBtn.setAttribute('aria-label', state.locale === 'fa' ? 'حذف پیوست صفحه' : 'Remove page attachment');
+    clearBtn.textContent = '\u00d7';
+    clearBtn.onclick = function(e) { e.preventDefault(); e.stopPropagation(); clearContextChatPending(); };
+    chip.appendChild(label); chip.appendChild(titleEl); chip.appendChild(pathEl); chip.appendChild(clearBtn);
+    row.appendChild(chip);
+    state.contextChatIndicatorEl = chip;
+  }
+
+  // updateContextChatRow: row visibility — the share control is visible only
+  // while the panel is open AND the composer (input bar) is available (the
+  // pre-chat form hides the composer). Free / disabled tenants never render
+  // the row at all. A Page Visibility hide (Feature 8) always wins: the row
+  // lives inside the root and is hidden with it.
+  function updateContextChatRow() {
+    var row = state.contextChatRowEl;
+    if (!row) return;
+    var preChatVisible = !!(state.preChatFormEl && state.preChatFormEl.style.display === 'flex');
+    var show = state.contextChatEnabled && state.open && !preChatVisible;
+    row.style.display = show ? 'flex' : 'none';
+  }
+
+  // ============================================================
   // V2 Alternative Contact Buttons helpers (Feature 9).
   //   The public config exposes 'alternativeContactButtons: { items: [...] }'
   //   where each item is { kind, label, value }. The runtime renders a row of
@@ -1004,6 +1161,15 @@ ${POSITIONING_FN_SOURCE}
     // launcher never shifts and host-page obstructions are ignored.
     state.smartAvoidanceEnabled = !!(config.smartAvoidance && config.smartAvoidance.enabled);
 
+    // V2 context chat: read the effective server-authoritative entitlement
+    // (Feature 11, BETA). Free / unknown / disabled tenants expose
+    // { enabled: false } — NO share control is rendered and no page context
+    // is ever attached. The pending attachment is in-memory only (never
+    // persisted to browser storage) and defaults to null on every load.
+    state.contextChatEnabled = !!(config.contextChat && config.contextChat.enabled);
+    state.contextChatPending = null;
+    state.contextChatIndicatorEl = null;
+
     // V2 alternative contact buttons: read the effective authorized items from
     // the public config (Feature 9). Empty array for Free / unknown / no-V2-
     // selection. The runtime renders one <a class="sk-alt-contact-link"> per
@@ -1022,6 +1188,46 @@ ${POSITIONING_FN_SOURCE}
     }
     state.altContactItems = safeAltItems;
     state.altContactEl = safeAltItems.length > 0 ? buildAltContactLinks(safeAltItems) : null;
+
+    // V2 context chat row (Feature 11, BETA): the "Share this page" opt-in
+    // control. Rendered ONLY when the effective config enables Context Chat —
+    // Free/disabled tenants get NO row at all (no share control in the DOM).
+    // The pending-attachment indicator chip is appended to this row on
+    // demand (only while an attachment exists). SECURITY: everything is
+    // rendered via textContent (never innerHTML); the click handler reads
+    // ONLY window.location.pathname + document.title.
+    if (state.contextChatEnabled) {
+      var contextChatRow = el('div', 'sk-context-chat');
+      css(contextChatRow, {
+        display: 'none', flexWrap: 'wrap', alignItems: 'center', gap: '6px',
+        padding: '6px 12px', background: '#fff', borderTop: '1px solid #f0eee9',
+        flexShrink: '0',
+      });
+      var shareBtn = el('button', 'sk-context-chat-share');
+      css(shareBtn, {
+        display: 'inline-flex', alignItems: 'center', gap: '5px',
+        border: '1px solid #ddd', background: '#f7f5f1', color: '#0E1116',
+        borderRadius: '14px', padding: '4px 12px', fontSize: '12px',
+        cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap',
+        maxWidth: '100%',
+      });
+      shareBtn.setAttribute('type', 'button');
+      shareBtn.setAttribute('data-testid', 'context-chat-share');
+      shareBtn.setAttribute('aria-label', state.locale === 'fa' ? 'اشتراک‌گذاری این صفحه' : 'Share this page');
+      shareBtn.setAttribute('title', state.locale === 'fa' ? 'اشتراک‌گذاری این صفحه' : 'Share this page');
+      shareBtn.textContent = state.locale === 'fa' ? 'اشتراک‌گذاری این صفحه' : 'Share this page';
+      shareBtn.onclick = function(e) {
+        e.preventDefault();
+        // Explicit visitor consent — capture ONLY on click (no automatic
+        // scraping). Bounded-validated; a silent no-op when the current
+        // page does not satisfy the safety contract.
+        captureContextChatPage();
+      };
+      contextChatRow.appendChild(shareBtn);
+      state.contextChatRowEl = contextChatRow;
+    } else {
+      state.contextChatRowEl = null;
+    }
 
     // Build the preview bubble (.sk-message-preview). Positioned adjacent to
     // the launcher by positionPreview(). Hidden by default.
@@ -1242,6 +1448,9 @@ ${POSITIONING_FN_SOURCE}
     // complete a pre-chat form, or bypass authorization). Empty when the
     // tenant has no buttons configured — no container is appended.
     if (state.altContactEl) panel.appendChild(state.altContactEl);
+    // V2 context chat row (Feature 11) sits directly above the input bar —
+    // the visitor sees the opt-in exactly where the next message is composed.
+    if (state.contextChatRowEl) panel.appendChild(state.contextChatRowEl);
     panel.appendChild(inputBar);
     root.appendChild(panel); root.appendChild(launcher); root.appendChild(previewEl);
     document.body.appendChild(root);
@@ -1279,6 +1488,7 @@ ${POSITIONING_FN_SOURCE}
       updatePreChatForm(); // may hide input + quick replies when form is shown
       updateQuickReplies();
       updateAltContactLinks(); // V2 alternative contact buttons (Feature 9)
+      updateContextChatRow(); // V2 context chat share row (Feature 11)
       // Only focus the input when the pre-chat form is NOT visible —
       // otherwise focusing the input would scroll past the form.
       var preChatVisible = state.preChatFormEl && state.preChatFormEl.style.display === 'flex';
@@ -1291,6 +1501,7 @@ ${POSITIONING_FN_SOURCE}
       updatePreChatForm();
       updateQuickReplies();
       updateAltContactLinks();
+      updateContextChatRow();
     }
   }
 
@@ -1373,6 +1584,9 @@ ${POSITIONING_FN_SOURCE}
       // Restore the input bar (quick replies handled by updateQuickReplies).
       if (inputBar) inputBar.style.display = 'flex';
     }
+    // V2 context chat (Feature 11): the share row follows the composer —
+    // hidden while the pre-chat form is visible, restored afterwards.
+    updateContextChatRow();
   }
 
   // showPreChatForm / hidePreChatForm: direct visibility toggles used by the
@@ -1383,12 +1597,14 @@ ${POSITIONING_FN_SOURCE}
     state.preChatFormEl.style.display = 'flex';
     if (inputBar) inputBar.style.display = 'none';
     if (state.quickRepliesEl) state.quickRepliesEl.style.display = 'none';
+    updateContextChatRow();
   }
 
   function hidePreChatForm(){
     if (!state.preChatFormEl) return;
     state.preChatFormEl.style.display = 'none';
     if (inputBar) inputBar.style.display = 'flex';
+    updateContextChatRow();
   }
 
   // submitPreChatForm: collect visitor-supplied values from the configured
@@ -1711,10 +1927,19 @@ ${POSITIONING_FN_SOURCE}
       state.quickRepliesInFlight = false;
       updateQuickReplies();
     };
+    // V2 Context Chat (Feature 11): attach the pending page context (the
+    // visitor's EXPLICIT opt-in) to THIS outgoing message only. Nothing is
+    // attached automatically — only when the pending attachment exists.
+    // On FAILURE the attachment is PRESERVED (the input text is restored so
+    // the visitor can explicitly retry — the retry re-attaches it); on
+    // SUCCESS it is consumed one-shot (the next message does NOT inherit it).
+    var sendPageContext = state.contextChatEnabled ? state.contextChatPending : null;
+    var sendBody = { text: text };
+    if (sendPageContext) sendBody.pageContext = sendPageContext;
     fetch(MESSAGES_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + state.token },
-      body: JSON.stringify({ text: text }),
+      body: JSON.stringify(sendBody),
     })
     .then(function(r){
       if (!r.ok) {
@@ -1735,6 +1960,13 @@ ${POSITIONING_FN_SOURCE}
       if (data.message) {
         state.messages.push(data.message);
         renderMessages(); // calls updateQuickReplies() — removes buttons on success
+      }
+      // V2 Context Chat one-shot consumption (Feature 11): the persisted
+      // message carried the pending attachment — consume it ONLY when the
+      // visitor has not re-captured a different page while this send was
+      // in flight (identity check). The next message does NOT inherit it.
+      if (sendPageContext && state.contextChatPending === sendPageContext) {
+        clearContextChatPending();
       }
       if (data.conversationId && data.conversationId !== state.conversationId) {
         clearMessagePreviewState();
@@ -1961,7 +2193,20 @@ ${POSITIONING_FN_SOURCE}
       // widget. Hover affordance matches the rest of the panel surfaces.
       + '.sk-alt-contact-links{box-sizing:border-box;}'
       + '.sk-alt-contact-link{display:flex;align-items:center;gap:6px;padding:6px 12px;text-decoration:none;color:inherit;border-radius:8px;transition:background .15s;}'
-      + '.sk-alt-contact-link:hover{background:rgba(0,0,0,0.06);}';
+      + '.sk-alt-contact-link:hover{background:rgba(0,0,0,0.06);}'
+      // V2 context chat (Feature 11, BETA) — the explicit "Share this page"
+      // opt-in + the pending-attachment indicator chip. Plain buttons/spans
+      // rendered via textContent; the row is part of the widget root → hidden
+      // automatically when Page Visibility hides the widget (Feature 8 wins).
+      + '.sk-context-chat{box-sizing:border-box;}'
+      + '.sk-context-chat-share{box-sizing:border-box;transition:background .15s ease;font-family:inherit;}'
+      + '.sk-context-chat-share:hover{background:#e8e4dc;}'
+      + '.sk-context-chat-indicator{display:inline-flex;align-items:center;gap:6px;max-width:100%;background:#f7f5f1;border:1px solid #e8e4dc;border-radius:12px;padding:3px 6px 3px 10px;font-size:11px;color:#5c6470;min-width:0;}'
+      + '.sk-context-chat-label{white-space:nowrap;flex-shrink:0;}'
+      + '.sk-context-chat-title{font-weight:600;color:#0E1116;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;}'
+      + '.sk-context-chat-path{direction:ltr;unicode-bidi:isolate;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}'
+      + '.sk-context-chat-clear{flex-shrink:0;width:18px;height:18px;border:none;background:transparent;color:#888;cursor:pointer;font-size:14px;line-height:1;border-radius:50%;padding:0;display:inline-flex;align-items:center;justify-content:center;}'
+      + '.sk-context-chat-clear:hover{background:rgba(0,0,0,0.08);color:#333;}';
     document.head.appendChild(style);
   }
 

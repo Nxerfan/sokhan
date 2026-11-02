@@ -155,6 +155,7 @@ export function mergeAlternativeContactButtonsPatch(
     ...(base.preChatForm ? { preChatForm: base.preChatForm } : {}),
     ...(base.pageVisibility ? { pageVisibility: base.pageVisibility } : {}),
     ...(base.smartAvoidance ? { smartAvoidance: base.smartAvoidance } : {}),
+    ...(base.contextChat ? { contextChat: base.contextChat } : {}),
   }
 }
 

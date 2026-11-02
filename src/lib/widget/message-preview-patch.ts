@@ -147,6 +147,7 @@ export function mergeMessagePreviewPatch(
     ...(base.pageVisibility ? { pageVisibility: base.pageVisibility } : {}),
     ...(base.alternativeContactButtons ? { alternativeContactButtons: base.alternativeContactButtons } : {}),
     ...(base.smartAvoidance ? { smartAvoidance: base.smartAvoidance } : {}),
+    ...(base.contextChat ? { contextChat: base.contextChat } : {}),
   }
 }
 

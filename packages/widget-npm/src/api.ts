@@ -33,6 +33,7 @@ import type {
   OtpStartResponse,
   OtpVerifyResponse,
   OtpResendResponse,
+  PageContext,
 } from './types.js'
 
 // Re-export for backwards compat with `import { resolveApiUrl } from './api.js'`.
@@ -199,13 +200,21 @@ export class ApiClient {
    * / `identity_token_invalid` / `policy_unavailable` / `rate_limited`).
    * The widget uses `code` to drive the identity-upgrade flow WITHOUT
    * auto-resending the user's message (explicit retry remains safer).
+   *
+   * `pageContext` (Feature 11, BETA) is the OPTIONAL explicit per-message
+   * page context (pathname + title only). The backend re-validates it AND
+   * enforces the tenant's CURRENT effective Context Chat entitlement — a
+   * Free / disabled tenant silently drops the field (never persisted), so
+   * callers must not assume the persisted message carries the context.
    */
-  async sendMessage(token: string, text: string): Promise<{
+  async sendMessage(token: string, text: string, pageContext?: PageContext): Promise<{
     message?: Message
     conversationId?: string
     aiResponse?: Message
     clientMessageId?: string
   }> {
+    const body: { text: string; pageContext?: PageContext } = { text }
+    if (pageContext) body.pageContext = pageContext
     const res = await fetch(`${this.apiUrl}/api/widget/${this.slug}/messages`, {
       method: 'POST',
       headers: {
@@ -213,7 +222,7 @@ export class ApiClient {
         Accept: 'application/json',
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify(body),
     })
     return ensureOk<{ message?: Message; conversationId?: string; aiResponse?: Message; clientMessageId?: string }>(res)
   }

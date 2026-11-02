@@ -84,7 +84,8 @@
     "integrationsHint": "Integrations will be coming soon.",
     "typing": "typing…",
     "replyPlaceholder": "Type your reply…",
-    "statusChangeFailed": "Failed to change status"
+    "statusChangeFailed": "Failed to change status",
+    "sharedPageLabel": "Shared page"
   },
   "settings": {
     "generalTitle": "General",
@@ -386,7 +387,22 @@
     "accept": "Accept",
     "checkEmailForInvite": "Accept through the invitation link emailed to you.",
     "customizationLocked": "Customization is locked on your current plan",
-    "customizationLockedHint": "Your workspace uses the Sukhan brand look. Upgrade to a paid plan to customize the widget appearance."
+    "customizationLockedHint": "Your workspace uses the Sukhan brand look. Upgrade to a paid plan to customize the widget appearance.",
+    "contextChat": {
+      "title": "Context Chat",
+      "beta": "BETA",
+      "hint": "Let visitors explicitly attach the current page (title + URL path) to a chat message so agents know which page they mean.",
+      "enable": "Enable Context Chat",
+      "enableHint": "Visitors see a \"Share this page\" action in the widget and must actively use it before each message; nothing is captured automatically.",
+      "privacy": "Shared data: page title and URL path only — never the full URL, query string, link fragment, cookies, storage, form values or page content. The visitor can remove the attachment before sending.",
+      "upgradeHint": "Context Chat is a BETA feature available on paid plans. Your saved preference is preserved and will restore on upgrade.",
+      "locked": "Context Chat is a paid-plan feature. Your saved preference is preserved and will restore on upgrade.",
+      "save": "Save preference",
+      "discard": "Discard changes",
+      "dirty": "Unsaved changes",
+      "saveSuccess": "Preference saved",
+      "saveFail": "Failed to save preference"
+    }
   },
   "invite": {
     "title": "Join {workspace}",

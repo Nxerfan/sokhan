@@ -24,6 +24,7 @@ import { WidgetPreChatFormPanel } from './widget-pre-chat-form-panel'
 import { WidgetPageVisibilityPanel } from './widget-page-visibility-panel'
 import { WidgetAltContactPanel } from './widget-alt-contact-panel'
 import { WidgetSmartAvoidancePanel } from './widget-smart-avoidance-panel'
+import { WidgetContextChatPanel } from './widget-context-chat-panel'
 
 type WidgetConfig = {
   accentColor: string
@@ -162,6 +163,12 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
     effective: { enabled: boolean }
     stored: { enabled: boolean } | null
   } | null>(null)
+  // V2 context chat data (from GET /api/widget-config `contextChat` field).
+  const [contextChat, setContextChat] = useState<{
+    entitlements: { enabled: boolean }
+    effective: { enabled: boolean }
+    stored: { enabled: boolean } | null
+  } | null>(null)
 
   const apiUrl = typeof window !== 'undefined' ? window.location.origin : HOSTED_API_URL
 
@@ -206,6 +213,8 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
     if (cfgData.alternativeContactButtons) setAlternativeContactButtons(cfgData.alternativeContactButtons)
     // V2 smart avoidance data.
     if (cfgData.smartAvoidance) setSmartAvoidance(cfgData.smartAvoidance)
+    // V2 context chat data.
+    if (cfgData.contextChat) setContextChat(cfgData.contextChat)
     const domData = await domRes.json()
     setDomains(domData.domains ?? [])
     setDomainLimit(domData.limit ?? 0)
@@ -766,6 +775,15 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
           <WidgetSmartAvoidancePanel
             slug={slug}
             smartAvoidance={smartAvoidance}
+            defaultDirection={(config.defaultLocale === 'fa' ? 'rtl' : 'ltr') as 'rtl' | 'ltr'}
+            onReload={load}
+          />
+          {/* V2 Context Chat — visitor-initiated page context on chat messages
+              (Feature 11, BETA). Free plans are locked; visitors only ever
+              share a page after an explicit per-message opt-in. */}
+          <WidgetContextChatPanel
+            slug={slug}
+            contextChat={contextChat}
             defaultDirection={(config.defaultLocale === 'fa' ? 'rtl' : 'ltr') as 'rtl' | 'ltr'}
             onReload={load}
           />
