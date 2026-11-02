@@ -172,6 +172,24 @@ export interface PreChatFormField {
   required: boolean
 }
 
+/**
+ * Page Visibility configuration (Phase 2 / Feature 8). Additive — null = no rules.
+ * - `rules`: the active visibility rules.
+ * - `paidRules`: preserved advanced selection for downgrade/upgrade restore.
+ */
+export interface PageVisibilityConfig {
+  rules: PageVisibilityRuleStored[]
+  paidRules?: PageVisibilityRuleStored[]
+}
+
+/** A stored page visibility rule (same shape as the public type). */
+export interface PageVisibilityRuleStored {
+  pattern: string
+  match: 'exact' | 'prefix'
+  action: 'show' | 'hide'
+  device?: 'desktop' | 'mobile'
+}
+
 /** The versioned appearance configuration. */
 export interface AppearanceV2 {
   version: typeof APPEARANCE_V2_VERSION
@@ -189,6 +207,8 @@ export interface AppearanceV2 {
   quickReplies?: QuickRepliesConfig
   /** Pre-chat Form (Phase 2 / Feature 7). Additive — null = no form. */
   preChatForm?: PreChatFormConfig
+  /** Page Visibility (Phase 2 / Feature 8). Additive — null = no rules (default visible). */
+  pageVisibility?: PageVisibilityConfig
 }
 
 /** The canonical default appearance (V2). */
@@ -233,7 +253,7 @@ export const DEFAULT_APPEARANCE_V2: AppearanceV2 = {
  */
 
 /** Allowed top-level keys in an AppearanceV2 object. */
-const ALLOWED_TOP_LEVEL_KEYS = new Set(['version', 'desktop', 'mobile', 'colors', 'launcher', 'attention', 'messagePreview', 'quickReplies', 'preChatForm'])
+const ALLOWED_TOP_LEVEL_KEYS = new Set(['version', 'desktop', 'mobile', 'colors', 'launcher', 'attention', 'messagePreview', 'quickReplies', 'preChatForm', 'pageVisibility'])
 
 /**
  * Check if a value is a plain JSON-compatible object — prototype is exactly
@@ -481,6 +501,27 @@ export function parseAppearanceV2(value: unknown): AppearanceV2 | null {
   }
   if (preChatForm !== null && preChatForm !== undefined) {
     result.preChatForm = preChatForm
+  }
+
+  // Parse pageVisibility if present.
+  const pageVisibilityDesc = getOwnDataDescriptor(value, 'pageVisibility')
+  let pageVisibilityValue: unknown = undefined
+  if (pageVisibilityDesc !== null) {
+    pageVisibilityValue = pageVisibilityDesc.value
+  } else {
+    try {
+      if (Object.prototype.hasOwnProperty.call(value, 'pageVisibility')) return null
+    } catch {
+      return null
+    }
+  }
+  let pageVisibility: PageVisibilityConfig | null | undefined = undefined
+  if (pageVisibilityValue !== undefined) {
+    pageVisibility = parsePageVisibilityConfig(pageVisibilityValue)
+    if (pageVisibility === undefined) return null
+  }
+  if (pageVisibility !== null && pageVisibility !== undefined) {
+    result.pageVisibility = pageVisibility
   }
   return result
 }
@@ -936,6 +977,110 @@ function parseQuickRepliesConfig(value: unknown): QuickRepliesConfig | null | un
  */
 export function hasAppearanceV2(value: unknown): boolean {
   return parseAppearanceV2(value) !== null
+}
+
+const ALLOWED_PAGE_VISIBILITY_KEYS = new Set(['rules', 'paidRules'])
+const ALLOWED_PAGE_RULE_KEYS_SET = new Set(['pattern', 'match', 'action', 'device'])
+const ALLOWED_PAGE_MATCH_VALUES = new Set(['exact', 'prefix'])
+const ALLOWED_PAGE_ACTION_VALUES = new Set(['show', 'hide'])
+const ALLOWED_PAGE_DEVICE_VALUES = new Set(['desktop', 'mobile'])
+
+function parsePageVisibilityRule(raw: unknown): PageVisibilityRuleStored | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+  const keys = safeOwnKeys(raw)
+  if (keys === null) return undefined
+  for (const k of keys) {
+    if (typeof k !== 'string' || !ALLOWED_PAGE_RULE_KEYS_SET.has(k)) return undefined
+  }
+  const patternDesc = getOwnDataDescriptor(raw, 'pattern')
+  if (!patternDesc) return undefined
+  const pattern = patternDesc.value
+  if (typeof pattern !== 'string' || pattern.length === 0 || pattern.length > 500) return undefined
+  if (pattern[0] !== '/') return undefined
+  if (pattern.includes('*') || pattern.includes('?') || pattern.includes('\\')) return undefined
+  if (pattern.includes('(') || pattern.includes(')')) return undefined
+  if (/[\r\n\t\0]/.test(pattern)) return undefined
+
+  const matchDesc = getOwnDataDescriptor(raw, 'match')
+  if (!matchDesc) return undefined
+  const matchValue = matchDesc.value
+  if (typeof matchValue !== 'string' || !ALLOWED_PAGE_MATCH_VALUES.has(matchValue)) return undefined
+
+  const actionDesc = getOwnDataDescriptor(raw, 'action')
+  if (!actionDesc) return undefined
+  const actionValue = actionDesc.value
+  if (typeof actionValue !== 'string' || !ALLOWED_PAGE_ACTION_VALUES.has(actionValue)) return undefined
+
+  const result: PageVisibilityRuleStored = {
+    pattern,
+    match: matchValue as 'exact' | 'prefix',
+    action: actionValue as 'show' | 'hide',
+  }
+
+  const deviceDesc = getOwnDataDescriptor(raw, 'device')
+  if (deviceDesc !== null) {
+    const dv = deviceDesc.value
+    if (dv !== undefined && dv !== null) {
+      if (typeof dv !== 'string' || !ALLOWED_PAGE_DEVICE_VALUES.has(dv)) return undefined
+      result.device = dv as 'desktop' | 'mobile'
+    }
+  } else {
+    try {
+      if (Object.prototype.hasOwnProperty.call(raw, 'device')) return undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  return result
+}
+
+function parsePageVisibilityRulesArray(arr: unknown): PageVisibilityRuleStored[] | undefined {
+  if (!Array.isArray(arr)) return undefined
+  const rules: PageVisibilityRuleStored[] = []
+  const seen = new Set<string>()
+  for (const raw of arr) {
+    const rule = parsePageVisibilityRule(raw)
+    if (rule === undefined) return undefined
+    const key = `${rule.pattern}|${rule.match}|${rule.action}|${rule.device ?? 'any'}`
+    if (seen.has(key)) return undefined
+    seen.add(key)
+    rules.push(rule)
+  }
+  return rules
+}
+
+function parsePageVisibilityConfig(value: unknown): PageVisibilityConfig | null | undefined {
+  if (value === undefined) return null
+  if (value === null) return undefined
+  if (!isPlainObject(value)) return undefined
+  const keys = safeOwnKeys(value)
+  if (keys === null) return undefined
+  for (const key of keys) {
+    if (typeof key !== 'string' || !ALLOWED_PAGE_VISIBILITY_KEYS.has(key)) return undefined
+  }
+  const rulesDesc = getOwnDataDescriptor(value, 'rules')
+  if (!rulesDesc) return undefined
+  const rules = parsePageVisibilityRulesArray(rulesDesc.value)
+  if (rules === undefined) return undefined
+  const result: PageVisibilityConfig = { rules }
+  const paidRulesDesc = getOwnDataDescriptor(value, 'paidRules')
+  if (paidRulesDesc !== null) {
+    const v = paidRulesDesc.value
+    if (v !== undefined && v !== null) {
+      const paidRules = parsePageVisibilityRulesArray(v)
+      if (paidRules === undefined) return undefined
+      if (paidRules.length === 0) return undefined
+      result.paidRules = paidRules
+    }
+  } else {
+    try {
+      if (Object.prototype.hasOwnProperty.call(value, 'paidRules')) return undefined
+    } catch {
+      return undefined
+    }
+  }
+  return result
 }
 
 const ALLOWED_PRE_CHAT_KEYS = new Set(['fields', 'paidFields'])

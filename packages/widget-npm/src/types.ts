@@ -117,6 +117,32 @@ export interface WidgetConfig {
     fields: Array<{ key: string; required: boolean }>
   }
   /**
+   * V2 page visibility (Phase 2 / Feature 8). Additive — the public config
+   * exposes only the effective authorized rules. Older backends omit the
+   * field; the widget defaults to always visible (no rules → 'show').
+   * `paidRules` is NEVER exposed to the browser — only the effective
+   * `rules` array reaches the runtime.
+   *
+   * Each rule:
+   *   - `pattern`: a literal URL pathname starting with '/' (no wildcards).
+   *   - `match`: 'exact' (pathname equals pattern) or 'prefix' (pathname
+   *     equals pattern, starts with pattern+'/', or pattern ends with '/'
+   *     and pathname starts with pattern).
+   *   - `action`: 'show' or 'hide'. A matching 'hide' rule overrides a
+   *     matching 'show' rule. When no rules match, the widget is visible.
+   *   - `device` (optional, advanced only): 'desktop' or 'mobile'. When
+   *     set, the rule only applies to that device. Free rules never carry
+   *     a device field.
+   */
+  pageVisibility?: {
+    rules: Array<{
+      pattern: string
+      match: string
+      action: string
+      device?: string
+    }>
+  }
+  /**
    * Backend-supplied realtime endpoint config (additive field). The widget
    * uses this as the PRIMARY runtime source. Older backends omit the
    * field; the widget falls back to the documented hosted default.

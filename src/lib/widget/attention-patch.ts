@@ -222,6 +222,7 @@ export function mergeAttentionPatch(
     ...(base.messagePreview ? { messagePreview: base.messagePreview } : {}),
     ...(base.quickReplies ? { quickReplies: base.quickReplies } : {}),
     ...(base.preChatForm ? { preChatForm: base.preChatForm } : {}),
+    ...(base.pageVisibility ? { pageVisibility: base.pageVisibility } : {}),
   }
 }
 

@@ -36,6 +36,10 @@ import {
   resolveEffectivePreChatForm,
   type StoredPreChatFormInput,
 } from '@/lib/widget/effective-pre-chat-form'
+import {
+  resolveEffectivePageVisibility,
+  type StoredPageVisibilityInput,
+} from '@/lib/widget/effective-page-visibility'
 
 /** CORS headers for widget API responses. */
 function widgetHeaders(res: NextResponse): NextResponse {
@@ -226,6 +230,15 @@ export async function GET(
   }
   const effectivePreChatForm = resolveEffectivePreChatForm(preChatFormInput, entitlements)
 
+  // V2 page visibility: resolve effective rules from stored V2 + entitlements.
+  // The public config exposes ONLY the effective authorized rules — never
+  // paidRules. Free with stored prefix/device rules exposes only exact-match
+  // rules (≤3). The public `pageVisibility` contains ONLY `{ rules }`.
+  const pageVisibilityInput: StoredPageVisibilityInput = {
+    appearanceV2: widgetConfig.appearanceV2,
+  }
+  const effectivePageVisibility = resolveEffectivePageVisibility(pageVisibilityInput, entitlements)
+
   const configWithPosition = { ...config, position: legacyPosition, accentColor: legacyAccent, launcherShape: legacyLauncherShape }
 
   // Build the response — conditionally include `colors` only when the tenant
@@ -263,6 +276,12 @@ export async function GET(
   // Empty array for Free / unknown / no-V2-selection. Older consumers ignore
   // the field. Never exposes paidFields.
   responseBody.preChatForm = effectivePreChatForm
+  // V2 page visibility (additive — always present as { rules }).
+  // Empty array for Free / unknown / no-V2-selection. Older consumers ignore
+  // the field. Never exposes paidRules — the public `pageVisibility` object
+  // contains ONLY `{ rules }` (resolveEffectivePageVisibility never returns
+  // paidRules).
+  responseBody.pageVisibility = effectivePageVisibility
 
   // Additive: the safe public access-policy fields. Existing clients continue
   // working (additive top-level fields). NEVER expose the raw integration
