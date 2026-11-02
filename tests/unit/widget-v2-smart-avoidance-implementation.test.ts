@@ -1,6 +1,13 @@
 /// <reference types="bun-types" />
 /**
  * Developer-owned implementation tests for Feature 10 — Smart Avoidance.
+ *
+ * Includes the geometry regression suite for the corrected bounded interval
+ * solver: short legal moves inside small viewports, destination validation
+ * against ALL reachable obstacles (adjacent obstacles), non-monotonic
+ * escape corridors, Euclidean diagonal displacement limits, and exact
+ * behavior parity across the pure TS module, the slug script runtime, the
+ * v1 script runtime, and the NPM widget runtime.
  */
 import { describe, expect, test } from 'bun:test'
 import { getEntitlements } from '../../src/lib/payments/widget-entitlements'
@@ -23,6 +30,9 @@ import { mergePreChatFormPatch } from '../../src/lib/widget/pre-chat-form-patch'
 import { mergePageVisibilityPatch } from '../../src/lib/widget/page-visibility-patch'
 import { mergeAlternativeContactButtonsPatch } from '../../src/lib/widget/alternative-contact-patch'
 import { mergePositioningPatch } from '../../src/lib/widget/positioning-patch'
+import { buildScript as buildSlugScript } from '../../src/app/api/widget/[slug]/script/route'
+import { buildScript as buildV1Script } from '../../src/app/api/widget/v1/sukhan.js/route'
+import { SukhanWidget } from '../../packages/widget-npm/src/widget'
 
 const FREE = getEntitlements('free')!
 const PRO = getEntitlements('pro')!
@@ -249,3 +259,251 @@ describe('Developer — strict parseAppearanceV2 smartAvoidance', () => {
     expect(parseAppearanceV2({ version: 1 })?.smartAvoidance).toBeUndefined()
   })
 })
+
+// ─── Geometry regressions: corrected bounded interval solver ───────────────
+
+/** Reviewer-compatible separation predicate (touching at the gap is clear). */
+function separated(a: AvoidanceRect, b: AvoidanceRect, gap = 0): boolean {
+  return a.right + gap <= b.left || a.left >= b.right + gap ||
+    a.bottom + gap <= b.top || a.top >= b.bottom + gap
+}
+
+const movedRect = (original: AvoidanceRect, r: { dx: number; dy: number }): AvoidanceRect =>
+  rect(original.left + r.dx, original.top + r.dy, original.right + r.dx, original.bottom + r.dy)
+
+describe('Developer — geometry: short legal moves within a small viewport', () => {
+  // Every 240px endpoint (8 directions) leaves this 375x500 viewport, but a
+  // 72px move is legal — the solver must search the reachable interval, not
+  // require the full maxShift endpoint to be in-viewport.
+  const smallViewport = { width: 375, height: 500 }
+  const original = rect(161, 224, 213, 276)
+  const banner = rect(153, 216, 221, 284)
+
+  test('finds the minimal legal move when the full maxShift endpoint leaves the viewport', () => {
+    const result = computeSmartAvoidanceShift(original, [banner], smallViewport, { gap: 12, maxShift: 240 })
+    expect(result).toEqual({ dx: 0, dy: -72 })
+    const moved = movedRect(original, result)
+    expect(separated(moved, banner, 12)).toBe(true)
+    expect(moved.left).toBeGreaterThanOrEqual(0)
+    expect(moved.right).toBeLessThanOrEqual(smallViewport.width)
+    expect(moved.top).toBeGreaterThanOrEqual(0)
+    expect(moved.bottom).toBeLessThanOrEqual(smallViewport.height)
+  })
+  test('boundary: maxShift just below the required move → zero (no solution)', () => {
+    expect(computeSmartAvoidanceShift(original, [banner], smallViewport, { gap: 12, maxShift: 71 }))
+      .toEqual({ dx: 0, dy: 0 })
+  })
+  test('boundary: maxShift exactly the required move → works', () => {
+    expect(computeSmartAvoidanceShift(original, [banner], smallViewport, { gap: 12, maxShift: 72 }))
+      .toEqual({ dx: 0, dy: -72 })
+  })
+  test('fractional browser-style rects: minimal move found, all invariants hold', () => {
+    const orig = rect(161.5, 224.25, 213.5, 276.25)
+    const b = rect(153.5, 216.25, 221.5, 284.25)
+    const result = computeSmartAvoidanceShift(orig, [b], smallViewport, { gap: 12, maxShift: 240 })
+    expect(Number.isFinite(result.dx)).toBe(true)
+    expect(Number.isFinite(result.dy)).toBe(true)
+    expect(Math.hypot(result.dx, result.dy)).toBeGreaterThan(0)
+    expect(Math.hypot(result.dx, result.dy)).toBeLessThanOrEqual(240)
+    const moved = movedRect(orig, result)
+    expect(separated(moved, b, 12)).toBe(true)
+    expect(moved.left).toBeGreaterThanOrEqual(0)
+    expect(moved.right).toBeLessThanOrEqual(smallViewport.width)
+    expect(moved.top).toBeGreaterThanOrEqual(0)
+    expect(moved.bottom).toBeLessThanOrEqual(smallViewport.height)
+  })
+})
+
+describe('Developer — geometry: destination validated against ALL obstacles', () => {
+  // Reviewer's adjacent-obstacle case: the launcher overlaps the blocking
+  // overlay; the adjacent obstacle does NOT overlap initially but a 84px
+  // left escape collides with it. The only bounded solution is up 102px.
+  const vp = { width: 400, height: 800 }
+  const original = rect(320, 728, 372, 780)
+  const blocking = rect(300, 690, 400, 800)
+  const adjacent = rect(50, 700, 300, 800)
+
+  test('adjacent obstacle forces the up move; result clears BOTH obstacles', () => {
+    const result = computeSmartAvoidanceShift(original, [blocking, adjacent], vp, { gap: 12, maxShift: 240 })
+    expect(result).toEqual({ dx: 0, dy: -102 })
+    const moved = movedRect(original, result)
+    expect(separated(moved, blocking, 12)).toBe(true)
+    expect(separated(moved, adjacent, 12)).toBe(true)
+  })
+  test('without the adjacent obstacle the shorter 84px left move is preferred', () => {
+    // Sanity: the Defect B fix did not regress the single-obstacle case.
+    expect(computeSmartAvoidanceShift(original, [blocking], vp, { gap: 12, maxShift: 240 }))
+      .toEqual({ dx: -84, dy: 0 })
+  })
+  test('default options behave exactly like gap=12 maxShift=240', () => {
+    expect(computeSmartAvoidanceShift(original, [adjacent, blocking], vp))
+      .toEqual({ dx: 0, dy: -102 })
+  })
+  test('obstacle order and far-away invalid rects never change the result', () => {
+    const a = computeSmartAvoidanceShift(original, [blocking, adjacent], vp)
+    const b = computeSmartAvoidanceShift(original, [adjacent, blocking], vp)
+    const c = computeSmartAvoidanceShift(original, [adjacent, blocking, rect(-900, -900, -800, -800)], vp)
+    expect(a).toEqual(b)
+    expect(b).toEqual(c)
+  })
+})
+
+describe('Developer — geometry: non-monotonic escape corridor', () => {
+  // A full-height wall blocks up/down, a right wall blocks right, and the
+  // only escape is a left corridor between two obstacles (clear at
+  // 114px..128px, blocked again beyond). Clearance along the direction is
+  // NOT monotonic — the solver must return the minimal corridor move, not
+  // miss it and not overshoot to a far-side re-clear.
+  const vp = { width: 400, height: 300 }
+  const L = rect(200, 100, 252, 152)
+  const obstacles = [rect(150, 0, 260, 300), rect(0, 80, 60, 180), rect(330, 0, 400, 300)]
+
+  test('picks the minimal corridor move and stays clear of every wall', () => {
+    const result = computeSmartAvoidanceShift(L, obstacles, vp, { gap: 12, maxShift: 240 })
+    expect(result).toEqual({ dx: -114, dy: 0 })
+    const moved = movedRect(L, result)
+    for (const o of obstacles) expect(separated(moved, o, 12)).toBe(true)
+    expect(moved.left).toBeGreaterThanOrEqual(0)
+    expect(moved.top).toBeGreaterThanOrEqual(0)
+    expect(moved.right).toBeLessThanOrEqual(vp.width)
+    expect(moved.bottom).toBeLessThanOrEqual(vp.height)
+  })
+  test('boundary: maxShift below the corridor distance → zero', () => {
+    expect(computeSmartAvoidanceShift(L, obstacles, vp, { gap: 12, maxShift: 113 }))
+      .toEqual({ dx: 0, dy: 0 })
+  })
+  test('boundary: maxShift exactly the corridor distance → works', () => {
+    expect(computeSmartAvoidanceShift(L, obstacles, vp, { gap: 12, maxShift: 114 }))
+      .toEqual({ dx: -114, dy: 0 })
+  })
+})
+
+describe('Developer — geometry: diagonal displacement is bounded Euclidean', () => {
+  // Bottom-left corner: up/down/left are blocked by walls and the viewport;
+  // the only bounded escape is the up-right diagonal (~112px per axis,
+  // ~158.39px Euclidean). The maxShift limit must be enforced as a
+  // Euclidean distance on the diagonal, not per-axis.
+  const vp = { width: 400, height: 800 }
+  const L = rect(0, 748, 52, 800)
+  const obstacles = [rect(0, 700, 300, 800), rect(0, 400, 100, 700)]
+
+  test('corner escape is the up-right diagonal with equal components', () => {
+    const result = computeSmartAvoidanceShift(L, obstacles, vp, { gap: 12, maxShift: 240 })
+    expect(result.dx).toBeGreaterThan(0)
+    expect(result.dy).toBeLessThan(0)
+    expect(Math.abs(result.dx - 112)).toBeLessThan(0.001)
+    expect(Math.abs(result.dy + 112)).toBeLessThan(0.001)
+    expect(Math.hypot(result.dx, result.dy)).toBeLessThanOrEqual(240)
+    const moved = movedRect(L, result)
+    for (const o of obstacles) expect(separated(moved, o, 12)).toBe(true)
+    expect(moved.left).toBeGreaterThanOrEqual(0)
+    expect(moved.right).toBeLessThanOrEqual(vp.width)
+    expect(moved.top).toBeGreaterThanOrEqual(0)
+    expect(moved.bottom).toBeLessThanOrEqual(vp.height)
+  })
+  test('boundary: maxShift below the diagonal Euclidean distance → zero', () => {
+    // 112*sqrt(2) ≈ 158.39 — a per-axis bound of 158 would wrongly succeed.
+    expect(computeSmartAvoidanceShift(L, obstacles, vp, { gap: 12, maxShift: 158 }))
+      .toEqual({ dx: 0, dy: 0 })
+  })
+  test('boundary: maxShift above the diagonal Euclidean distance → works', () => {
+    const result = computeSmartAvoidanceShift(L, obstacles, vp, { gap: 12, maxShift: 159 })
+    expect(Math.hypot(result.dx, result.dy)).toBeGreaterThan(0)
+    expect(Math.hypot(result.dx, result.dy)).toBeLessThanOrEqual(159)
+    const moved = movedRect(L, result)
+    for (const o of obstacles) expect(separated(moved, o, 12)).toBe(true)
+  })
+})
+
+// ─── Pure / slug / v1 / NPM geometry parity ────────────────────────────────
+
+type RuntimeShiftFn = (
+  launcherRect: { left: number; top: number; right: number; bottom: number },
+  obstacleRects: Array<{ left: number; top: number; right: number; bottom: number }>,
+  viewport: { width: number; height: number },
+  options?: { gap?: number; maxShift?: number },
+) => { dx: number; dy: number }
+
+/**
+ * Extract the self-contained inline geometry function from a generated
+ * runtime script (slug or v1) by brace matching and evaluate it. The
+ * function body contains no string literals or comment braces, so plain
+ * brace counting is safe.
+ */
+function extractRuntimeShift(js: string, label: string): RuntimeShiftFn {
+  const marker = 'function __skComputeSmartAvoidanceShift('
+  const start = js.indexOf(marker)
+  if (start < 0) throw new Error(`[ ${label} ] geometry function missing from generated script`)
+  let depth = 0
+  let i = start
+  let seenOpen = false
+  for (; i < js.length; i++) {
+    if (js[i] === '{') { depth++; seenOpen = true }
+    else if (js[i] === '}') {
+      depth--
+      if (seenOpen && depth === 0) break
+    }
+  }
+  if (!(seenOpen && depth === 0)) throw new Error(`[ ${label} ] unbalanced braces around geometry function`)
+  const src = js.slice(start, i + 1)
+  // eslint-disable-next-line no-new-func
+  return new Function('return (' + src + ')')() as RuntimeShiftFn
+}
+
+const slugShift = extractRuntimeShift(
+  buildSlugScript('https://app.sukhan.chat', 'demo', false, '/?XTransformPort=3003', false),
+  'slug script',
+)
+const v1Shift = extractRuntimeShift(buildV1Script(null, false), 'v1 script')
+// The NPM method is private in TS but present on the prototype at runtime;
+// it is a pure function (never uses `this`), so it can be invoked directly.
+const npmShift = (SukhanWidget.prototype as unknown as Record<string, RuntimeShiftFn>)
+  .__skComputeSmartAvoidanceShift
+
+describe('Developer — geometry parity: pure TS === slug script === v1 script === NPM widget', () => {
+  const parityCases: Array<{
+    label: string
+    launcher: AvoidanceRect
+    obstacles: AvoidanceRect[]
+    viewport: { width: number; height: number }
+    options?: { gap?: number; maxShift?: number }
+  }> = [
+    { label: 'no obstacles', launcher: rect(320, 728, 372, 780), obstacles: [], viewport: { width: 400, height: 800 } },
+    { label: 'no initial collision', launcher: rect(320, 728, 372, 780), obstacles: [rect(0, 0, 100, 100)], viewport: { width: 400, height: 800 } },
+    { label: 'touching at gap is clear', launcher: rect(300, 700, 352, 752), obstacles: [rect(0, 0, 100, 100)], viewport: { width: 400, height: 800 }, options: { gap: 12 } },
+    { label: 'small viewport short move', launcher: rect(161, 224, 213, 276), obstacles: [rect(153, 216, 221, 284)], viewport: { width: 375, height: 500 }, options: { gap: 12, maxShift: 240 } },
+    { label: 'small viewport short move below bound', launcher: rect(161, 224, 213, 276), obstacles: [rect(153, 216, 221, 284)], viewport: { width: 375, height: 500 }, options: { gap: 12, maxShift: 71 } },
+    { label: 'adjacent obstacles', launcher: rect(320, 728, 372, 780), obstacles: [rect(300, 690, 400, 800), rect(50, 700, 300, 800)], viewport: { width: 400, height: 800 }, options: { gap: 12, maxShift: 240 } },
+    { label: 'adjacent obstacles reversed order + defaults', launcher: rect(320, 728, 372, 780), obstacles: [rect(50, 700, 300, 800), rect(300, 690, 400, 800)], viewport: { width: 400, height: 800 } },
+    { label: 'single obstacle prefers left 84', launcher: rect(320, 728, 372, 780), obstacles: [rect(300, 690, 400, 800)], viewport: { width: 400, height: 800 }, options: { gap: 12, maxShift: 240 } },
+    { label: 'escape corridor', launcher: rect(200, 100, 252, 152), obstacles: [rect(150, 0, 260, 300), rect(0, 80, 60, 180), rect(330, 0, 400, 300)], viewport: { width: 400, height: 300 }, options: { gap: 12, maxShift: 240 } },
+    { label: 'corner diagonal', launcher: rect(0, 748, 52, 800), obstacles: [rect(0, 700, 300, 800), rect(0, 400, 100, 700)], viewport: { width: 400, height: 800 } },
+    { label: 'corner diagonal below Euclidean bound', launcher: rect(0, 748, 52, 800), obstacles: [rect(0, 700, 300, 800), rect(0, 400, 100, 700)], viewport: { width: 400, height: 800 }, options: { gap: 12, maxShift: 158 } },
+    { label: 'corner diagonal above Euclidean bound', launcher: rect(0, 748, 52, 800), obstacles: [rect(0, 700, 300, 800), rect(0, 400, 100, 700)], viewport: { width: 400, height: 800 }, options: { gap: 12, maxShift: 159 } },
+    { label: 'full-cover obstacle has no solution', launcher: rect(320, 728, 372, 780), obstacles: [rect(0, 0, 400, 800)], viewport: { width: 400, height: 800 }, options: { gap: 12, maxShift: 240 } },
+    { label: 'invalid obstacle rects ignored', launcher: rect(320, 728, 372, 780), obstacles: [rect(NaN, 0, 100, 100), rect(Infinity, 0, 100, 100)], viewport: { width: 400, height: 800 } },
+    { label: 'gap 0 lateral overlap', launcher: rect(10, 10, 62, 62), obstacles: [rect(60, 10, 120, 62)], viewport: { width: 400, height: 300 }, options: { gap: 0 } },
+    { label: 'fractional browser-style rects', launcher: rect(161.5, 224.25, 213.5, 276.25), obstacles: [rect(153.5, 216.25, 221.5, 284.25)], viewport: { width: 375, height: 500 }, options: { gap: 12, maxShift: 240 } },
+    { label: 'bottom banner default options', launcher: rect(1180, 660, 1232, 712), obstacles: [rect(1100, 690, 1280, 720)], viewport: { width: 1280, height: 720 } },
+    { label: 'maxShift zero with collision', launcher: rect(1180, 660, 1232, 712), obstacles: [rect(1100, 690, 1280, 720)], viewport: { width: 1280, height: 720 }, options: { maxShift: 0 } },
+  ]
+
+  for (const c of parityCases) {
+    test(`parity case "${c.label}"`, () => {
+      const expected = computeSmartAvoidanceShift(c.launcher, c.obstacles, c.viewport, c.options)
+      expect(slugShift(c.launcher, c.obstacles, c.viewport, c.options), 'slug script geometry must match the pure TS module')
+        .toEqual(expected)
+      expect(v1Shift(c.launcher, c.obstacles, c.viewport, c.options), 'v1 script geometry must match the pure TS module')
+        .toEqual(expected)
+      expect(npmShift.call(null, c.launcher, c.obstacles, c.viewport, c.options), 'NPM widget geometry must match the pure TS module')
+        .toEqual(expected)
+    })
+  }
+
+  test('all four implementations are wired (no missing/renamed copies)', () => {
+    expect(typeof slugShift).toBe('function')
+    expect(typeof v1Shift).toBe('function')
+    expect(typeof npmShift).toBe('function')
+  })
+})
+

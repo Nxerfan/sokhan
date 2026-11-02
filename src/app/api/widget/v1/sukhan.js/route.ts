@@ -425,15 +425,22 @@ ${POSITIONING_FN_SOURCE}
   //   hidden.
   //
   //   Geometry is deterministic: 8 candidate directions from the ORIGINAL
-  //   base position, minimum-shift binary search per direction, bounded by
-  //   a 240px maxShift + 12px gap, always inside the viewport. No solution
+  //   base position. Per direction the reachable magnitude is capped by the
+  //   viewport edges AND the 240px Euclidean maxShift — a short legal move
+  //   is used even when the full maxShift endpoint would leave the
+  //   viewport. Blocked magnitude intervals are computed for EVERY obstacle
+  //   the launcher could reach (not only initially overlapping ones), and
+  //   the smallest verified clear magnitude (12px gap, in-viewport) wins —
+  //   no monotonicity assumption, obstacle-order independent. No solution
   //   → zero shift (the configured placement is kept). Mirrors the pure TS
   //   computeSmartAvoidanceShift (smart-avoidance-geometry.ts) — inlined
   //   ES5 so the served script has no cross-package dependency.
   // ============================================================
   function __skComputeSmartAvoidanceShift(launcherRect, obstacleRects, viewport, options) {
-    var gap = Math.max(0, (options && typeof options.gap === 'number') ? options.gap : 12);
-    var maxShift = Math.max(0, (options && typeof options.maxShift === 'number') ? options.maxShift : 240);
+    var rawGap = options ? options.gap : undefined;
+    var rawMaxShift = options ? options.maxShift : undefined;
+    var gap = (typeof rawGap === 'number' && isFinite(rawGap)) ? Math.max(0, rawGap) : 12;
+    var maxShift = (typeof rawMaxShift === 'number' && isFinite(rawMaxShift)) ? Math.max(0, rawMaxShift) : 240;
     function __skValidRect(r) {
       return !!r &&
         typeof r.left === 'number' && isFinite(r.left) &&
@@ -446,86 +453,154 @@ ${POSITIONING_FN_SOURCE}
       return a.right + g > b.left && a.left < b.right + g &&
         a.bottom + g > b.top && a.top < b.bottom + g;
     }
-    function __skInsideViewport(r) {
+    function __skInViewport(r) {
       return r.left >= 0 && r.top >= 0 && r.right <= viewport.width && r.bottom <= viewport.height;
     }
-    if (!__skValidRect(launcherRect)) return { dx: 0, dy: 0 };
-    // Filter to valid obstacle rects that actually overlap the launcher.
-    var active = [];
-    for (var oi = 0; oi < obstacleRects.length; oi++) {
-      var cand = obstacleRects[oi];
-      if (__skValidRect(cand) && __skOverlaps(launcherRect, cand, gap)) active.push(cand);
+    // Reject invalid launcher / viewport / obstacle-list inputs (fail closed).
+    if (!launcherRect || !__skValidRect(launcherRect)) return { dx: 0, dy: 0 };
+    if (!viewport || typeof viewport.width !== 'number' || !isFinite(viewport.width) || viewport.width < 0 ||
+        typeof viewport.height !== 'number' || !isFinite(viewport.height) || viewport.height < 0) {
+      return { dx: 0, dy: 0 };
     }
-    if (active.length === 0) return { dx: 0, dy: 0 };
-    // Candidate directions (deterministic order): up, down, left, right,
-    // then the four diagonals.
+    if (!obstacleRects || typeof obstacleRects.length !== 'number') return { dx: 0, dy: 0 };
+    // All valid obstacle rects — invalid rectangles (NaN / Infinity /
+    // degenerate) are ignored so they can never produce invalid CSS.
+    var all = [];
+    for (var vi = 0; vi < obstacleRects.length; vi++) {
+      if (obstacleRects[vi] && __skValidRect(obstacleRects[vi])) all.push(obstacleRects[vi]);
+    }
+    // No initial collision → keep the configured placement (zero shift).
+    var collides = false;
+    for (var ic = 0; ic < all.length; ic++) {
+      if (__skOverlaps(launcherRect, all[ic], gap)) { collides = true; break; }
+    }
+    if (!collides) return { dx: 0, dy: 0 };
+    // Relevant obstacles: anything the launcher could collide with at ANY
+    // bounded destination — the launcher expanded by maxShift on every side
+    // (checked with the clearance gap). This includes obstacles that do NOT
+    // overlap the initial position but sit in the path of a candidate move.
+    var reach = {
+      left: launcherRect.left - maxShift,
+      top: launcherRect.top - maxShift,
+      right: launcherRect.right + maxShift,
+      bottom: launcherRect.bottom + maxShift
+    };
+    var relevant = [];
+    for (var ri = 0; ri < all.length; ri++) {
+      if (__skOverlaps(reach, all[ri], gap)) relevant.push(all[ri]);
+    }
+    // Eight candidate directions in a fixed order: up, down, left, right,
+    // then the four exact 45-degree diagonals (unit components, so the
+    // maxShift bound stays Euclidean for diagonal moves).
+    var SQ = Math.SQRT1_2;
     var directions = [
       { x: 0, y: -1 }, { x: 0, y: 1 }, { x: -1, y: 0 }, { x: 1, y: 0 },
-      { x: -1, y: -1 }, { x: 1, y: -1 }, { x: -1, y: 1 }, { x: 1, y: 1 }
+      { x: -SQ, y: -SQ }, { x: SQ, y: -SQ }, { x: -SQ, y: SQ }, { x: SQ, y: SQ }
     ];
+    // Nudge ladder for endpoint candidates that float round-trips reject by
+    // an ulp. Ascending and tiny — never skips past the next candidate.
+    var NUDGES = [0, 0.000001, 0.001, 0.01, 0.1, 0.5, 1];
+    // Verify a magnitude exactly: translated launcher inside the viewport,
+    // Euclidean displacement within maxShift, and clear of EVERY relevant
+    // obstacle (not only the initially overlapping ones).
+    function __skClearAt(dirX, dirY, m, mCap) {
+      if (!(m >= 0) || m > mCap) return false;
+      var dx = dirX * m;
+      var dy = dirY * m;
+      var moved = {
+        left: launcherRect.left + dx,
+        top: launcherRect.top + dy,
+        right: launcherRect.right + dx,
+        bottom: launcherRect.bottom + dy
+      };
+      if (!__skInViewport(moved)) return false;
+      if (Math.sqrt(dx * dx + dy * dy) > maxShift) return false;
+      for (var i = 0; i < relevant.length; i++) {
+        if (__skOverlaps(moved, relevant[i], gap)) return false;
+      }
+      return true;
+    }
     var bestDx = 0, bestDy = 0, bestDistance = Infinity, found = false;
     for (var di = 0; di < directions.length; di++) {
       var dir = directions[di];
-      // Quick check: is maxShift in this direction sufficient + in viewport?
-      var maxRect = {
-        left: launcherRect.left + dir.x * maxShift,
-        top: launcherRect.top + dir.y * maxShift,
-        right: launcherRect.right + dir.x * maxShift,
-        bottom: launcherRect.bottom + dir.y * maxShift
-      };
-      if (!__skInsideViewport(maxRect)) continue;
-      var allClear = true;
-      for (var ci = 0; ci < active.length; ci++) {
-        var movedMax = {
-          left: launcherRect.left + dir.x * maxShift,
-          top: launcherRect.top + dir.y * maxShift,
-          right: launcherRect.right + dir.x * maxShift,
-          bottom: launcherRect.bottom + dir.y * maxShift
-        };
-        if (__skOverlaps(movedMax, active[ci], gap)) { allClear = false; break; }
+      // Reachable magnitude cap: the analytic per-axis bound that keeps the
+      // translated launcher inside the viewport, and maxShift. A direction
+      // is NOT rejected because its full maxShift endpoint exits the
+      // viewport — only the reachable in-viewport interval is searched.
+      var mCap = maxShift;
+      if (dir.x > 0) {
+        var boundX = (viewport.width - launcherRect.right) / dir.x;
+        if (boundX < mCap) mCap = boundX;
+      } else if (dir.x < 0) {
+        var boundX2 = launcherRect.left / -dir.x;
+        if (boundX2 < mCap) mCap = boundX2;
       }
-      if (!allClear) continue;
-      // Binary search for the minimum shift that clears all obstacles.
-      var lo = 0, hi = maxShift, minValid = -1;
-      while (lo < hi) {
-        var mid = Math.ceil((lo + hi) / 2);
-        var moved = {
-          left: launcherRect.left + dir.x * mid,
-          top: launcherRect.top + dir.y * mid,
-          right: launcherRect.right + dir.x * mid,
-          bottom: launcherRect.bottom + dir.y * mid
-        };
-        var clear = true;
-        for (var cj = 0; cj < active.length; cj++) {
-          if (__skOverlaps(moved, active[cj], gap)) { clear = false; break; }
-        }
-        if (clear) {
-          if (__skInsideViewport(moved)) { minValid = mid; hi = mid - 1; }
-          else { lo = mid + 1; }
-        } else {
-          lo = mid + 1;
+      if (dir.y > 0) {
+        var boundY = (viewport.height - launcherRect.bottom) / dir.y;
+        if (boundY < mCap) mCap = boundY;
+      } else if (dir.y < 0) {
+        var boundY2 = launcherRect.top / -dir.y;
+        if (boundY2 < mCap) mCap = boundY2;
+      }
+      if (!(mCap > 0)) continue;
+      // Blocked magnitude intervals per relevant obstacle. For obstacle o
+      // the launcher translated by dir*m overlaps o (within the gap) exactly
+      // when all four linear conditions hold, which bounds m to an open
+      // interval. Candidate magnitudes: 0 plus every in-range endpoint.
+      var candidates = [0];
+      for (var oi = 0; oi < relevant.length; oi++) {
+        var o = relevant[oi];
+        var lo = -Infinity, hi = Infinity;
+        // A: launcherRect.right + dirX*m + gap > o.left
+        var cA = o.left - gap - launcherRect.right;
+        if (dir.x > 0) { var bA = cA / dir.x; if (bA > lo) lo = bA; }
+        else if (dir.x < 0) { var bA2 = cA / dir.x; if (bA2 < hi) hi = bA2; }
+        else if (!(cA < 0)) { hi = -Infinity; }
+        // B: launcherRect.left + dirX*m < o.right + gap
+        var cB = o.right + gap - launcherRect.left;
+        if (dir.x > 0) { var bB = cB / dir.x; if (bB < hi) hi = bB; }
+        else if (dir.x < 0) { var bB2 = cB / dir.x; if (bB2 > lo) lo = bB2; }
+        else if (!(cB > 0)) { hi = -Infinity; }
+        // C: launcherRect.bottom + dirY*m + gap > o.top
+        var cC = o.top - gap - launcherRect.bottom;
+        if (dir.y > 0) { var bC = cC / dir.y; if (bC > lo) lo = bC; }
+        else if (dir.y < 0) { var bC2 = cC / dir.y; if (bC2 < hi) hi = bC2; }
+        else if (!(cC < 0)) { hi = -Infinity; }
+        // D: launcherRect.top + dirY*m < o.bottom + gap
+        var cD = o.bottom + gap - launcherRect.top;
+        if (dir.y > 0) { var bD = cD / dir.y; if (bD < hi) hi = bD; }
+        else if (dir.y < 0) { var bD2 = cD / dir.y; if (bD2 > lo) lo = bD2; }
+        else if (!(cD > 0)) { hi = -Infinity; }
+        if (lo < hi) {
+          if (lo >= 0 && lo <= mCap) candidates.push(lo);
+          if (hi >= 0 && hi <= mCap) candidates.push(hi);
         }
       }
-      if (minValid >= 0 && minValid <= maxShift) {
-        var dxx = dir.x * minValid, dyy = dir.y * minValid;
-        var dist = Math.sqrt(dxx * dxx + dyy * dyy);
-        if (dist < bestDistance) {
-          bestDistance = dist; bestDx = dxx; bestDy = dyy; found = true;
+      candidates.sort(function (a, b) { return a - b; });
+      // Ascending candidate walk: the first magnitude (plus capped nudges)
+      // that verifies is this direction's minimum. Blocked intervals in
+      // between are simply skipped — no monotonicity assumption.
+      for (var cal = 0; cal < candidates.length; cal++) {
+        if (cal > 0 && candidates[cal] === candidates[cal - 1]) continue;
+        var next = (cal + 1 < candidates.length) ? candidates[cal + 1] : Infinity;
+        var ok = -1;
+        for (var ni = 0; ni < NUDGES.length; ni++) {
+          var mTry = candidates[cal] + NUDGES[ni];
+          if (mTry > mCap) break;
+          if (ni > 0 && mTry >= next) break;
+          if (__skClearAt(dir.x, dir.y, mTry, mCap)) { ok = mTry; break; }
         }
+        if (ok < 0) continue;
+        var ddx = dir.x * ok;
+        var ddy = dir.y * ok;
+        var dist = Math.sqrt(ddx * ddx + ddy * ddy);
+        if (dist <= maxShift && dist < bestDistance) {
+          bestDistance = dist; bestDx = ddx; bestDy = ddy; found = true;
+        }
+        break;
       }
     }
     if (!found) return { dx: 0, dy: 0 };
-    // Verify the best result is valid (viewport bounds + no overlap).
-    var finalRect = {
-      left: launcherRect.left + bestDx,
-      top: launcherRect.top + bestDy,
-      right: launcherRect.right + bestDx,
-      bottom: launcherRect.bottom + bestDy
-    };
-    if (!__skInsideViewport(finalRect)) return { dx: 0, dy: 0 };
-    for (var fi = 0; fi < active.length; fi++) {
-      if (__skOverlaps(finalRect, active[fi], gap)) return { dx: 0, dy: 0 };
-    }
     return { dx: bestDx, dy: bestDy };
   }
 

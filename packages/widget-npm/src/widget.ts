@@ -3196,8 +3196,13 @@ export class SukhanWidget implements SukhanInstance {
   //   hidden.
   //
   //   Geometry is deterministic: 8 candidate directions from the ORIGINAL
-  //   base position, minimum-shift binary search per direction, bounded by
-  //   a 240px maxShift + 12px gap, always inside the viewport. No solution
+  //   base position. Per direction the reachable magnitude is capped by the
+  //   viewport edges AND the 240px Euclidean maxShift — a short legal move
+  //   is used even when the full maxShift endpoint would leave the
+  //   viewport. Blocked magnitude intervals are computed for EVERY obstacle
+  //   the launcher could reach (not only initially overlapping ones), and
+  //   the smallest verified clear magnitude (12px gap, in-viewport) wins —
+  //   no monotonicity assumption, obstacle-order independent. No solution
   //   → zero shift (the configured placement is kept). Mirrors the pure TS
   //   computeSmartAvoidanceShift (smart-avoidance-geometry.ts) — kept inline
   //   so the NPM package has no cross-package dependency on the Sukhan
@@ -3207,7 +3212,7 @@ export class SukhanWidget implements SukhanInstance {
   /**
    * Inlined bounded deterministic collision geometry. Mirrors the pure TS
    * `computeSmartAvoidanceShift` in `src/lib/widget/smart-avoidance-geometry.ts`.
-   * Pure function — never throws, never accesses the DOM.
+   * Pure function — never throws, never accesses the DOM, never uses `this`.
    */
   private __skComputeSmartAvoidanceShift(
     launcherRect: { left: number; top: number; right: number; bottom: number },
@@ -3215,8 +3220,10 @@ export class SukhanWidget implements SukhanInstance {
     viewport: { width: number; height: number },
     options?: { gap?: number; maxShift?: number },
   ): { dx: number; dy: number } {
-    const gap = Math.max(0, options?.gap ?? 12)
-    const maxShift = Math.max(0, options?.maxShift ?? 240)
+    const rawGap = options ? options.gap : undefined
+    const rawMaxShift = options ? options.maxShift : undefined
+    const gap = (typeof rawGap === 'number' && Number.isFinite(rawGap)) ? Math.max(0, rawGap) : 12
+    const maxShift = (typeof rawMaxShift === 'number' && Number.isFinite(rawMaxShift)) ? Math.max(0, rawMaxShift) : 240
     const isValidRect = (r: { left: number; top: number; right: number; bottom: number } | null | undefined): boolean =>
       !!r &&
       Number.isFinite(r.left) && Number.isFinite(r.top) &&
@@ -3229,95 +3236,173 @@ export class SukhanWidget implements SukhanInstance {
     ): boolean =>
       a.right + g > b.left && a.left < b.right + g &&
       a.bottom + g > b.top && a.top < b.bottom + g
-    const insideViewport = (r: { left: number; top: number; right: number; bottom: number }): boolean =>
+    const inViewport = (r: { left: number; top: number; right: number; bottom: number }): boolean =>
       r.left >= 0 && r.top >= 0 && r.right <= viewport.width && r.bottom <= viewport.height
 
-    if (!isValidRect(launcherRect)) return { dx: 0, dy: 0 }
-    // Filter to valid obstacle rects that actually overlap the launcher.
-    const active = obstacleRects.filter(o => isValidRect(o) && overlaps(launcherRect, o, gap))
-    if (active.length === 0) return { dx: 0, dy: 0 }
+    // Reject invalid launcher / viewport / obstacle-list inputs (fail closed).
+    if (!launcherRect || !isValidRect(launcherRect)) return { dx: 0, dy: 0 }
+    if (!viewport ||
+      typeof viewport.width !== 'number' || !Number.isFinite(viewport.width) || viewport.width < 0 ||
+      typeof viewport.height !== 'number' || !Number.isFinite(viewport.height) || viewport.height < 0) {
+      return { dx: 0, dy: 0 }
+    }
+    if (!obstacleRects || typeof obstacleRects.length !== 'number') return { dx: 0, dy: 0 }
 
-    // Candidate directions (deterministic order): up, down, left, right,
-    // then the four diagonals.
+    // All valid obstacle rects — invalid rectangles (NaN / Infinity /
+    // degenerate) are ignored so they can never produce invalid CSS.
+    const all: Array<{ left: number; top: number; right: number; bottom: number }> = []
+    for (let vi = 0; vi < obstacleRects.length; vi++) {
+      if (obstacleRects[vi] && isValidRect(obstacleRects[vi])) all.push(obstacleRects[vi])
+    }
+
+    // No initial collision → keep the configured placement (zero shift).
+    let collides = false
+    for (let ic = 0; ic < all.length; ic++) {
+      if (overlaps(launcherRect, all[ic], gap)) { collides = true; break }
+    }
+    if (!collides) return { dx: 0, dy: 0 }
+
+    // Relevant obstacles: anything the launcher could collide with at ANY
+    // bounded destination — the launcher expanded by maxShift on every side
+    // (checked with the clearance gap). This includes obstacles that do NOT
+    // overlap the initial position but sit in the path of a candidate move.
+    const reach = {
+      left: launcherRect.left - maxShift,
+      top: launcherRect.top - maxShift,
+      right: launcherRect.right + maxShift,
+      bottom: launcherRect.bottom + maxShift,
+    }
+    const relevant: Array<{ left: number; top: number; right: number; bottom: number }> = []
+    for (let ri = 0; ri < all.length; ri++) {
+      if (overlaps(reach, all[ri], gap)) relevant.push(all[ri])
+    }
+
+    // Eight candidate directions in a fixed order: up, down, left, right,
+    // then the four exact 45-degree diagonals (unit components, so the
+    // maxShift bound stays Euclidean for diagonal moves).
+    const SQ = Math.SQRT1_2
     const directions: Array<{ x: number; y: number }> = [
       { x: 0, y: -1 }, { x: 0, y: 1 }, { x: -1, y: 0 }, { x: 1, y: 0 },
-      { x: -1, y: -1 }, { x: 1, y: -1 }, { x: -1, y: 1 }, { x: 1, y: 1 },
+      { x: -SQ, y: -SQ }, { x: SQ, y: -SQ }, { x: -SQ, y: SQ }, { x: SQ, y: SQ },
     ]
+
+    // Nudge ladder for endpoint candidates that float round-trips reject by
+    // an ulp. Ascending and tiny — never skips past the next candidate.
+    const NUDGES = [0, 0.000001, 0.001, 0.01, 0.1, 0.5, 1]
+
+    // Verify a magnitude exactly: translated launcher inside the viewport,
+    // Euclidean displacement within maxShift, and clear of EVERY relevant
+    // obstacle (not only the initially overlapping ones).
+    const clearAt = (dirX: number, dirY: number, m: number, mCap: number): boolean => {
+      if (!(m >= 0) || m > mCap) return false
+      const dx = dirX * m
+      const dy = dirY * m
+      const moved = {
+        left: launcherRect.left + dx,
+        top: launcherRect.top + dy,
+        right: launcherRect.right + dx,
+        bottom: launcherRect.bottom + dy,
+      }
+      if (!inViewport(moved)) return false
+      if (Math.sqrt(dx * dx + dy * dy) > maxShift) return false
+      for (let i = 0; i < relevant.length; i++) {
+        if (overlaps(moved, relevant[i], gap)) return false
+      }
+      return true
+    }
 
     let bestDx = 0
     let bestDy = 0
     let bestDistance = Infinity
     let found = false
 
-    for (const dir of directions) {
-      // Quick check: is maxShift in this direction sufficient + in viewport?
-      const maxRect = {
-        left: launcherRect.left + dir.x * maxShift,
-        top: launcherRect.top + dir.y * maxShift,
-        right: launcherRect.right + dir.x * maxShift,
-        bottom: launcherRect.bottom + dir.y * maxShift,
+    for (let di = 0; di < directions.length; di++) {
+      const dir = directions[di]
+      // Reachable magnitude cap: the analytic per-axis bound that keeps the
+      // translated launcher inside the viewport, and maxShift. A direction
+      // is NOT rejected because its full maxShift endpoint exits the
+      // viewport — only the reachable in-viewport interval is searched.
+      let mCap = maxShift
+      if (dir.x > 0) {
+        const boundX = (viewport.width - launcherRect.right) / dir.x
+        if (boundX < mCap) mCap = boundX
+      } else if (dir.x < 0) {
+        const boundX2 = launcherRect.left / -dir.x
+        if (boundX2 < mCap) mCap = boundX2
       }
-      if (!insideViewport(maxRect)) continue
-      let allClear = true
-      for (const o of active) {
-        const movedMax = {
-          left: launcherRect.left + dir.x * maxShift,
-          top: launcherRect.top + dir.y * maxShift,
-          right: launcherRect.right + dir.x * maxShift,
-          bottom: launcherRect.bottom + dir.y * maxShift,
-        }
-        if (overlaps(movedMax, o, gap)) { allClear = false; break }
+      if (dir.y > 0) {
+        const boundY = (viewport.height - launcherRect.bottom) / dir.y
+        if (boundY < mCap) mCap = boundY
+      } else if (dir.y < 0) {
+        const boundY2 = launcherRect.top / -dir.y
+        if (boundY2 < mCap) mCap = boundY2
       }
-      if (!allClear) continue
+      if (!(mCap > 0)) continue
 
-      // Binary search for the minimum shift that clears all obstacles.
-      let lo = 0
-      let hi = maxShift
-      let minValid = -1
-      while (lo < hi) {
-        const mid = Math.ceil((lo + hi) / 2)
-        const moved = {
-          left: launcherRect.left + dir.x * mid,
-          top: launcherRect.top + dir.y * mid,
-          right: launcherRect.right + dir.x * mid,
-          bottom: launcherRect.bottom + dir.y * mid,
-        }
-        let clear = true
-        for (const o of active) {
-          if (overlaps(moved, o, gap)) { clear = false; break }
-        }
-        if (clear) {
-          if (insideViewport(moved)) { minValid = mid; hi = mid - 1 }
-          else { lo = mid + 1 }
-        } else {
-          lo = mid + 1
+      // Blocked magnitude intervals per relevant obstacle. For obstacle o
+      // the launcher translated by dir*m overlaps o (within the gap) exactly
+      // when all four linear conditions hold, which bounds m to an open
+      // interval. Candidate magnitudes: 0 plus every in-range endpoint.
+      const candidates: number[] = [0]
+      for (let oi = 0; oi < relevant.length; oi++) {
+        const o = relevant[oi]
+        let lo = -Infinity
+        let hi = Infinity
+        // A: launcherRect.right + dirX*m + gap > o.left
+        const cA = o.left - gap - launcherRect.right
+        if (dir.x > 0) { const bA = cA / dir.x; if (bA > lo) lo = bA }
+        else if (dir.x < 0) { const bA2 = cA / dir.x; if (bA2 < hi) hi = bA2 }
+        else if (!(cA < 0)) { hi = -Infinity }
+        // B: launcherRect.left + dirX*m < o.right + gap
+        const cB = o.right + gap - launcherRect.left
+        if (dir.x > 0) { const bB = cB / dir.x; if (bB < hi) hi = bB }
+        else if (dir.x < 0) { const bB2 = cB / dir.x; if (bB2 > lo) lo = bB2 }
+        else if (!(cB > 0)) { hi = -Infinity }
+        // C: launcherRect.bottom + dirY*m + gap > o.top
+        const cC = o.top - gap - launcherRect.bottom
+        if (dir.y > 0) { const bC = cC / dir.y; if (bC > lo) lo = bC }
+        else if (dir.y < 0) { const bC2 = cC / dir.y; if (bC2 < hi) hi = bC2 }
+        else if (!(cC < 0)) { hi = -Infinity }
+        // D: launcherRect.top + dirY*m < o.bottom + gap
+        const cD = o.bottom + gap - launcherRect.top
+        if (dir.y > 0) { const bD = cD / dir.y; if (bD < hi) hi = bD }
+        else if (dir.y < 0) { const bD2 = cD / dir.y; if (bD2 > lo) lo = bD2 }
+        else if (!(cD > 0)) { hi = -Infinity }
+        if (lo < hi) {
+          if (lo >= 0 && lo <= mCap) candidates.push(lo)
+          if (hi >= 0 && hi <= mCap) candidates.push(hi)
         }
       }
-      if (minValid >= 0 && minValid <= maxShift) {
-        const dx = dir.x * minValid
-        const dy = dir.y * minValid
+      candidates.sort((a, b) => a - b)
+
+      // Ascending candidate walk: the first magnitude (plus capped nudges)
+      // that verifies is this direction's minimum. Blocked intervals in
+      // between are simply skipped — no monotonicity assumption.
+      for (let ci = 0; ci < candidates.length; ci++) {
+        if (ci > 0 && candidates[ci] === candidates[ci - 1]) continue
+        const next = (ci + 1 < candidates.length) ? candidates[ci + 1] : Infinity
+        let ok = -1
+        for (let ni = 0; ni < NUDGES.length; ni++) {
+          const mTry = candidates[ci] + NUDGES[ni]
+          if (mTry > mCap) break
+          if (ni > 0 && mTry >= next) break
+          if (clearAt(dir.x, dir.y, mTry, mCap)) { ok = mTry; break }
+        }
+        if (ok < 0) continue
+        const dx = dir.x * ok
+        const dy = dir.y * ok
         const dist = Math.sqrt(dx * dx + dy * dy)
-        if (dist < bestDistance) {
+        if (dist <= maxShift && dist < bestDistance) {
           bestDistance = dist
           bestDx = dx
           bestDy = dy
           found = true
         }
+        break
       }
     }
 
     if (!found) return { dx: 0, dy: 0 }
-    // Verify the best result is valid (viewport bounds + no overlap).
-    const finalRect = {
-      left: launcherRect.left + bestDx,
-      top: launcherRect.top + bestDy,
-      right: launcherRect.right + bestDx,
-      bottom: launcherRect.bottom + bestDy,
-    }
-    if (!insideViewport(finalRect)) return { dx: 0, dy: 0 }
-    for (const o of active) {
-      if (overlaps(finalRect, o, gap)) return { dx: 0, dy: 0 }
-    }
     return { dx: bestDx, dy: bestDy }
   }
 
