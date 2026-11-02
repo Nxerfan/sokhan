@@ -145,9 +145,10 @@ async function anonymousBootstrap(
     policyVersion,
   })
 
-  // Compute server-authoritative preChatCompleted from the contact's stored
-  // metadata + the CURRENT effective form. This survives reload before the
-  // first message — the client doesn't need to re-submit.
+  // Compute server-authoritative preChatCompleted. A returning visitor with
+  // a previously persisted VISITOR message in ANY conversation (open/closed/
+  // resolved/pending) is exempt from the form — they already started a chat
+  // before the form was configured. Only the visitor's OWN messages count.
   const entitlements = getEntitlements(tenant.plan)
   const effectiveForm = resolveEffectivePreChatForm(
     { appearanceV2: tenant.widgetConfig?.appearanceV2 },
@@ -156,7 +157,27 @@ async function anonymousBootstrap(
   const contactMetadata = (contact.metadata && typeof contact.metadata === 'object' && !Array.isArray(contact.metadata))
     ? contact.metadata as Record<string, unknown>
     : {}
-  const preChatCompleted = isPreChatComplete(effectiveForm, contactMetadata.preChat as Record<string, unknown> | undefined)
+
+  // Check if this contact has ANY persisted visitor message across ALL
+  // conversations (any status). Uses take:1 for an efficient existence check.
+  const visitorMessageCount = await withTenant(tenant.id, async () => {
+    return db.message.count({
+      where: {
+        senderType: 'contact',
+        conversation: { contactId: contact.id, tenantId: tenant.id },
+      },
+      take: 1,
+    })
+  })
+  const hasPersistedVisitorMessage = visitorMessageCount > 0
+
+  // Form is completed if: (a) the visitor already has a persisted message
+  // (exempt — pre-dates the form), or (b) the stored pre-chat values satisfy
+  // the CURRENT effective form's required fields.
+  const preChatCompleted = hasPersistedVisitorMessage || isPreChatComplete(
+    effectiveForm,
+    contactMetadata.preChat as Record<string, unknown> | undefined,
+  )
 
   return widgetHeaders(NextResponse.json({
     contactId: contact.id,
@@ -217,7 +238,16 @@ async function verifiedVisitorBootstrap(
   const contactMetadata = (contact.metadata && typeof contact.metadata === 'object' && !Array.isArray(contact.metadata))
     ? contact.metadata as Record<string, unknown>
     : {}
-  const preChatCompleted = isPreChatComplete(effectiveForm, contactMetadata.preChat as Record<string, unknown> | undefined)
+  // Historical visitor message exemption (same as anonymous bootstrap).
+  const visitorMsgCount = await withTenant(tenant.id, async () => {
+    return db.message.count({
+      where: { senderType: 'contact', conversation: { contactId: contact.id, tenantId: tenant.id } },
+      take: 1,
+    })
+  })
+  const preChatCompleted = visitorMsgCount > 0 || isPreChatComplete(
+    effectiveForm, contactMetadata.preChat as Record<string, unknown> | undefined,
+  )
 
   return widgetHeaders(NextResponse.json({
     contactId: contact.id,
@@ -280,7 +310,16 @@ async function siteUserBootstrap(
   const contactMetadata = (contact.metadata && typeof contact.metadata === 'object' && !Array.isArray(contact.metadata))
     ? contact.metadata as Record<string, unknown>
     : {}
-  const preChatCompleted = isPreChatComplete(effectiveForm, contactMetadata.preChat as Record<string, unknown> | undefined)
+  // Historical visitor message exemption (same as anonymous bootstrap).
+  const visitorMsgCount = await withTenant(tenant.id, async () => {
+    return db.message.count({
+      where: { senderType: 'contact', conversation: { contactId: contact.id, tenantId: tenant.id } },
+      take: 1,
+    })
+  })
+  const preChatCompleted = visitorMsgCount > 0 || isPreChatComplete(
+    effectiveForm, contactMetadata.preChat as Record<string, unknown> | undefined,
+  )
 
   return widgetHeaders(NextResponse.json({
     contactId: contact.id,

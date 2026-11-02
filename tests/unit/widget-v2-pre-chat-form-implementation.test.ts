@@ -496,3 +496,91 @@ describe('Developer — isPreChatComplete: validate stored values against CURREN
     expect(isPreChatComplete(allFields, { name: 'A', email: 'a@b.com' })).toBe(true)
   })
 })
+
+describe('Developer — historical visitor message exemption', () => {
+  // These tests verify the shouldRequirePreChat logic that the /messages
+  // and /contact routes use to exempt returning visitors with ANY persisted
+  // visitor message (across ALL conversation statuses).
+  //
+  // The server-side query checks:
+  //   db.message.count({ where: { senderType: 'contact', conversation:
+  //     { contactId, tenantId } }, take: 1 })
+  //
+  // This covers open, pending, resolved, and closed conversations. Only
+  // the visitor's OWN messages (senderType: 'contact') count — agent,
+  // AI, system, and other visitors' messages do NOT exempt.
+
+  const requiredForm = { fields: [{ key: 'name' as const, required: true }] }
+
+  test('returning visitor with persisted message (any status) → form NOT required', () => {
+    // hasPersistedVisitorMessage = true → shouldRequirePreChat returns false
+    // regardless of form configuration or completion status.
+    expect(shouldRequirePreChat(requiredForm, true, false)).toBe(false)
+    expect(shouldRequirePreChat(requiredForm, true, true)).toBe(false)
+  })
+
+  test('new visitor with no persisted message + no form completion → form required', () => {
+    expect(shouldRequirePreChat(requiredForm, false, false)).toBe(true)
+  })
+
+  test('new visitor with no persisted message + form completed → form NOT required', () => {
+    expect(shouldRequirePreChat(requiredForm, false, true)).toBe(false)
+  })
+
+  test('agent-only history does NOT exempt (senderType matters)', () => {
+    // The server query filters on senderType: 'contact'. An agent-only
+    // conversation does NOT set hasPersistedVisitorMessage=true.
+    // In the pure function, this is represented as hasPersistedVisitorMessage=false.
+    expect(shouldRequirePreChat(requiredForm, false, false)).toBe(true)
+  })
+
+  test('cross-visitor isolation: different contact has no messages', () => {
+    // The server query filters on contactId + tenantId. A different contact
+    // has no messages → hasPersistedVisitorMessage=false → form required.
+    expect(shouldRequirePreChat(requiredForm, false, false)).toBe(true)
+  })
+
+  test('closed conversation with visitor message → exempt', () => {
+    // The server query does NOT filter by conversation status. A visitor
+    // message in a closed conversation still counts.
+    expect(shouldRequirePreChat(requiredForm, true, false)).toBe(false)
+  })
+
+  test('multiple conversations: any one with a visitor message → exempt', () => {
+    // The server query counts across ALL conversations. If any conversation
+    // has at least one visitor message → exempt.
+    expect(shouldRequirePreChat(requiredForm, true, false)).toBe(false)
+  })
+
+  test('identity change: new visitor has no historical messages', () => {
+    // After identity clear/recovery, the new contact has no persisted
+    // messages → form required (if not yet completed).
+    expect(shouldRequirePreChat(requiredForm, false, false)).toBe(true)
+  })
+
+  test('current required fields enforced for new visitor without completion', () => {
+    const nameEmailRequired = { fields: [
+      { key: 'name' as const, required: true },
+      { key: 'email' as const, required: true },
+    ] }
+    // New visitor, no persisted message, no completion → required.
+    expect(shouldRequirePreChat(nameEmailRequired, false, false)).toBe(true)
+    // After completion → not required.
+    expect(shouldRequirePreChat(nameEmailRequired, false, true)).toBe(false)
+  })
+
+  test('existing form completion still works alongside historical exemption', () => {
+    // If a visitor completed the form but has no persisted message → not required.
+    expect(shouldRequirePreChat(requiredForm, false, true)).toBe(false)
+    // If a visitor has a persisted message but didn't complete the form → not required.
+    expect(shouldRequirePreChat(requiredForm, true, false)).toBe(false)
+    // Both → not required.
+    expect(shouldRequirePreChat(requiredForm, true, true)).toBe(false)
+  })
+
+  test('no form configured → never required (regardless of history)', () => {
+    expect(shouldRequirePreChat({ fields: [] }, false, false)).toBe(false)
+    expect(shouldRequirePreChat({ fields: [] }, true, false)).toBe(false)
+    expect(shouldRequirePreChat({ fields: [] }, false, true)).toBe(false)
+  })
+})

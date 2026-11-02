@@ -224,22 +224,28 @@ export async function POST(
     // === Pre-chat Form server-side gate (Feature 7) ===
     // Before persisting the visitor's first message, check if a pre-chat form
     // is required and has not been completed. This is a SERVER-SIDE check —
-    // the client cannot bypass it. The form is required only when:
-    //   1. The effective form has configured fields.
-    //   2. The visitor has no previously persisted message (no existing
-    //      conversation with messages).
-    //   3. The form has not been completed (contact.metadata.preChat exists).
+    // the client cannot bypass it.
     //
-    // Existing visitors with previously persisted messages are NOT blocked
-    // by a newly enabled form (they already have a conversation).
+    // An existing visitor with a previously persisted VISITOR message in ANY
+    // conversation (open, pending, resolved, closed) is exempt — they already
+    // started a conversation before the form was configured. Only the visitor's
+    // OWN messages count (senderType: 'contact'); agent/AI/system messages do
+    // NOT exempt the visitor.
     {
-      // Check if the visitor already has a conversation with messages.
-      const existingConv = await db.conversation.findFirst({
-        where: { contactId, status: 'open' },
-        orderBy: { createdAt: 'desc' },
-        include: { _count: { select: { messages: true } } },
+      // Efficient existence query: check if this contact has ANY persisted
+      // visitor message across ALL their conversations (any status). Uses
+      // a bounded count (take: 1) so it doesn't load full message histories.
+      const visitorMessageCount = await db.message.count({
+        where: {
+          senderType: 'contact',
+          conversation: {
+            contactId,
+            tenantId,
+          },
+        },
+        take: 1,
       })
-      const hasPersistedVisitorMessage = !!existingConv && existingConv._count.messages > 0
+      const hasPersistedVisitorMessage = visitorMessageCount > 0
 
       if (!hasPersistedVisitorMessage) {
         // Resolve the effective pre-chat form from the tenant's config + plan.
@@ -254,8 +260,6 @@ export async function POST(
         )
 
         // Validate stored pre-chat values against the CURRENT required fields.
-        // A truthy metadata.preChat is NOT sufficient — the owner may have
-        // added new required fields since the visitor last submitted.
         const fullContact = await db.contact.findUnique({
           where: { id: contactId },
           select: { metadata: true },
