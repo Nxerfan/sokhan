@@ -315,6 +315,38 @@ test.describe('Widget V2 Pre-chat Form — Feature 7 independent browser tests',
     })
   }
 
+  test('Pro real NPM widget: advanced required phone validated before first message', async ({ browser }) => {
+    test.setTimeout(140_000)
+    const ownerCtx = await browser.newContext()
+    const visitorCtx = await browser.newContext({ viewport: { width: 320, height: 640 } })
+    let site: Awaited<ReturnType<typeof customer>> | undefined
+    try {
+      const owner = await ownerCtx.newPage()
+      const slug = await signup(owner, 'advanced')
+      await plan(owner, 'pro')
+      await setAccessMode(owner, 'anonymous')
+      await patch(owner, { preChatForm: { fields: ADVANCED } })
+      site = await customer(visitorCtx, slug, 'npm')
+      await openChat(site.page)
+      for (const key of ['name', 'email', 'phone', 'company'])
+        await expect(site.page.locator('.sk-pre-chat-field-' + key)).toBeVisible()
+      const denied = await site.page.request.post(BASE + '/api/widget/' + slug + '/pre-chat', {
+        headers: { Authorization: 'Bearer ' + site.token },
+        data: { values: { name: 'Customer' } },
+      })
+      expect(denied.status()).toBe(422)
+      await submitPreChat(site.page, slug, {
+        name: 'Customer', email: 'customer@example.test',
+        phone: '+49 30 1234567', company: 'Example GmbH',
+      })
+      await sendFirstMessage(site.page, slug, 'ADVANCED_PRECHAT_FIRST_MESSAGE')
+    } finally {
+      if (site) await site.close()
+      await visitorCtx.close()
+      await ownerCtx.close()
+    }
+  })
+
   test('server rejects first visitor message until REQUIRED form completed, even if client bypasses UI', async ({ browser }) => {
     const ownerCtx = await browser.newContext()
     const visitorCtx = await browser.newContext()
@@ -349,6 +381,7 @@ test.describe('Widget V2 Pre-chat Form — Feature 7 independent browser tests',
 
   test('pre-chat endpoint rejects missing/foreign bearer and malformed values, no profile spoofing', async ({ browser }) => {
     const ownerCtx = await browser.newContext()
+    const otherOwnerCtx = await browser.newContext()
     const visitorCtx = await browser.newContext()
     let site: Awaited<ReturnType<typeof customer>> | undefined
     try {
@@ -360,6 +393,21 @@ test.describe('Widget V2 Pre-chat Form — Feature 7 independent browser tests',
       const url = BASE + '/api/widget/' + slug + '/pre-chat'
       const missing = await site.page.request.post(url, { data: { values: { name: 'Alice' } } })
       expect(missing.status()).toBe(401)
+      // A genuinely server-issued token for DIFFERENT tenant B must never
+      // be usable against tenant A's pre-chat route, even with valid fields.
+      const otherOwner = await otherOwnerCtx.newPage()
+      const otherSlug = await signup(otherOwner, 'foreign')
+      await setAccessMode(otherOwner, 'anonymous')
+      const identifyOther = await otherOwner.request.post(BASE + '/api/widget/' + otherSlug + '/contact', {
+        data: { visitorId: 'foreign-visitor-' + Date.now() },
+      })
+      expect(identifyOther.status()).toBe(200)
+      const otherIdentity = await identifyOther.json()
+      const crossTenant = await site.page.request.post(url, {
+        headers: { Authorization: 'Bearer ' + otherIdentity.realtimeToken },
+        data: { values: { name: 'Alice' } },
+      })
+      expect(crossTenant.status()).toBe(403)
       const malformed = [
         { values: { name: ' ' } },
         { values: { name: 'Alice', isVerified: true } },
@@ -375,6 +423,7 @@ test.describe('Widget V2 Pre-chat Form — Feature 7 independent browser tests',
     } finally {
       if (site) await site.close()
       await visitorCtx.close()
+      await otherOwnerCtx.close()
       await ownerCtx.close()
     }
   })
