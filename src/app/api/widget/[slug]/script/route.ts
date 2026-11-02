@@ -451,8 +451,9 @@ ${POSITIONING_FN_SOURCE}
       var a = el('a', 'sk-alt-contact-link');
       a.setAttribute('data-sk-alt-contact-kind', it.kind);
       a.setAttribute('href', href);
-      // Website links open in a new tab; tel:/mailto: use the native handler.
-      if (it.kind === 'website') {
+      // All https:// links (website, whatsapp, telegram) open in a new tab;
+      // tel:/mailto: use the native handler.
+      if (href.indexOf('https://') === 0) {
         a.setAttribute('target', '_blank');
         a.setAttribute('rel', 'noopener noreferrer');
       }
