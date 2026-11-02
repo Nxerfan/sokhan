@@ -379,6 +379,42 @@ test.describe('Widget V2 Pre-chat Form — Feature 7 independent browser tests',
     }
   })
 
+  test('completed form survives reload BEFORE any visitor message without asking twice', async ({ browser }) => {
+    const ownerCtx = await browser.newContext()
+    const visitorCtx = await browser.newContext()
+    let site: Awaited<ReturnType<typeof customer>> | undefined
+    try {
+      const owner = await ownerCtx.newPage()
+      const slug = await signup(owner, 'pre-message-reload')
+      await setAccessMode(owner, 'anonymous')
+      await patch(owner, { preChatForm: { fields: [{ key: 'name', required: true }] } })
+      site = await customer(visitorCtx, slug, 'slug')
+      await openChat(site.page)
+      await expect(site.page.locator('.sk-pre-chat-form')).toBeVisible()
+      await submitPreChat(site.page, slug, { name: 'Persisted Form User' })
+      await expect(site.page.locator('.sk-input input')).toBeVisible()
+      // Crucially, NO /messages POST has occurred. The server must remember
+      // pre-chat completion for the SAME visitor identity after page reload.
+      const ready = site.page.waitForResponse(res =>
+        res.request().method() === 'POST' &&
+        res.url().includes('/api/widget/' + slug + '/contact') &&
+        res.status() === 200, { timeout: 20_000 })
+      await site.page.reload({ waitUntil: 'domcontentloaded' })
+      const response = await ready
+      await response.finished()
+      await expect(site.page.locator('.sk-launcher')).toBeVisible()
+      await openChat(site.page)
+      await expect(site.page.locator('.sk-pre-chat-form')).toBeHidden()
+      await expect(site.page.locator('.sk-input input')).toBeVisible()
+      // A real first message must now be accepted without resubmission.
+      await sendFirstMessage(site.page, slug, 'FIRST_MESSAGE_AFTER_COMPLETED_FORM_RELOAD')
+    } finally {
+      if (site) await site.close()
+      await visitorCtx.close()
+      await ownerCtx.close()
+    }
+  })
+
   test('stale anonymous token cannot submit pre-chat after access policy becomes verified_visitor', async ({ browser }) => {
     const ownerCtx = await browser.newContext()
     const visitorCtx = await browser.newContext()
