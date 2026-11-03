@@ -5,14 +5,24 @@ import { setAccessMode } from './helpers/set-access'
 /**
  * Module 4 tests — AI FAQ auto-responder + Product Q&A.
  *
+ * AI-Q1: tests 1 and 2 are now DETERMINISTIC.
+ *
  * Tests:
- * 1. FAQ matching: define a Q&A pair, send a differently-worded question, confirm auto-response.
- * 2. Product Q&A: add a product, ask about it, confirm a grounded answer.
+ * 1. FAQ matching: an EXACT stored question produces a deterministic
+ *    auto-response via the exact-match fast path (no LLM call, no
+ *    probabilistic skip). The AI reply is asserted to be present with the
+ *    owner-authored answer and source 'faq'.
+ * 2. Product Q&A retrieval gate: a question with NO matching product
+ *    keyword deterministically skips the LLM (zero candidates → no model
+ *    call → no AI reply). Positive product generation is covered by the
+ *    injected-provider Unit tests in ai-q1-contract.test.ts /
+ *    ai-q1-implementation.test.ts (no production test backdoor).
  * 3. Toggle defaults: both features default to OFF, and disabling stops them from firing.
  * 4. AI usage cap: when the cap is hit, the feature stops firing gracefully.
  *
- * Uses API-based signup (reliable) like the other tests.
- * Note: These tests call the real z-ai-web-dev-sdk for LLM classification/generation.
+ * No test here pretends a probabilistic external LLM was exercised when it
+ * was not. The deterministic positive FAQ path is proven end-to-end here
+ * and in the reviewer ai-q1-config.spec.ts acceptance.
  */
 
 const DASHBOARD = 'http://127.0.0.1:3000'
@@ -60,7 +70,7 @@ async function signupAndSignin(page: Page, email: string, workspace: string): Pr
 }
 
 test.describe('Module 4 — AI features', () => {
-  test('1. FAQ matching — semantically equivalent question gets auto-response', async ({ browser }) => {
+  test('1. FAQ matching — EXACT stored question gets a deterministic auto-response', async ({ browser }) => {
     const stamp = `${process.pid}-${Date.now()}-faq`
     const email = `faq-${stamp}@test.com`
 
@@ -69,20 +79,18 @@ test.describe('Module 4 — AI features', () => {
     const slug = await signupAndSignin(page, email, `FAQ ${stamp}`)
     expect(slug).toBeTruthy()
 
-    // Enable the FAQ feature
+    // Enable the FAQ feature (true-PATCH — productQaEnabled omitted, stays OFF)
     await page.request.patch(`${DASHBOARD}/api/ai-config`, {
       headers: { 'Content-Type': 'application/json' },
-      data: { faqEnabled: true, productQaEnabled: false },
+      data: { faqEnabled: true },
     })
 
     // Create a FAQ pair
+    const faqQuestion = 'آیا پرداخت حضوری دارید؟' // "Do you have in-person payment?"
+    const faqAnswer = 'بله، امکان پرداخت حضوری وجود دارد.' // "Yes, in-person payment is available."
     const faqRes = await page.request.post(`${DASHBOARD}/api/faqs`, {
       headers: { 'Content-Type': 'application/json' },
-      data: {
-        question: 'آیا پرداخت حضوری دارید؟', // "Do you have in-person payment?"
-        answer: 'بله، امکان پرداخت حضوری وجود دارد.', // "Yes, in-person payment is available."
-        enabled: true,
-      },
+      data: { question: faqQuestion, answer: faqAnswer, enabled: true },
     })
     const faqData = await faqRes.json()
     expect(faqData.faq).toBeTruthy()
@@ -94,38 +102,29 @@ test.describe('Module 4 — AI features', () => {
     const contactData = await contactRes.json()
     const visitorToken = contactData.realtimeToken
 
-    // Send a DIFFERENTLY-WORDED but semantically equivalent question
-    // "Can I pay in person?" (different wording, same intent)
+    // Send the EXACT stored question — the AI-Q1 exact-match fast path
+    // returns the owner-authored answer deterministically (no LLM call,
+    // no probabilistic skip).
     const msgRes = await page.request.post(`${DASHBOARD}/api/widget/${slug}/messages`, {
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${visitorToken}` },
-      data: { text: 'می‌شه وجه رو حضوری پرداخت کنم؟' }, // "Can I pay the amount in person?"
+      data: { text: faqQuestion },
     })
     const msgData = await msgRes.json()
     expect(msgData.conversationId).toBeTruthy()
 
-    // Check if an AI response was generated
-    // The AI response (if any) is a separate message with senderType='ai'
-    // Fetch the conversation messages to check
+    // A REAL AI response MUST be present (deterministic exact-match path).
+    // This test no longer silently passes when the AI reply is missing.
     const msgsRes = await page.request.get(`${DASHBOARD}/api/conversations/${msgData.conversationId}/messages`)
     const msgsData = await msgsRes.json()
     const aiMessages = (msgsData.messages || []).filter((m: any) => m.senderType === 'ai')
-
-    // If the AI matched, we should have an AI message with the FAQ answer
-    // Note: the LLM might not always match (it's probabilistic), so we check
-    // if there's an AI message AND its content contains the expected answer
-    if (aiMessages.length > 0) {
-      const aiContent = aiMessages[0].content
-      expect(aiContent.source).toBe('faq')
-      // The answer should contain the predefined text (or be very close)
-      console.log('FAQ AI response:', aiContent.text)
-    } else {
-      console.log('FAQ AI did not match (LLM probabilistic) — this is acceptable for semantic matching')
-    }
+    expect(aiMessages.length, 'Exact FAQ match MUST produce an AI response — no probabilistic skip').toBe(1)
+    expect(aiMessages[0].content.source).toBe('faq')
+    expect(aiMessages[0].content.text).toBe(faqAnswer)
 
     await ctx.close()
   })
 
-  test('2. Product Q&A — question about a product gets grounded answer', async ({ browser }) => {
+  test('2. Product Q&A retrieval gate — non-matching question does NOT trigger the LLM', async ({ browser }) => {
     const stamp = `${process.pid}-${Date.now()}-product`
     const email = `product-${stamp}@test.com`
 
@@ -134,10 +133,10 @@ test.describe('Module 4 — AI features', () => {
     const slug = await signupAndSignin(page, email, `Product ${stamp}`)
     expect(slug).toBeTruthy()
 
-    // Enable the Product Q&A feature
+    // Enable the Product Q&A feature (true-PATCH — faqEnabled omitted, stays OFF)
     await page.request.patch(`${DASHBOARD}/api/ai-config`, {
       headers: { 'Content-Type': 'application/json' },
-      data: { faqEnabled: false, productQaEnabled: true },
+      data: { productQaEnabled: true },
     })
 
     // Add a product manually
@@ -158,32 +157,24 @@ test.describe('Module 4 — AI features', () => {
     const contactData = await contactRes.json()
     const visitorToken = contactData.realtimeToken
 
-    // Ask about the product
+    // Ask a question that does NOT contain any product keyword — the
+    // deterministic keyword retrieval gate finds zero candidates and the
+    // LLM is never called (no hallucination path, no probabilistic skip).
+    // Positive product generation is covered by the injected-provider
+    // Unit tests (ai-q1-contract.test.ts / ai-q1-implementation.test.ts).
     const msgRes = await page.request.post(`${DASHBOARD}/api/widget/${slug}/messages`, {
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${visitorToken}` },
-      data: { text: 'قیمت هدفون بلوتوث چنده؟' }, // "What's the price of the bluetooth headphone?"
+      data: { text: 'وضعیت آب و هوا چطور است؟' }, // "How is the weather?" — no product keyword match
     })
     const msgData = await msgRes.json()
     expect(msgData.conversationId).toBeTruthy()
 
-    // Check for AI response
+    // No AI response should be present — the retrieval gate found no
+    // matching product, so the model was not called. This is deterministic.
     const msgsRes = await page.request.get(`${DASHBOARD}/api/conversations/${msgData.conversationId}/messages`)
     const msgsData = await msgsRes.json()
     const aiMessages = (msgsData.messages || []).filter((m: any) => m.senderType === 'ai')
-
-    if (aiMessages.length > 0) {
-      const aiContent = aiMessages[0].content
-      expect(aiContent.source).toBe('product')
-      // The answer should reference the product's price (2,500,000 Toman)
-      console.log('Product AI response:', aiContent.text)
-      // Check the answer mentions the price or the product
-      const text = aiContent.text.toLowerCase()
-      const hasPrice = text.includes('2500000') || text.includes('2,500,000') || text.includes('۲۵۰۰۰۰۰') || text.includes('۲٬۵۰۰٬۰۰۰')
-      const hasProduct = text.includes('هدفون') || text.includes('headphone')
-      expect(hasPrice || hasProduct, 'AI answer should reference the product or price').toBe(true)
-    } else {
-      console.log('Product AI did not answer (keyword retrieval may not have matched) — checking if the question was at least processed')
-    }
+    expect(aiMessages.length, 'Non-matching question must not trigger an AI response').toBe(0)
 
     await ctx.close()
   })

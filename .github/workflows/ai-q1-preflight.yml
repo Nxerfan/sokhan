@@ -1,0 +1,40 @@
+name: AI-Q1 — independent reviewer contract preflight
+on:
+  push:
+    branches:
+      - feat/ai-q1-contract-tests
+    paths:
+      - tests/unit/ai-q1-contract.test.ts
+      - tests/ai-q1-config.spec.ts
+      - .github/workflows/ai-q1-preflight.yml
+
+jobs:
+  reviewer-contract-preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Parse reviewer-owned Unit and Playwright TypeScript
+        run: |
+          node --input-type=module <<'NODE'
+          import ts from 'typescript'
+          import { readFileSync } from 'node:fs'
+          for (const file of [
+            'tests/unit/ai-q1-contract.test.ts',
+            'tests/ai-q1-config.spec.ts',
+          ]) {
+            const source = ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+            if (source.parseDiagnostics.length) {
+              for (const d of source.parseDiagnostics)
+                console.error(ts.flattenDiagnosticMessageText(d.messageText, '\n'))
+              throw Error('Invalid reviewer-owned TypeScript syntax: ' + file)
+            }
+            console.log('Syntax OK: ' + file)
+          }
+          NODE
+      - name: Discover real Full/Lite browser scenarios (no execution)
+        run: bunx playwright test tests/ai-q1-config.spec.ts --list
