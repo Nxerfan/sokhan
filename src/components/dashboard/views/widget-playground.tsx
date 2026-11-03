@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useMemo, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { useTranslations } from 'next-intl'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -282,6 +282,41 @@ export function WidgetPlaygroundPanel({
     },
   })
 
+  // ---- Live measured preview size (responsive containment) ----
+  // The preview surface requests a fixed design size (SURFACE_SIZES) but
+  // applies `maxWidth: '100%'`, so on a narrow dashboard the actually
+  // rendered width can shrink below the nominal 640px desktop / 360px
+  // mobile design size. A ResizeObserver tracks the live border-box size
+  // so the shared canonical geometry runs against the REAL rendered
+  // surface — otherwise the launcher / chat panel are positioned for the
+  // nominal size and clipped outside the visible preview on narrow screens
+  // (the open chat panel's right edge would land past the preview).
+  //
+  // The observer is created once per enabled state and disconnected on
+  // unmount (or when the playground becomes unavailable). It only stores a
+  // local measured size — no network, no persistence, no production widget
+  // positioning change.
+  const surfaceRef = useRef<HTMLDivElement>(null)
+  const [measuredSize, setMeasuredSize] = useState<{ w: number; h: number } | null>(null)
+  useEffect(() => {
+    if (!caps.enabled) return
+    const el = surfaceRef.current
+    if (!el) return
+    const measure = () => {
+      const rect = el.getBoundingClientRect()
+      const w = Math.max(0, Math.round(rect.width))
+      const h = Math.max(0, Math.round(rect.height))
+      // Only update when the rounded integer actually changes — avoids
+      // spurious re-renders from sub-pixel fluctuations and any feedback
+      // loop between the observer and React state.
+      setMeasuredSize((prev) => (prev && prev.w === w && prev.h === h ? prev : { w, h }))
+    }
+    measure() // capture the initial rendered size before the first observer tick
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [caps.enabled])
+
   const currentPos = posByDevice[device]
 
   // ---- The canonical local draft (always rendered through the sanitizer) ----
@@ -374,6 +409,17 @@ export function WidgetPlaygroundPanel({
   const panelPref = view.device === 'mobile' ? PANEL_PREFERRED.mobile : PANEL_PREFERRED.desktop
   const dims = launcherDims(view.shape)
 
+  // Effective geometry viewport = the ACTUAL rendered surface, clamped to
+  // the nominal design size (the CSS `width` never exceeds it) and floored
+  // at 0. Until the first ResizeObserver observation lands (or under SSR),
+  // fall back to the nominal design size. The `Math.min(measured, nominal)`
+  // clamp also protects against a stale reading from the previous device
+  // widening the viewport past the current design size, and the `Math.max`
+  // floor guarantees a finite, non-negative width even for a zero-size
+  // surface (no NaN, no negative panel width, no clipping).
+  const effectiveW = measuredSize ? Math.max(0, Math.min(measuredSize.w, surface.w)) : surface.w
+  const effectiveH = measuredSize ? Math.max(0, Math.min(measuredSize.h, surface.h)) : surface.h
+
   const greetingText =
     effectiveConfig?.greetingTexts?.[view.locale] ||
     (view.locale === 'fa' ? 'سلام! چطور می‌تونم کمکتون کنم؟' : 'Hi there! How can I help?')
@@ -384,7 +430,8 @@ export function WidgetPlaygroundPanel({
   // the palette itself stays selected (data-playground-palette).
   const accent = view.customAccent ?? tokens.accent
 
-  // Shared production geometry, bounded to the preview viewport. The Free
+  // Shared production geometry, bounded to the EFFECTIVE preview viewport
+  // (the real rendered size, not the nominal design size). The Free
   // branding strip is reserved like a safe-area inset so the launcher
   // never overlaps it.
   const safeAreaBottom = showBranding ? BRANDING_STRIP : 0
@@ -393,8 +440,8 @@ export function WidgetPlaygroundPanel({
     offsetX: view.offsetX,
     offsetY: view.offsetY,
     dir,
-    viewportWidth: surface.w,
-    viewportHeight: surface.h,
+    viewportWidth: effectiveW,
+    viewportHeight: effectiveH,
     launcherWidth: dims.w,
     launcherHeight: dims.h,
     safeAreaBottom,
@@ -403,16 +450,21 @@ export function WidgetPlaygroundPanel({
   const panelV = computePanelVerticalPosition({
     rootBottom: launcherPos.bottom,
     launcherHeight: dims.h,
-    viewportHeight: surface.h,
+    viewportHeight: effectiveH,
     panelGap: PANEL_GAP,
     panelPreferredHeight: panelPref.h,
     safeAreaBottom,
   })
+  // Preferred panel width clamped to the measured available width before
+  // invoking the horizontal helper — the helper clamps internally too, this
+  // is an explicit, defensive clamp so the preferred size can never exceed
+  // the real surface (keeps the panel inside the visible preview bounds).
+  const panelPreferredWidth = Math.min(panelPref.w, Math.max(0, effectiveW - VIEWPORT_MARGIN * 2))
   const panelHPos = computePanelHorizontalPosition({
     launcherLeft: launcherPos.left,
     launcherWidth: dims.w,
-    panelPreferredWidth: panelPref.w,
-    viewportWidth: surface.w,
+    panelPreferredWidth,
+    viewportWidth: effectiveW,
     panelSide: launcherPos.panelSide,
     viewportMargin: VIEWPORT_MARGIN,
   })
@@ -420,16 +472,16 @@ export function WidgetPlaygroundPanel({
 
   // Greeting teaser (chat closed): floats just above the launcher, aligned
   // to the launcher's side of the surface (physical left/right), clamped so
-  // the bubble always stays inside the preview viewport.
-  const onLeftHalf = launcherPos.left + dims.w / 2 < surface.w / 2
+  // the bubble always stays inside the effective preview viewport.
+  const onLeftHalf = launcherPos.left + dims.w / 2 < effectiveW / 2
   const teaserStyle: CSSProperties = {
     bottom: launcherPos.bottom + dims.h + 8,
     background: tokens.panelBg,
     color: tokens.panelText,
     boxShadow: '0 8px 24px rgba(0,0,0,0.12)',
     ...(onLeftHalf
-      ? { left: Math.max(8, Math.min(launcherPos.left, surface.w - 196)) }
-      : { right: Math.max(8, Math.min(surface.w - launcherPos.left - dims.w, surface.w - 196)) }),
+      ? { left: Math.max(8, Math.min(launcherPos.left, effectiveW - 196)) }
+      : { right: Math.max(8, Math.min(effectiveW - launcherPos.left - dims.w, effectiveW - 196)) }),
   }
 
   const selectClass =
@@ -675,6 +727,7 @@ export function WidgetPlaygroundPanel({
 
             {/* ---------------- Preview surface (bounded simulation) ---------------- */}
             <div
+              ref={surfaceRef}
               data-testid="playground-surface"
               data-playground-device={view.device}
               data-playground-palette={view.paletteId}

@@ -37,6 +37,7 @@ import {
   computeLauncherPosition,
   computePanelVerticalPosition,
   computePanelHorizontalPosition,
+  type PositioningAnchor,
 } from '../../src/lib/widget/positioning-geometry'
 import { LAUNCHER_SHAPES, FREE_LAUNCHER_SHAPES, PAID_ONLY_LAUNCHER_SHAPES } from '../../src/lib/widget/launcher-types'
 import {
@@ -425,6 +426,415 @@ describe('Developer — offset bounds and preview geometry', () => {
         expect(panelBottom + Math.min(pref.h, pv.maxHeight)).toBeLessThanOrEqual(surface.h + 1)
       }
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Responsive preview containment — the preview surface applies
+// `maxWidth: 100%`, so on a narrow dashboard the ACTUAL rendered width can
+// shrink below the nominal 640px desktop / 360px mobile design size. The
+// canonical geometry MUST run against the measured (effective) size or the
+// launcher / open chat panel are positioned for the nominal size and clipped
+// outside the visible preview (the reviewer's 320px-wide dashboard
+// regression). These tests mirror the component's effective-dimension
+// computation + the full launcher/panel geometry for a range of measured
+// widths (including the reported failing 216px surface) and verify the
+// launcher AND open chat panel stay within the real rendered bounds for
+// both devices, both directions, Free and Paid, and extreme legal offsets.
+// ---------------------------------------------------------------------------
+
+// Mirror the component's bounded simulation constants exactly.
+const R_SURFACE = { desktop: { w: 640, h: 460 }, mobile: { w: 360, h: 560 } }
+const R_PREF = { desktop: { w: 340, h: 360 }, mobile: { w: 300, h: 420 } }
+const R_BASE_MARGIN = 20
+const R_PANEL_GAP = 12
+const R_VIEWPORT_MARGIN = 20
+const R_BRANDING_STRIP = 22 // Free "Powered by Sukhan" safe-area inset
+
+// Mirror the component's effective-dimension derivation: clamp the measured
+// size to the nominal design maximum (the CSS `width` never exceeds it) and
+// floor at 0; fall back to the nominal size until the first observation.
+function effectiveSize(
+  measured: { w: number; h: number } | null,
+  nominal: { w: number; h: number },
+): { w: number; h: number } {
+  return measured
+    ? { w: Math.max(0, Math.min(measured.w, nominal.w)), h: Math.max(0, Math.min(measured.h, nominal.h)) }
+    : nominal
+}
+
+function launcherDimsFor(shape: 'tab' | 'rounded' | 'pill'): { w: number; h: number } {
+  if (shape === 'tab') return { w: 60, h: 52 }
+  if (shape === 'pill') return { w: 64, h: 48 }
+  return { w: 52, h: 52 }
+}
+
+// Compute the full preview geometry (launcher + panel) for a measured
+// surface, exactly as the component does — using the EFFECTIVE (measured,
+// clamped) dimensions as the geometry viewport.
+function computePreviewGeometry(opts: {
+  device: 'desktop' | 'mobile'
+  dir: 'rtl' | 'ltr'
+  anchor: PositioningAnchor
+  offsetX: number
+  offsetY: number
+  shape: 'tab' | 'rounded' | 'pill'
+  measured: { w: number; h: number } | null
+  safeAreaBottom: number
+}) {
+  const nominal = R_SURFACE[opts.device]
+  const pref = R_PREF[opts.device]
+  const dims = launcherDimsFor(opts.shape)
+  const eff = effectiveSize(opts.measured, nominal)
+  const lp = computeLauncherPosition({
+    anchor: opts.anchor,
+    offsetX: opts.offsetX,
+    offsetY: opts.offsetY,
+    dir: opts.dir,
+    viewportWidth: eff.w,
+    viewportHeight: eff.h,
+    launcherWidth: dims.w,
+    launcherHeight: dims.h,
+    safeAreaBottom: opts.safeAreaBottom,
+    baseMargin: R_BASE_MARGIN,
+  })
+  const pv = computePanelVerticalPosition({
+    rootBottom: lp.bottom,
+    launcherHeight: dims.h,
+    viewportHeight: eff.h,
+    panelGap: R_PANEL_GAP,
+    panelPreferredHeight: pref.h,
+    safeAreaBottom: opts.safeAreaBottom,
+  })
+  const panelPreferredWidth = Math.min(pref.w, Math.max(0, eff.w - R_VIEWPORT_MARGIN * 2))
+  const ph = computePanelHorizontalPosition({
+    launcherLeft: lp.left,
+    launcherWidth: dims.w,
+    panelPreferredWidth,
+    viewportWidth: eff.w,
+    panelSide: lp.panelSide,
+    viewportMargin: R_VIEWPORT_MARGIN,
+  })
+  const panelHeight = Math.min(pref.h, pv.maxHeight)
+  return {
+    effW: eff.w,
+    effH: eff.h,
+    dims,
+    launcherLeft: lp.left,
+    launcherBottom: lp.bottom,
+    panelLeftAbs: lp.left + ph.left, // absolute left within the surface
+    panelWidth: ph.width,
+    panelBottomAbs: lp.bottom + pv.bottom, // absolute bottom (CSS from-bottom) within the surface
+    panelHeight,
+  }
+}
+
+describe('Developer — responsive preview containment (measured surface)', () => {
+  test('the launcher stays inside the REAL rendered width below nominal desktop (640) for every anchor, dir and shape', () => {
+    // Measured widths smaller than the 640px desktop design size — including
+    // the reported failing 216px surface from a 320px-wide dashboard.
+    const measuredWidths = [600, 480, 360, 320, 280, 216, 200, 120]
+    for (const measured of measuredWidths) {
+      for (const dir of ['rtl', 'ltr'] as const) {
+        for (const anchor of POSITIONING_ANCHORS) {
+          for (const shape of ['tab', 'rounded', 'pill'] as const) {
+            const g = computePreviewGeometry({
+              device: 'desktop', dir, anchor, offsetX: 0, offsetY: 0, shape,
+              measured: { w: measured, h: 460 }, safeAreaBottom: 0,
+            })
+            expect(g.effW).toBe(measured)
+            expect(Number.isFinite(g.launcherLeft)).toBe(true)
+            expect(g.launcherLeft).toBeGreaterThanOrEqual(0)
+            expect(g.launcherLeft + g.dims.w).toBeLessThanOrEqual(g.effW)
+            expect(g.launcherBottom).toBeGreaterThanOrEqual(0)
+            expect(g.launcherBottom + g.dims.h).toBeLessThanOrEqual(g.effH)
+          }
+        }
+      }
+    }
+  })
+
+  test('the launcher stays inside the REAL rendered width below nominal mobile (360) for every anchor, dir and shape', () => {
+    const measuredWidths = [340, 300, 260, 216, 200, 120, 60]
+    for (const measured of measuredWidths) {
+      for (const dir of ['rtl', 'ltr'] as const) {
+        for (const anchor of POSITIONING_ANCHORS) {
+          for (const shape of ['tab', 'rounded', 'pill'] as const) {
+            const g = computePreviewGeometry({
+              device: 'mobile', dir, anchor, offsetX: 0, offsetY: 0, shape,
+              measured: { w: measured, h: 560 }, safeAreaBottom: R_BRANDING_STRIP,
+            })
+            expect(g.effW).toBe(measured)
+            expect(g.launcherLeft).toBeGreaterThanOrEqual(0)
+            // The launcher is clamped to [0, effW - launcherWidth]; when the
+            // surface is at least as wide as the launcher it fits fully,
+            // when narrower the geometry clamps left to 0 (documented
+            // "visible + tappable" fallback) — never NaN/negative.
+            expect(g.launcherLeft).toBeLessThanOrEqual(Math.max(0, g.effW - g.dims.w))
+            if (g.effW >= g.dims.w) {
+              expect(g.launcherLeft + g.dims.w).toBeLessThanOrEqual(g.effW)
+            }
+            expect(g.launcherBottom).toBeGreaterThanOrEqual(R_BRANDING_STRIP)
+            expect(g.launcherBottom + g.dims.h).toBeLessThanOrEqual(g.effH)
+          }
+        }
+      }
+    }
+  })
+
+  test('the open chat panel stays inside the REAL rendered width below nominal desktop (640)', () => {
+    const measuredWidths = [600, 480, 360, 320, 280, 216, 200, 120]
+    for (const measured of measuredWidths) {
+      for (const dir of ['rtl', 'ltr'] as const) {
+        for (const anchor of POSITIONING_ANCHORS) {
+          const g = computePreviewGeometry({
+            device: 'desktop', dir, anchor, offsetX: 0, offsetY: 0, shape: 'tab',
+            measured: { w: measured, h: 460 }, safeAreaBottom: 0,
+          })
+          // Panel width is finite, non-negative and never wider than the surface.
+          expect(Number.isFinite(g.panelWidth)).toBe(true)
+          expect(g.panelWidth).toBeGreaterThanOrEqual(0)
+          expect(g.panelWidth).toBeLessThanOrEqual(g.effW)
+          // Panel horizontal bounds stay within the visible preview.
+          expect(g.panelLeftAbs).toBeGreaterThanOrEqual(0)
+          expect(g.panelLeftAbs + g.panelWidth).toBeLessThanOrEqual(g.effW)
+          // Panel vertical bounds stay within the visible preview (may open
+          // below the launcher but never below the surface).
+          expect(g.panelBottomAbs).toBeGreaterThanOrEqual(-1)
+          expect(g.panelBottomAbs + g.panelHeight).toBeLessThanOrEqual(g.effH + 1)
+        }
+      }
+    }
+  })
+
+  test('the open chat panel stays inside the REAL rendered width below nominal mobile (360)', () => {
+    const measuredWidths = [340, 300, 260, 216, 200, 120, 60]
+    for (const measured of measuredWidths) {
+      for (const dir of ['rtl', 'ltr'] as const) {
+        for (const anchor of POSITIONING_ANCHORS) {
+          const g = computePreviewGeometry({
+            device: 'mobile', dir, anchor, offsetX: 0, offsetY: 0, shape: 'tab',
+            measured: { w: measured, h: 560 }, safeAreaBottom: R_BRANDING_STRIP,
+          })
+          expect(Number.isFinite(g.panelWidth)).toBe(true)
+          expect(g.panelWidth).toBeGreaterThanOrEqual(0)
+          expect(g.panelWidth).toBeLessThanOrEqual(g.effW)
+          expect(g.panelLeftAbs).toBeGreaterThanOrEqual(0)
+          expect(g.panelLeftAbs + g.panelWidth).toBeLessThanOrEqual(g.effW)
+          expect(g.panelBottomAbs).toBeGreaterThanOrEqual(-1)
+          expect(g.panelBottomAbs + g.panelHeight).toBeLessThanOrEqual(g.effH + 1)
+        }
+      }
+    }
+  })
+
+  test('the reported failing 216px desktop surface no longer clips the open chat panel (Free + Paid, both dirs)', () => {
+    // This is the exact reviewer regression: at a 320px-wide dashboard the
+    // desktop preview surface renders ~216px wide. Before the fix the panel
+    // was positioned for 640px and its right edge landed at 402px (max
+    // allowed 216px). With the effective-width geometry the panel is clamped
+    // inside the real 216px surface.
+    for (const dir of ['rtl', 'ltr'] as const) {
+      for (const anchor of POSITIONING_ANCHORS) {
+        // Free (branding strip reserved) and Paid (no branding) both contained.
+        for (const safeArea of [R_BRANDING_STRIP, 0]) {
+          const g = computePreviewGeometry({
+            device: 'desktop', dir, anchor, offsetX: 0, offsetY: 0, shape: 'tab',
+            measured: { w: 216, h: 460 }, safeAreaBottom: safeArea,
+          })
+          expect(g.effW).toBe(216)
+          expect(g.panelWidth).toBeLessThanOrEqual(216 - R_VIEWPORT_MARGIN * 2)
+          expect(g.panelLeftAbs).toBeGreaterThanOrEqual(0)
+          expect(g.panelLeftAbs + g.panelWidth).toBeLessThanOrEqual(216)
+          expect(g.launcherLeft).toBeGreaterThanOrEqual(0)
+          expect(g.launcherLeft + g.dims.w).toBeLessThanOrEqual(216)
+        }
+      }
+    }
+  })
+
+  test('launcher and open chat stay contained under EXTREME legal precise offsets on a narrowed surface (Paid, both devices, both dirs)', () => {
+    // Paid plans can set offsets up to ±2000. Even on a 216px desktop / 200px
+    // mobile surface, the geometry clamps both the launcher and the panel
+    // inside the real rendered bounds.
+    const cases = [
+      { device: 'desktop' as const, measured: { w: 216, h: 460 }, safeArea: 0 },
+      { device: 'mobile' as const, measured: { w: 200, h: 560 }, safeArea: R_BRANDING_STRIP },
+    ]
+    for (const c of cases) {
+      for (const dir of ['rtl', 'ltr'] as const) {
+        for (const anchor of POSITIONING_ANCHORS) {
+          for (const [ox, oy] of [
+            [OFFSET_MAX, OFFSET_MAX], [OFFSET_MIN, OFFSET_MIN],
+            [OFFSET_MAX, OFFSET_MIN], [OFFSET_MIN, OFFSET_MAX],
+            [0, 0],
+          ]) {
+            const g = computePreviewGeometry({
+              device: c.device, dir, anchor, offsetX: ox, offsetY: oy, shape: 'pill',
+              measured: c.measured, safeAreaBottom: c.safeArea,
+            })
+            expect(g.launcherLeft).toBeGreaterThanOrEqual(0)
+            expect(g.launcherLeft + g.dims.w).toBeLessThanOrEqual(g.effW)
+            expect(g.launcherBottom).toBeGreaterThanOrEqual(c.safeArea)
+            expect(g.launcherBottom + g.dims.h).toBeLessThanOrEqual(g.effH)
+            expect(g.panelLeftAbs).toBeGreaterThanOrEqual(0)
+            expect(g.panelLeftAbs + g.panelWidth).toBeLessThanOrEqual(g.effW)
+            expect(g.panelWidth).toBeGreaterThanOrEqual(0)
+            expect(g.panelBottomAbs).toBeGreaterThanOrEqual(-1)
+            expect(g.panelBottomAbs + g.panelHeight).toBeLessThanOrEqual(g.effH + 1)
+          }
+        }
+      }
+    }
+  })
+
+  test('a 320px-viewport resize after initial dashboard mount keeps both devices contained (nominal → narrowed)', () => {
+    // Simulate the reviewer flow: the Playground mounts at a wide viewport
+    // (measured = null → nominal 640/360), then the dashboard shrinks to
+    // 320px and the surface re-measures to ~216px. Both the pre-resize
+    // (nominal) and post-resize (narrowed) states must contain the launcher
+    // and the open chat panel.
+    for (const device of ['desktop', 'mobile'] as const) {
+      const nominal = R_SURFACE[device]
+      const narrowed = device === 'desktop' ? { w: 216, h: 460 } : { w: 216, h: 560 }
+      for (const measured of [null, narrowed] as ({ w: number; h: number } | null)[]) {
+        for (const dir of ['rtl', 'ltr'] as const) {
+          for (const anchor of POSITIONING_ANCHORS) {
+            const g = computePreviewGeometry({
+              device, dir, anchor, offsetX: 0, offsetY: 0, shape: 'tab',
+              measured, safeAreaBottom: device === 'mobile' ? R_BRANDING_STRIP : 0,
+            })
+            const expectedW = measured ? Math.max(0, Math.min(measured.w, nominal.w)) : nominal.w
+            expect(g.effW).toBe(expectedW)
+            expect(g.launcherLeft).toBeGreaterThanOrEqual(0)
+            expect(g.launcherLeft + g.dims.w).toBeLessThanOrEqual(g.effW)
+            expect(g.panelLeftAbs).toBeGreaterThanOrEqual(0)
+            expect(g.panelLeftAbs + g.panelWidth).toBeLessThanOrEqual(g.effW)
+          }
+        }
+      }
+    }
+  })
+
+  test('very narrow / zero-width surfaces never produce NaN or negative panel width', () => {
+    // As the surface collapses toward zero width, the effective-dimension
+    // floor (Math.max(0, …)) guarantees a finite non-negative viewport and
+    // the panel width clamps to 0 (never negative, never NaN). Full
+    // containment is asserted whenever the surface is wide enough for the
+    // element in question; below that the geometry clamps gracefully
+    // (documented "visible + tappable" fallback for the launcher, and a
+    // zero-width panel that clips no visible content).
+    for (const w of [120, 80, 60, 40, 20, 10, 1, 0]) {
+      for (const device of ['desktop', 'mobile'] as const) {
+        const nominal = R_SURFACE[device]
+        const g = computePreviewGeometry({
+          device, dir: 'ltr', anchor: 'bottom-end', offsetX: 0, offsetY: 0, shape: 'tab',
+          measured: { w, h: nominal.h }, safeAreaBottom: 0,
+        })
+        // Core guarantees at every width (including degenerate / zero):
+        expect(Number.isFinite(g.effW)).toBe(true)
+        expect(g.effW).toBeGreaterThanOrEqual(0)
+        expect(Number.isFinite(g.launcherLeft)).toBe(true)
+        expect(g.launcherLeft).toBeGreaterThanOrEqual(0) // never negative
+        expect(Number.isFinite(g.panelWidth)).toBe(true)
+        expect(g.panelWidth).toBeGreaterThanOrEqual(0) // never negative
+        expect(g.panelWidth).toBeLessThanOrEqual(g.effW) // never wider than the surface
+        // Launcher fits fully when the surface is at least as wide as it.
+        if (g.effW >= g.dims.w) {
+          expect(g.launcherLeft + g.dims.w).toBeLessThanOrEqual(g.effW)
+        }
+        // Panel fits fully when the surface is wide enough for the margin
+        // pair; below that the panel width collapses to 0 (invisible, no
+        // visible content is clipped).
+        if (g.effW >= R_VIEWPORT_MARGIN * 2) {
+          expect(g.panelLeftAbs).toBeGreaterThanOrEqual(0)
+          expect(g.panelLeftAbs + g.panelWidth).toBeLessThanOrEqual(g.effW)
+        } else {
+          expect(g.panelWidth).toBe(0)
+        }
+      }
+    }
+  })
+
+  test('a stale measured reading from the previous device can never widen the viewport past the nominal design size', () => {
+    // When the user switches desktop → mobile, the measured size briefly
+    // holds the old desktop reading (e.g. 216) while the nominal switches to
+    // 360. The Math.min(measured, nominal) clamp keeps the effective width
+    // ≤ the current device's nominal design size — never wider.
+    const g = computePreviewGeometry({
+      device: 'mobile', dir: 'rtl', anchor: 'bottom-start', offsetX: 0, offsetY: 0, shape: 'tab',
+      measured: { w: 600, h: 460 }, // stale desktop-era reading, wider than mobile nominal (360)
+      safeAreaBottom: R_BRANDING_STRIP,
+    })
+    expect(g.effW).toBeLessThanOrEqual(R_SURFACE.mobile.w)
+    expect(g.effW).toBe(R_SURFACE.mobile.w) // min(600, 360) = 360
+    expect(g.launcherLeft + g.dims.w).toBeLessThanOrEqual(g.effW)
+    expect(g.panelLeftAbs + g.panelWidth).toBeLessThanOrEqual(g.effW)
+  })
+})
+
+describe('Developer — responsive containment source wiring + lifecycle', () => {
+  const playgroundSrc = readFileSync(join(process.cwd(), 'src/components/dashboard/views/widget-playground.tsx'), 'utf8')
+  // Strip comments so NEGATIVE assertions inspect CODE, not prose.
+  const code = (src: string): string =>
+    src
+      .replace(/\/[\u002A][\s\S]*?[\u002A]\//g, '')
+      .replace(/^\s*\/\/[^\n]*$/gm, '')
+  const playgroundCode = code(playgroundSrc)
+
+  test('the component measures the real rendered surface with a ResizeObserver on a ref', () => {
+    expect(playgroundCode).toContain('useRef<HTMLDivElement>(null)')
+    expect(playgroundCode).toContain('new ResizeObserver(')
+    expect(playgroundCode).toContain('ro.observe(el)')
+    expect(playgroundCode).toContain('ref={surfaceRef}')
+  })
+
+  test('the ResizeObserver is disconnected on cleanup (no leak across unmount / device switches)', () => {
+    expect(playgroundCode).toContain('return () => ro.disconnect()')
+    // The observer is guarded so it only attaches when the surface exists.
+    expect(playgroundCode).toContain('if (!el) return')
+  })
+
+  test('the measured size is clamped to the nominal design maximum and floored at 0 (no NaN / negative width)', () => {
+    expect(playgroundCode).toContain('Math.max(0, Math.min(measuredSize.w, surface.w))')
+    expect(playgroundCode).toContain('Math.max(0, Math.min(measuredSize.h, surface.h))')
+  })
+
+  test('the canonical geometry runs against the EFFECTIVE (measured) dimensions, not the nominal size', () => {
+    // The launcher + panel geometry calls must pass effectiveW/effectiveH,
+    // never surface.w/surface.h directly.
+    expect(playgroundCode).toContain('viewportWidth: effectiveW')
+    expect(playgroundCode).toContain('viewportHeight: effectiveH')
+    // The geometry calls must NOT use the nominal surface size directly.
+    expect(playgroundCode).not.toMatch(/viewportWidth:\s*surface\.w/)
+    expect(playgroundCode).not.toMatch(/viewportHeight:\s*surface\.h/)
+  })
+
+  test('the preferred panel width is clamped to the measured available width before the horizontal helper', () => {
+    expect(playgroundCode).toContain(
+      'Math.min(panelPref.w, Math.max(0, effectiveW - VIEWPORT_MARGIN * 2))',
+    )
+  })
+
+  test('the measured size only updates when the rounded integer actually changes (no feedback loop)', () => {
+    expect(playgroundCode).toMatch(/setMeasuredSize\(\(prev\)\s*=>/)
+    expect(playgroundCode).toMatch(/prev\.w\s*===\s*w\s*&&\s*prev\.h\s*===\s*h/)
+  })
+
+  test('the responsive containment addition stays local-only — no new network, storage or unsafe rendering', () => {
+    // The ResizeObserver path introduces NO network calls, NO browser
+    // storage and NO innerHTML/dangerouslySetInnerHTML.
+    expect(playgroundCode).not.toContain('fetch(')
+    expect(playgroundCode).not.toContain('XMLHttpRequest')
+    expect(playgroundCode).not.toContain('/api/')
+    expect(playgroundCode).not.toContain('localStorage')
+    expect(playgroundCode).not.toContain('sessionStorage')
+    expect(playgroundCode).not.toContain('document.cookie')
+    expect(playgroundCode).not.toContain('innerHTML')
+    expect(playgroundCode).not.toContain('dangerouslySetInnerHTML')
+    // No global resize listener either — the ResizeObserver is the sole
+    // resize signal (cleaner, scoped to the surface element).
+    expect(playgroundCode).not.toMatch(/window\.addEventListener\(\s*['"]resize/)
   })
 })
 
