@@ -484,6 +484,36 @@ async function tryAiResponse(
     })
 
     if (faqPairs.length > 0) {
+      // === AI-Q1: exact-match fast path (deterministic, no LLM) ===
+      // A minimal-whitespace-normalized exact match against an EXISTING
+      // enabled FAQ belonging to this tenant returns the owner-authored
+      // answer directly — no external LLM call, no probabilistic skip.
+      // This guarantees a real positive FAQ end-to-end: the visitor's
+      // exact question produces a persisted AI Message (senderType 'ai',
+      // source 'faq') with the owner-authored text.
+      //
+      // Guards preserved:
+      // - Only when FAQ AI is enabled (this block).
+      // - Only after the plan cap check above (Free aiActions: 0 → cap
+      //   hit → returned null before reaching here).
+      // - Only for an actual stored, enabled FAQ of this tenant (the
+      //   fail-closed Prisma extension scopes findMany to tenantId).
+      // - No bypass of visitor authorization, domain restrictions, rate
+      //   limits or pre-chat form checks (all enforced before the AI
+      //   block in the POST handler).
+      // - No new public API (this is inside the existing POST handler).
+      // - No duplicate response (the fast path returns before the LLM
+      //   path runs).
+      // - The semantic classification path below is preserved for
+      //   non-exact questions.
+      const norm = (s: string) => s.trim().replace(/\s+/g, ' ')
+      const normalizedVisitor = norm(visitorMessage)
+      const exact = faqPairs.find(f => norm(f.question) === normalizedVisitor)
+      if (exact) {
+        return { text: exact.answer, source: 'faq' }
+      }
+
+      // Semantic classification (LLM-based) for non-exact questions.
       const match = await matchFaq(visitorMessage, faqPairs)
       if (match.matched && match.answer) {
         return { text: match.answer, source: 'faq' }

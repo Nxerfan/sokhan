@@ -11,6 +11,37 @@
  *    catalog, generate a grounded answer (RAG-style).
  *
  * Both features respect the tenant's AI usage cap (checked before calling).
+ *
+ * ## AI-Q1 — Injectable deterministic provider contract
+ *
+ * `matchFaq` and `answerProductQuestion` accept an OPTIONAL server-side
+ * `provider` parameter for deterministic Unit testing. The injected provider
+ * supports an async `complete(prompt)` method returning the completion text.
+ *
+ * IMPORTANT — this is an INTERNAL SERVER-SIDE TESTING SEAM only:
+ * - It is never exported through any visitor / public API.
+ * - It does not enable a public HTTP endpoint for arbitrary LLM responses.
+ * - No production environment flag lets visitors supply fake responses.
+ * - Production calls (no provider) continue using the existing backend-only
+ *   `z-ai-web-dev-sdk` behavior.
+ *
+ * The injected provider never calls the real network or a public test
+ * endpoint — it is a pure in-process function. This lets the reviewer and
+ * developer Unit tests exercise deterministic positive AND negative FAQ /
+ * Product-Q&A paths without a live LLM.
+ *
+ * ## Safety guarantees (unchanged for production)
+ * - Provider responses are parsed safely (JSON.parse wrapped in try/catch).
+ * - Returned FAQ IDs are checked against the supplied FAQ list — an invented
+ *   ID never produces an answer.
+ * - The REAL stored FAQ answer is always returned, never a provider-invented
+ *   answer.
+ * - Invalid / empty / failed completions are safe negatives (no positive
+ *   answer, no throw).
+ * - Provider initialization failures (getZAI) AND generation failures are
+ *   both caught.
+ * - An unavailable provider never breaks the visitor's already-persisted
+ *   message (the caller catches and continues).
  */
 
 import ZAI from 'z-ai-web-dev-sdk'
@@ -24,11 +55,38 @@ async function getZAI() {
   return zaiInstance
 }
 
+/**
+ * Injectable deterministic AI provider — an INTERNAL SERVER-SIDE testing
+ * seam. Never exported through visitor / public APIs.
+ *
+ * `complete(prompt)` returns the completion text (a string). For FAQ
+ * matching the expected shape is a JSON object; for Product Q&A it is the
+ * raw answer text.
+ */
+export interface AiProvider {
+  complete(prompt: string): Promise<string>
+}
+
 export interface FaqMatchResult {
   matched: boolean
   faqPairId: string | null
   answer: string | null
   confidence: number // 0-1
+}
+
+/** Clamp a confidence-like number to [0, 1]; non-numbers → 0. */
+function clamp01(v: unknown): number {
+  return typeof v === 'number' && Number.isFinite(v)
+    ? Math.min(1, Math.max(0, v))
+    : 0
+}
+
+/** Strip ```json fences from a model response (best-effort). */
+function stripFences(text: string): string {
+  return text
+    .replace(/```json\n?/g, '')
+    .replace(/```\n?/g, '')
+    .trim()
 }
 
 /**
@@ -44,16 +102,20 @@ export interface FaqMatchResult {
  *
  * For >500 FAQ pairs, we'd switch to a two-stage approach (embedding retrieval
  * → LLM classification of top-K candidates), but that's out of scope for MVP.
+ *
+ * If `provider` is supplied (server-side test seam), it is used instead of
+ * the real SDK. The provider's returned FAQ ID is validated against the
+ * supplied list — an invented ID never produces an answer. The REAL stored
+ * FAQ answer is always returned, never a provider-invented answer.
  */
 export async function matchFaq(
   visitorMessage: string,
   faqPairs: Array<{ id: string; question: string; answer: string }>,
+  provider?: AiProvider,
 ): Promise<FaqMatchResult> {
   if (faqPairs.length === 0) {
     return { matched: false, faqPairId: null, answer: null, confidence: 0 }
   }
-
-  const zai = await getZAI()
 
   const faqList = faqPairs.map((p, i) => `${i + 1}. [ID:${p.id}] ${p.question}`).join('\n')
 
@@ -73,32 +135,45 @@ Rules:
 - If the visitor is asking about something not in the FAQ, return matched: false
 - Confidence should reflect how certain you are (0.0 to 1.0)`
 
+  // Both provider initialization AND generation failures are caught here.
+  // getZAI() is inside the try so a SDK init failure is a safe negative.
   try {
-    const response = await zai.chat.completions.create({
-      messages: [
-        { role: 'system', content: 'You are a FAQ matching assistant. Respond only with JSON.' },
-        { role: 'user', content: prompt },
-      ],
-      temperature: 0.1,
-    })
+    let text: string
+    if (provider) {
+      text = (await provider.complete(prompt)) ?? ''
+    } else {
+      const zai = await getZAI()
+      const response = await zai.chat.completions.create({
+        messages: [
+          { role: 'system', content: 'You are a FAQ matching assistant. Respond only with JSON.' },
+          { role: 'user', content: prompt },
+        ],
+        temperature: 0.1,
+      })
+      text = response.choices[0]?.message?.content?.trim() ?? ''
+    }
 
-    const text = response.choices[0]?.message?.content?.trim() || ''
-    const jsonStr = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
+    const jsonStr = stripFences(text)
     const parsed = JSON.parse(jsonStr)
 
     if (parsed.matched && parsed.id) {
+      // Validate the returned ID actually belongs to the supplied FAQ list.
+      // An invented / cross-tenant ID never produces an answer.
       const faq = faqPairs.find(f => f.id === parsed.id)
       if (faq) {
         return {
           matched: true,
           faqPairId: faq.id,
+          // ALWAYS the REAL stored answer — never a provider-invented answer.
           answer: faq.answer,
-          confidence: Math.min(1, Math.max(0, parsed.confidence || 0.7)),
+          confidence: clamp01(parsed.confidence ?? 0.7),
         }
       }
     }
 
-    return { matched: false, faqPairId: null, answer: null, confidence: parsed.confidence || 0 }
+    // matched was false, or the ID was invented / not found.
+    // Preserve the provider's confidence (clamped) but never produce an answer.
+    return { matched: false, faqPairId: null, answer: null, confidence: clamp01(parsed.confidence) }
   } catch (e) {
     console.error('[ai:matchFaq] error:', e instanceof Error ? e.message : e)
     return { matched: false, faqPairId: null, answer: null, confidence: 0 }
@@ -118,17 +193,24 @@ export interface ProductQaResult {
  * in the product name/description), then generate a grounded answer using
  * the LLM. The LLM is instructed to only use the provided product data —
  * no hallucination.
+ *
+ * If `provider` is supplied (server-side test seam), it is used instead of
+ * the real SDK. Only the products retrieved by the deterministic keyword
+ * gate are eligible — the provider cannot introduce products that were not
+ * retrieved from the supplied list. An empty / blank / failed completion is
+ * a safe negative (no positive answer, no throw).
  */
 export async function answerProductQuestion(
   visitorMessage: string,
   products: Array<{ id: string; name: string; description: string; price: number; availability: string }>,
+  provider?: AiProvider,
 ): Promise<ProductQaResult> {
   if (products.length === 0) {
     return { answered: false, answer: null, productIds: [] }
   }
 
-  const zai = await getZAI()
-
+  // Deterministic keyword retrieval gate — runs BEFORE any model call.
+  // If no product matches, the model is NOT called (no hallucination path).
   const messageWords = visitorMessage.toLowerCase().split(/\s+/).filter(w => w.length > 2)
   const relevant = products.filter(p => {
     const text = (p.name + ' ' + p.description).toLowerCase()
@@ -157,16 +239,24 @@ Rules:
 - Be concise and helpful
 - Include the price in Toman if relevant`
 
+  // Both provider initialization AND generation failures are caught here.
   try {
-    const response = await zai.chat.completions.create({
-      messages: [
-        { role: 'system', content: 'You are a helpful product assistant. Answer using only the provided product data.' },
-        { role: 'user', content: prompt },
-      ],
-      temperature: 0.3,
-    })
+    let answer: string
+    if (provider) {
+      answer = ((await provider.complete(prompt)) ?? '').trim()
+    } else {
+      const zai = await getZAI()
+      const response = await zai.chat.completions.create({
+        messages: [
+          { role: 'system', content: 'You are a helpful product assistant. Answer using only the provided product data.' },
+          { role: 'user', content: prompt },
+        ],
+        temperature: 0.3,
+      })
+      answer = response.choices[0]?.message?.content?.trim() ?? ''
+    }
 
-    const answer = response.choices[0]?.message?.content?.trim() || ''
+    // Blank / whitespace-only answers do not count as a positive response.
     if (!answer) {
       return { answered: false, answer: null, productIds: [] }
     }
