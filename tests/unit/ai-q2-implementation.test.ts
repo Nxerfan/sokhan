@@ -258,6 +258,85 @@ describe('Developer — usage service source wiring', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Corrected defect source inspection (reviewer AI-Q2 corrections)
+// ---------------------------------------------------------------------------
+
+describe('Developer — corrected AI-Q2 defects (source inspection)', () => {
+  const svcSrc = readFileSync(join(process.cwd(), 'src/lib/ai/usage-service.ts'), 'utf8')
+  const code = (src: string): string =>
+    src
+      .replace(/\/[\u002A][\s\S]*?[\u002A]\//g, '')
+      .replace(/^\s*\/\/[^\n]*$/gm, '')
+  const svcCode = code(svcSrc)
+
+  test('Defect A: released reservation is reactivated, not re-inserted', () => {
+    // When an existing reservation is 'released', it must be conditionally
+    // updated back to 'reserved' — NOT re-inserted (which would hit the
+    // unique constraint and return in_progress).
+    expect(svcCode).toContain("status: 'released'")
+    expect(svcCode).toContain('updateMany')
+    expect(svcCode).toContain("status: 'released'")
+    expect(svcCode).toContain("status: 'reserved'")
+  })
+
+  test('Defect A: reactivation is inside the same transaction as the capacity increment', () => {
+    // The capacity increment and the reservation create/reactivate must be
+    // ONE transaction (crash consistency).
+    const reserveBlock = svcCode.split('export async function reserveAiReply')[1] ?? ''
+    expect(reserveBlock).toContain('$transaction')
+    expect(reserveBlock).toContain('$queryRaw')
+    expect(reserveBlock).toContain('UPDATE')
+  })
+
+  test('Defect B+C: visitor message ownership is verified before reserving', () => {
+    expect(svcCode).toContain('verifyMessageOwnership')
+    expect(svcCode).toContain('senderType')
+    expect(svcCode).toContain("'contact'")
+    expect(svcCode).toMatch(/msg\.tenantId !== tenantId/)
+  })
+
+  test('Defect B+C: conversation ownership is verified', () => {
+    expect(svcCode).toMatch(/conversation\.findUnique/)
+    expect(svcCode).toMatch(/conv\.tenantId !== tenantId/)
+  })
+
+  test('Defect D: commit checks expiresAt inside the settlement transaction', () => {
+    const commitBlock = svcCode.split('export async function commitAiReply')[1] ?? ''
+    expect(commitBlock).toContain('expiresAt')
+    expect(commitBlock).toMatch(/expiresAt.*gt.*now/)
+  })
+
+  test('Defect D: expired lease returns not_found (no message, no charge)', () => {
+    const commitBlock = svcCode.split('export async function commitAiReply')[1] ?? ''
+    expect(commitBlock).toContain('RESERVATION_NOT_SETTLABLE')
+    expect(commitBlock).toContain('not_found')
+  })
+
+  test('crash consistency: release is atomic (status + counter in one transaction)', () => {
+    const releaseBlock = svcCode.split('export async function releaseAiReply')[1] ?? ''
+    expect(releaseBlock).toContain('$transaction')
+    expect(releaseBlock).toContain('status: \'released\'')
+    expect(releaseBlock).toContain('reserved: { decrement: 1 }')
+  })
+
+  test('crash consistency: stale recovery is atomic', () => {
+    const staleBlock = svcCode.split('async function releaseStaleReservations')[1] ?? ''
+    expect(staleBlock).toContain('$transaction')
+  })
+
+  test('content validation: blank text is rejected at commit', () => {
+    const commitBlock = svcCode.split('export async function commitAiReply')[1] ?? ''
+    expect(commitBlock).toMatch(/!text.*trim|text.*trim.*!/)
+  })
+
+  test('content validation: invalid source is rejected', () => {
+    expect(svcCode).toContain('VALID_SOURCES')
+    expect(svcCode).toContain("'faq'")
+    expect(svcCode).toContain("'product'")
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Source inspection — widget messages route (reserve/commit/release)
 // ---------------------------------------------------------------------------
 

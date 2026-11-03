@@ -107,11 +107,17 @@ async function countUsage(tenantId: string, limit: LimitKind): Promise<number> {
         return db.department.count({})
       }
       case 'aiActions': {
-        const now = new Date()
-        const startOfMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
-        return db.message.count({
-          where: { senderType: 'ai', createdAt: { gte: startOfMonth } },
-        })
+        // AI-Q2: use the authoritative usage service (getAiUsageState) which
+        // honors active subscription periods, reserved slots, and historical
+        // backfill — NOT a stale calendar-month Message.count.
+        const { getAiUsageState } = await import('@/lib/ai/usage-service')
+        const state = await getAiUsageState(tenantId)
+        // `used` represents the authoritative committed reply count in the
+        // effective billing period. The shared gate checks used + reserved
+        // < limit via getAiRemaining in the usage state, but checkPlanLimit
+        // uses `current < limitValue`. To honor reserved slots, we report
+        // `used + reserved` as the current count.
+        return state.used + state.reserved
       }
       case 'weeklyMessages': {
         // Messages sent by visitors in the last 7 days (rolling window)
