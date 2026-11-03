@@ -507,11 +507,11 @@ export function WidgetPlaygroundPanel({
         </CardTitle>
         <CardDescription>{t('playground.hint')}</CardDescription>
       </CardHeader>
-      <CardContent className="space-y-4">
+      <CardContent className="flex flex-col gap-4">
         {/* Non-live disclosure — the playground is a local simulation. */}
         <div
           data-testid="playground-not-live"
-          className="flex items-start gap-2 rounded-lg border border-amber-600/30 bg-amber-500/5 p-3"
+          className="order-first sm:order-none flex items-start gap-2 rounded-lg border border-amber-600/30 bg-amber-500/5 p-3"
         >
           <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" aria-hidden="true" />
           <p className="text-xs leading-relaxed text-muted-foreground">{t('playground.notLive')}</p>
@@ -727,18 +727,20 @@ export function WidgetPlaygroundPanel({
 
             {/* ---------------- Preview surface (bounded simulation) ---------------- */}
             {/* On a narrow dashboard the controls stack above the surface and can
-                push it below the fold — then the launcher is off-screen and a
-                Playwright click auto-scrolls it into view BETWEEN the surface
-                bounding-box measurement and the open-chat measurement, so the
-                two rects are compared at different scroll states (the very
-                stale-position mismatch the reviewer regression catches).
-                `sticky bottom-0` (narrow only) keeps the surface pinned to the
-                bottom of the scroll container's visible area so the launcher
-                is always on-screen before it is clicked — no auto-scroll, the
+                push it below the fold (surface at ~y=1377 in a 740px viewport).
+                Then the launcher is off-screen and a Playwright click auto-scrolls
+                it into view BETWEEN the surface bounding-box measurement and the
+                open-chat measurement — the two rects are compared at different
+                scroll states and the vertical containment assertion fails against
+                a stale surface position. `order-first sm:order-none` (CSS only,
+                no JS scroll) reorders the surface to the TOP of the card (right
+                after the non-live disclosure) at narrow widths so the launcher is
+                already on-screen before it is clicked — no auto-scroll, the
                 surface and chat are measured at the same scroll state. The
-                `max-h` cap keeps the pinned surface short enough that the
-                device selector above it stays visible too. At ≥sm the surface
-                reverts to `relative` (normal flow, full design height). */}
+                `max-h-[300px]` cap keeps the reordered surface short enough that
+                the device selector below it stays visible too. At ≥sm the surface
+                reverts to its normal DOM order (after the controls) with no
+                max-height (full 460/560 design height). */}
             <div
               ref={surfaceRef}
               data-testid="playground-surface"
@@ -746,7 +748,7 @@ export function WidgetPlaygroundPanel({
               data-playground-palette={view.paletteId}
               data-playground-custom-accent={view.customAccent ?? undefined}
               dir={dir}
-              className="sticky bottom-0 z-10 mx-auto overflow-hidden rounded-xl border border-border bg-neutral-100 max-h-[300px] sm:max-h-none sm:relative"
+              className="relative order-first sm:order-none mx-auto overflow-hidden rounded-xl border border-border bg-neutral-100 max-h-[300px] sm:max-h-none"
               style={{ width: surface.w, height: surface.h, maxWidth: '100%' }}
             >
               {/* Simulated browser chrome (decoration only) */}

@@ -837,25 +837,28 @@ describe('Developer — responsive containment source wiring + lifecycle', () =>
     expect(playgroundCode).not.toMatch(/window\.addEventListener\(\s*['"]resize/)
   })
 
-  test('the surface is sticky-bottom at narrow widths so the launcher stays on-screen (no auto-scroll between measurements)', () => {
+  test('the surface is reordered to the top at narrow widths so the launcher stays on-screen (no auto-scroll between measurements)', () => {
     // On a narrow dashboard the controls stack above the surface and can push
-    // it below the fold. If the launcher is off-screen, a Playwright click
-    // auto-scrolls it into view BETWEEN the surface bounding-box measurement
-    // and the open-chat measurement — the two rects are then compared at
-    // different scroll states and the vertical containment assertion fails
-    // against a stale surface position. `sticky bottom-0` (narrow only)
-    // pins the surface to the bottom of the scroll container's visible area
-    // so the launcher is always on-screen before it is clicked: no
-    // auto-scroll, the surface and chat are measured at the same scroll
-    // state. A `max-h` cap keeps the pinned surface short enough that the
-    // device selector above it stays visible too.
-    expect(playgroundCode).toContain('sticky bottom-0')
+    // it below the fold (surface at ~y=1377 in a 740px viewport). If the
+    // launcher is off-screen, a Playwright click auto-scrolls it into view
+    // BETWEEN the surface bounding-box measurement and the open-chat
+    // measurement — the two rects are then compared at different scroll
+    // states and the vertical containment assertion fails against a stale
+    // surface position. `order-first sm:order-none` (pure CSS, no JS scroll)
+    // reorders the surface to the TOP of the card (right after the non-live
+    // disclosure) at narrow widths so the launcher is already on-screen
+    // before it is clicked — no auto-scroll, the surface and chat are
+    // measured at the same scroll state. The `max-h-[300px]` cap keeps the
+    // reordered surface short enough that the device selector below it
+    // stays visible too. At ≥sm the surface reverts to its normal DOM order
+    // (after the controls) with no max-height (full design height).
+    expect(playgroundCode).toContain('order-first sm:order-none')
     expect(playgroundCode).toContain('max-h-[300px]')
-    // At ≥sm the surface reverts to the normal flow (relative, full height).
     expect(playgroundCode).toContain('sm:max-h-none')
-    expect(playgroundCode).toContain('sm:relative')
-    // No scrollIntoView / programmatic scroll — the sticky CSS is the sole
-    // mechanism (no timing side effects on the measured width).
+    // The card content is a flex column so `order` takes effect.
+    expect(playgroundCode).toContain('flex flex-col gap-4')
+    // No programmatic scroll — the reorder CSS is the sole mechanism (no
+    // timing side effects on the measured width).
     expect(playgroundCode).not.toContain('scrollIntoView')
     expect(playgroundCode).not.toContain('flushSync')
   })
