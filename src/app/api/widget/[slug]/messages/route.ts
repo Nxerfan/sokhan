@@ -11,6 +11,8 @@ import { parseAccessMode, parsePolicyVersion, evaluateSendAuthorization, resolve
 import { getEntitlements } from '@/lib/payments/widget-entitlements'
 import { resolveEffectivePreChatForm } from '@/lib/widget/effective-pre-chat-form'
 import { shouldRequirePreChat, isPreChatComplete } from '@/lib/widget/pre-chat-form-policy'
+import { resolveEffectiveContextChat } from '@/lib/widget/effective-context-chat'
+import { acceptPageContext, type PageContext } from '@/lib/widget/context-chat-types'
 
 const MAX_MESSAGE_LENGTH = 5000
 const MAX_MESSAGES_PER_CONVERSATION = 200
@@ -148,6 +150,33 @@ export async function POST(
   // Bounded to 100 chars (trimmed). No character-set validation — the
   // widget generates 'cmsg_<seq>_<timestamp>' which is safe ASCII.
   const clientMessageId = String(body.clientMessageId ?? '').trim().slice(0, 100)
+
+  // === Context Chat (Feature 11) — server-authoritative resolution ===
+  // Resolve the tenant's CURRENT Context Chat entitlement + effective
+  // configuration from the CURRENT authenticated tenant (never from
+  // client-controlled data — an incoming `enabled`/plan flag is ignored).
+  // The public config exposes ONLY the effective boolean; a stored paid-era
+  // preference never authorizes context on Free. acceptPageContext then
+  // validates the OPTIONAL visitor-supplied `pageContext`:
+  //   - Effective disabled (Free / disabled / unknown) → ANY supplied
+  //     context (including forged payloads) is dropped → null.
+  //   - No explicit context with this send → null (no automatic scraping).
+  //   - Malformed context → null (an invalid context is never persisted
+  //     and never corrupts the valid message text).
+  // The context is persisted alongside the text ONLY on the visitor's own
+  // message — never on an AI/agent/system message — and is treated as
+  // user-controlled information (NOT authenticated proof of the page).
+  const contextChatEntitlements = getEntitlements(tokenTenant.plan)
+  const effectiveContextChat = resolveEffectiveContextChat(
+    { appearanceV2: tokenTenant.widgetConfig?.appearanceV2 },
+    contextChatEntitlements,
+  )
+  let pageContext: PageContext | null = null
+  try {
+    pageContext = acceptPageContext(body.pageContext, effectiveContextChat.enabled)
+  } catch {
+    pageContext = null
+  }
 
   // Wrap ALL tenant-scoped DB work in withTenant. The fail-closed Prisma
   // extension requires a current tenant context for any read/write against
@@ -300,6 +329,10 @@ export async function POST(
     }
 
     // Persist the visitor message. tenantId auto-injected by extension.
+    // Context Chat (Feature 11): the sanitized authorized pageContext (or
+    // null) is persisted inside the EXISTING Message JSON content alongside
+    // the text — no schema change, no extra table. Ordinary messages
+    // without context keep the plain { text } content shape.
     const message = await db.message.create({
       data: {
         conversationId: conversation.id,
@@ -307,7 +340,11 @@ export async function POST(
         senderType: 'contact',
         senderUserId: null,
         contentType: 'text',
-        content: { text },
+        // Fresh object literal (spread into primitives) so the Prisma
+        // InputJsonValue typing accepts the nested page context.
+        content: pageContext
+          ? { text, pageContext: { pathname: pageContext.pathname, title: pageContext.title } }
+          : { text },
         status: 'sent',
       },
     })

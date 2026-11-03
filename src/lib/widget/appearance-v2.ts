@@ -215,6 +215,15 @@ export interface SmartAvoidanceConfig {
   enabled: boolean
 }
 
+/**
+ * Context Chat configuration (Phase 2 / Feature 11). Additive — null =
+ * disabled (default for every existing tenant). Entitlement availability is
+ * NOT automatic activation: the tenant owner must explicitly enable it.
+ */
+export interface ContextChatConfig {
+  enabled: boolean
+}
+
 /** The versioned appearance configuration. */
 export interface AppearanceV2 {
   version: typeof APPEARANCE_V2_VERSION
@@ -238,6 +247,8 @@ export interface AppearanceV2 {
   alternativeContactButtons?: AlternativeContactButtonsConfig
   /** Smart Avoidance (Phase 2 / Feature 10). Additive — null = disabled. */
   smartAvoidance?: SmartAvoidanceConfig
+  /** Context Chat (Phase 2 / Feature 11). Additive — null = disabled. */
+  contextChat?: ContextChatConfig
 }
 
 /** The canonical default appearance (V2). */
@@ -282,7 +293,7 @@ export const DEFAULT_APPEARANCE_V2: AppearanceV2 = {
  */
 
 /** Allowed top-level keys in an AppearanceV2 object. */
-const ALLOWED_TOP_LEVEL_KEYS = new Set(['version', 'desktop', 'mobile', 'colors', 'launcher', 'attention', 'messagePreview', 'quickReplies', 'preChatForm', 'pageVisibility', 'alternativeContactButtons', 'smartAvoidance'])
+const ALLOWED_TOP_LEVEL_KEYS = new Set(['version', 'desktop', 'mobile', 'colors', 'launcher', 'attention', 'messagePreview', 'quickReplies', 'preChatForm', 'pageVisibility', 'alternativeContactButtons', 'smartAvoidance', 'contextChat'])
 
 /**
  * Check if a value is a plain JSON-compatible object — prototype is exactly
@@ -593,6 +604,28 @@ export function parseAppearanceV2(value: unknown): AppearanceV2 | null {
   }
   if (smartAvoidance !== null && smartAvoidance !== undefined) {
     result.smartAvoidance = smartAvoidance
+  }
+
+  // Parse contextChat if present (Feature 11 — same strict shape contract
+  // as smartAvoidance: exactly one own boolean `enabled` data property).
+  const ccDesc = getOwnDataDescriptor(value, 'contextChat')
+  let ccValue: unknown = undefined
+  if (ccDesc !== null) {
+    ccValue = ccDesc.value
+  } else {
+    try {
+      if (Object.prototype.hasOwnProperty.call(value, 'contextChat')) return null
+    } catch {
+      return null
+    }
+  }
+  let contextChat: ContextChatConfig | null | undefined = undefined
+  if (ccValue !== undefined) {
+    contextChat = parseContextChatConfig(ccValue)
+    if (contextChat === undefined) return null
+  }
+  if (contextChat !== null && contextChat !== undefined) {
+    result.contextChat = contextChat
   }
   return result
 }
@@ -1355,6 +1388,24 @@ function parseSmartAvoidanceConfig(value: unknown): SmartAvoidanceConfig | null 
   if (keys === null) return undefined
   for (const key of keys) {
     if (typeof key !== 'string' || !ALLOWED_SMART_AVOIDANCE_KEYS.has(key)) return undefined
+  }
+  const enabledDesc = getOwnDataDescriptor(value, 'enabled')
+  if (!enabledDesc) return undefined
+  const enabledValue = enabledDesc.value
+  if (typeof enabledValue !== 'boolean') return undefined
+  return { enabled: enabledValue }
+}
+
+const ALLOWED_CONTEXT_CHAT_KEYS = new Set(['enabled'])
+
+function parseContextChatConfig(value: unknown): ContextChatConfig | null | undefined {
+  if (value === undefined) return null
+  if (value === null) return undefined
+  if (!isPlainObject(value)) return undefined
+  const keys = safeOwnKeys(value)
+  if (keys === null) return undefined
+  for (const key of keys) {
+    if (typeof key !== 'string' || !ALLOWED_CONTEXT_CHAT_KEYS.has(key)) return undefined
   }
   const enabledDesc = getOwnDataDescriptor(value, 'enabled')
   if (!enabledDesc) return undefined

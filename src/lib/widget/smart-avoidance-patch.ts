@@ -103,6 +103,7 @@ export function mergeSmartAvoidancePatch(
     ...(base.preChatForm ? { preChatForm: base.preChatForm } : {}),
     ...(base.pageVisibility ? { pageVisibility: base.pageVisibility } : {}),
     ...(base.alternativeContactButtons ? { alternativeContactButtons: base.alternativeContactButtons } : {}),
+    ...(base.contextChat ? { contextChat: base.contextChat } : {}),
   }
 }
 

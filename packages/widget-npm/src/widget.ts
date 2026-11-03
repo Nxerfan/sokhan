@@ -92,6 +92,7 @@ import type {
   IdentifyResponse,
   OtpStartResponse,
   SukhanLoginRequiredDetail,
+  PageContext,
 } from './types.js'
 
 // Ambient `process` declare — matches the index.ts pattern. The package
@@ -133,6 +134,9 @@ const STR: Record<'fa' | 'en', Record<string, string>> = {
     messagePlaceholder: 'پیام بنویسید…',
     chat: 'گفت‌وگو',
     agent: 'کارشناس',
+    sharePage: 'اشتراک‌گذاری این صفحه',
+    contextAttached: 'این پیام شامل صفحه فعلی می‌شود:',
+    removeContext: 'حذف پیوست صفحه',
   },
   en: {
     verifyTitle: 'Verify your email',
@@ -158,6 +162,9 @@ const STR: Record<'fa' | 'en', Record<string, string>> = {
     messagePlaceholder: 'Type a message…',
     chat: 'Chat',
     agent: 'Agent',
+    sharePage: 'Share this page',
+    contextAttached: 'This message will include the current page:',
+    removeContext: 'Remove page attachment',
   },
 }
 
@@ -351,6 +358,14 @@ interface WidgetInternalState {
   smartAvoidanceApplied: boolean
   /** Base position (left/bottom) from applyPosition() — avoidance always starts from here. */
   smartAvoidanceBasePos: { left: number; bottom: number } | null
+  /** V2 context chat — effective server-authoritative entitlement (Feature 11, BETA). */
+  contextChatEnabled: boolean
+  /** Pending explicit page attachment ({ pathname, title }) — in-memory ONLY, one-shot. */
+  contextChatPending: PageContext | null
+  /** .sk-context-chat DOM row (share control; created in mount only when enabled). */
+  contextChatRowEl: HTMLElement | null
+  /** data-testid=context-chat-indicator chip (in the DOM ONLY while an attachment is pending). */
+  contextChatIndicatorEl: HTMLElement | null
   /** The current panel side (left/right/center) from the geometry function. */
   panelSide: 'left' | 'right' | 'center'
   /** Resize listener reference (for cleanup on destroy). */
@@ -446,6 +461,10 @@ export class SukhanWidget implements SukhanInstance {
     smartAvoidanceEnabled: false,
     smartAvoidanceApplied: false,
     smartAvoidanceBasePos: null,
+    contextChatEnabled: false,
+    contextChatPending: null,
+    contextChatRowEl: null,
+    contextChatIndicatorEl: null,
     panelSide: 'right',
     resizeHandler: null,
   }
@@ -619,6 +638,14 @@ export class SukhanWidget implements SukhanInstance {
     // (Feature 10). Free / unknown plans expose { enabled: false } — the
     // launcher never shifts and host-page obstructions are ignored.
     this.state.smartAvoidanceEnabled = !!(config.smartAvoidance && config.smartAvoidance.enabled)
+    // V2 context chat: read the effective server-authoritative entitlement
+    // (Feature 11, BETA). Free / unknown / disabled tenants expose
+    // { enabled: false } — NO share control is rendered and no page context
+    // is ever attached. The pending attachment is in-memory only (never
+    // persisted to browser storage) and defaults to null on every load.
+    this.state.contextChatEnabled = !!(config.contextChat && config.contextChat.enabled)
+    this.state.contextChatPending = null
+    this.state.contextChatIndicatorEl = null
     // V2 alternative contact buttons: read the effective authorized items from
     // the public config (Feature 9). Empty array for Free / unknown / no-V2-
     // selection. The runtime renders one <a class="sk-alt-contact-link"> per
@@ -647,6 +674,58 @@ export class SukhanWidget implements SukhanInstance {
     }
     this.state.altContactItems = safeAltItems
     this.state.altContactEl = safeAltItems.length > 0 ? this.buildAltContactLinks(safeAltItems) : null
+
+    // V2 context chat row (Feature 11, BETA): the "Share this page" opt-in
+    // control. Rendered ONLY when the effective config enables Context Chat —
+    // Free/disabled tenants get NO row at all (no share control in the DOM).
+    // The pending-attachment indicator chip is appended to this row on
+    // demand (only while an attachment exists). SECURITY: everything is
+    // rendered via textContent (never innerHTML); the click handler reads
+    // ONLY window.location.pathname + document.title.
+    if (this.state.contextChatEnabled) {
+      const contextChatRow = el('div', 'sk-context-chat') as HTMLElement
+      css(contextChatRow, {
+        display: 'none',
+        flexWrap: 'wrap',
+        alignItems: 'center',
+        gap: '6px',
+        padding: '6px 12px',
+        background: '#fff',
+        borderTop: '1px solid #f0eee9',
+        flexShrink: '0',
+      })
+      const shareBtn = el('button', 'sk-context-chat-share', STR[this.state.locale].sharePage) as HTMLButtonElement
+      css(shareBtn, {
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: '5px',
+        border: '1px solid #ddd',
+        background: '#f7f5f1',
+        color: '#0E1116',
+        borderRadius: '14px',
+        padding: '4px 12px',
+        fontSize: '12px',
+        cursor: 'pointer',
+        fontFamily: 'inherit',
+        whiteSpace: 'nowrap',
+        maxWidth: '100%',
+      })
+      shareBtn.setAttribute('type', 'button')
+      shareBtn.setAttribute('data-testid', 'context-chat-share')
+      shareBtn.setAttribute('aria-label', STR[this.state.locale].sharePage)
+      shareBtn.setAttribute('title', STR[this.state.locale].sharePage)
+      shareBtn.onclick = (e) => {
+        e.preventDefault()
+        // Explicit visitor consent — capture ONLY on click (no automatic
+        // scraping). Bounded-validated; a silent no-op when the current
+        // page does not satisfy the safety contract.
+        this.captureContextChatPage()
+      }
+      contextChatRow.appendChild(shareBtn)
+      this.state.contextChatRowEl = contextChatRow
+    } else {
+      this.state.contextChatRowEl = null
+    }
     const attentionClass = effectiveAttention !== 'none' ? ' sk-attention-' + effectiveAttention : ''
     const launcher = el('button', 'sk-launcher ' + shapeClass(effectiveShape) + attentionClass) as HTMLButtonElement
     launcher.setAttribute('aria-label', this.state.locale === 'fa' ? 'گفت‌وگو' : 'Open chat')
@@ -1059,6 +1138,10 @@ export class SukhanWidget implements SukhanInstance {
     // complete a pre-chat form, or bypass authorization). Empty when the
     // tenant has no buttons configured — no container is appended.
     if (this.state.altContactEl) this.panel.appendChild(this.state.altContactEl)
+
+    // V2 context chat row (Feature 11) sits directly above the input bar —
+    // the visitor sees the opt-in exactly where the next message is composed.
+    if (this.state.contextChatRowEl) this.panel.appendChild(this.state.contextChatRowEl)
 
     panel.appendChild(inputBar)
     root.appendChild(panel)
@@ -1715,6 +1798,11 @@ export class SukhanWidget implements SukhanInstance {
     }
     this.otpRequest = null
     this.resendInFlight = false
+    // V2 Context Chat (Feature 11): a pending page attachment belongs to the
+    // PREVIOUS visitor's explicit opt-in — never carry it across an identity
+    // switch (SPA user-switch / policy recovery safety). Safe no-op pre-mount.
+    this.state.contextChatPending = null
+    this.renderContextChatIndicator()
     // Re-render the message list so the PREVIOUS identity's message bubbles
     // disappear from the DOM immediately (SPA user-switch / logout safety).
     // Without this, clearIdentityState clears state.messages but leaves the
@@ -1904,6 +1992,7 @@ export class SukhanWidget implements SukhanInstance {
     this.updatePreChatForm() // may hide input + quick replies when form is shown
     this.updateQuickReplies()
     this.updateAltContactLinks() // V2 alternative contact buttons (Feature 9)
+    this.updateContextChatRow() // V2 context chat share row (Feature 11)
     // V2 page visibility: re-evaluate on open — the visitor may have
     // navigated since the last evaluation (SPA route change without a
     // popstate event). Cheap and idempotent.
@@ -1926,6 +2015,7 @@ export class SukhanWidget implements SukhanInstance {
     this.updatePreChatForm()
     this.updateQuickReplies()
     this.updateAltContactLinks()
+    this.updateContextChatRow()
     // V2 page visibility: re-evaluate on close (same rationale as open()).
     this.updatePageVisibility()
   }
@@ -2019,6 +2109,9 @@ export class SukhanWidget implements SukhanInstance {
       // Restore the input bar (quick replies handled by updateQuickReplies).
       if (this.inputBar) this.inputBar.style.display = 'flex'
     }
+    // V2 context chat (Feature 11): the share row follows the composer —
+    // hidden while the pre-chat form is visible, restored afterwards.
+    this.updateContextChatRow()
   }
 
   /** Direct visibility toggles used by the submit handler. */
@@ -2027,12 +2120,14 @@ export class SukhanWidget implements SukhanInstance {
     this.state.preChatFormEl.style.display = 'flex'
     if (this.inputBar) this.inputBar.style.display = 'none'
     if (this.state.quickRepliesEl) this.state.quickRepliesEl.style.display = 'none'
+    this.updateContextChatRow()
   }
 
   private hidePreChatForm(): void {
     if (!this.state.preChatFormEl) return
     this.state.preChatFormEl.style.display = 'none'
     if (this.inputBar) this.inputBar.style.display = 'flex'
+    this.updateContextChatRow()
   }
 
   /**
@@ -2482,19 +2577,31 @@ export class SukhanWidget implements SukhanInstance {
   }
 
   // ---------- Send ----------
-  send(text: string): Promise<void> {
+  send(text: string, pageContext?: PageContext): Promise<void> {
     if (this.inputEl) this.inputEl.value = text
-    return this.sendMessage()
+    // Explicit per-message pageContext (Feature 11, BETA): consumed one-shot
+    // on successful persistence. When omitted, sendMessage() falls back to
+    // the pending UI attachment (if any).
+    return this.sendMessage(pageContext)
   }
 
-  private sendMessage(): Promise<void> {
+  private sendMessage(explicitPageContext?: PageContext): Promise<void> {
     if (this.destroyed) return Promise.resolve()
     if (!this.inputEl) return Promise.resolve()
     const text = this.inputEl.value.trim()
     if (!text || !this.state.token) return Promise.resolve()
     this.inputEl.value = ''
+    // V2 Context Chat (Feature 11): attach the explicit per-send context,
+    // or — when absent — the pending UI attachment (the visitor's EXPLICIT
+    // opt-in). Nothing is attached automatically. Identity is tracked so a
+    // re-capture during the in-flight send is not wrongly consumed. On
+    // FAILURE the pending attachment is PRESERVED (the typed text is
+    // restored for an explicit retry — the retry re-attaches it); on SUCCESS
+    // it is consumed one-shot (the next message does NOT inherit it).
+    const sendPageContext: PageContext | undefined =
+      explicitPageContext ?? (this.state.contextChatEnabled ? this.state.contextChatPending ?? undefined : undefined)
     return this.api
-      .sendMessage(this.state.token, text)
+      .sendMessage(this.state.token, text, sendPageContext)
       .then((data) => {
         if (this.destroyed) return // guard: destroy during async send
         this.state.quickRepliesInFlight = false
@@ -2502,6 +2609,16 @@ export class SukhanWidget implements SukhanInstance {
           // Central merge — POST response dedups against any socket
           // delivery of the same message id.
           this.ingestMessage(data.message)
+        }
+        // V2 Context Chat one-shot consumption (Feature 11): the persisted
+        // message carried the attached context — consume the PENDING
+        // attachment only when it is what this send used (identity check),
+        // and never consume a pending attachment an explicit send bypassed.
+        if (
+          this.state.contextChatPending &&
+          sendPageContext === this.state.contextChatPending
+        ) {
+          this.clearContextChatPending()
         }
         if (data.conversationId && data.conversationId !== this.state.conversationId) {
           this.clearMessagePreviewState()
@@ -3079,6 +3196,18 @@ export class SukhanWidget implements SukhanInstance {
     setTimeout(() => {
       this.pageChangeScheduled = false
       this.updatePageVisibility()
+      // V2 Context Chat (Feature 11): SPA navigation invalidates a pending
+      // page attachment — never silently attach a STALE snapshot of the
+      // previous page. The visitor must explicitly re-share the new page.
+      if (
+        this.state.contextChatPending &&
+        typeof window !== 'undefined' &&
+        window.location &&
+        typeof window.location.pathname === 'string' &&
+        window.location.pathname !== this.state.contextChatPending.pathname
+      ) {
+        this.clearContextChatPending()
+      }
     }, 0)
   }
 
@@ -3680,6 +3809,170 @@ export class SukhanWidget implements SukhanInstance {
     this.state.altContactEl.style.display = show ? 'flex' : 'none'
   }
 
+  // ============================================================
+  // V2 Context Chat (Feature 11, BETA).
+  //   The public config exposes `contextChat: { enabled }` — the effective
+  //   server-authoritative entitlement. When enabled, the visitor may
+  //   EXPLICITLY opt in to attaching the current page (title + pathname
+  //   ONLY) to their NEXT outgoing message. There is NO automatic scraping:
+  //   nothing is captured until the share action is clicked, the pending
+  //   attachment is consumed by the first successfully persisted message,
+  //   and it is preserved on a failed send so the visitor can explicitly
+  //   retry. The capture is bounded-validated here (mirroring the server
+  //   contract in src/lib/widget/context-chat-types.ts) and re-validated
+  //   server-side before persistence — the server NEVER trusts the
+  //   client's pre-validation. The full URL, the query string,
+  //   the hash, cookies and storage are NEVER read or transmitted.
+  // ============================================================
+
+  /** Bounded client-side pathname validation (mirrors the server contract). */
+  private contextChatValidPathname(pathname: unknown): pathname is string {
+    if (typeof pathname !== 'string') return false
+    if (pathname.length === 0 || pathname.length > 240) return false
+    if (pathname.charAt(0) !== '/') return false
+    if (pathname.charAt(1) === '/') return false
+    if (pathname.includes('?') || pathname.includes('#') || pathname.includes('\\')) return false
+    for (let i = 0; i < pathname.length; i++) {
+      const c = pathname.charCodeAt(i)
+      if (c <= 0x1f || (c >= 0x7f && c <= 0x9f)) return false
+      const ch = pathname.charAt(i)
+      if (ch === ' ' || ch === '\t') return false
+    }
+    if (pathname.includes('%')) {
+      let decoded: string
+      try {
+        decoded = decodeURIComponent(pathname)
+      } catch {
+        return false
+      }
+      for (let i = 0; i < decoded.length; i++) {
+        const c = decoded.charCodeAt(i)
+        if (c <= 0x1f || (c >= 0x7f && c <= 0x9f) || c === 0x2028 || c === 0x2029) return false
+        const ch = decoded.charAt(i)
+        if (ch === '?' || ch === '#' || ch === '\\') return false
+      }
+    }
+    return true
+  }
+
+  /** Bounded client-side title validation (mirrors the server contract). */
+  private contextChatValidTitle(title: unknown): title is string {
+    if (typeof title !== 'string') return false
+    if (title.length === 0 || title !== title.trim()) return false
+    for (let i = 0; i < title.length; i++) {
+      const c = title.charCodeAt(i)
+      if (c <= 0x1f || (c >= 0x7f && c <= 0x9f) || c === 0x2028 || c === 0x2029) return false
+    }
+    // BETA strictness: reject angle brackets outright (markup-like text).
+    if (title.includes('<') || title.includes('>')) return false
+    // Bounded to 120 Unicode code points (surrogate pairs count as ONE).
+    let cp = 0
+    for (let i = 0; i < title.length; i++) {
+      cp++
+      const hi = title.charCodeAt(i)
+      if (hi >= 0xd800 && hi <= 0xdbff && i + 1 < title.length) {
+        const lo = title.charCodeAt(i + 1)
+        if (lo >= 0xdc00 && lo <= 0xdfff) i++
+      }
+    }
+    if (cp > 120) return false
+    return true
+  }
+
+  /**
+   * Read ONLY window.location.pathname + document.title, bounded-validate
+   * them, and set the pending attachment. Returns true when an attachment
+   * was captured (silent no-op otherwise). Explicit visitor consent —
+   * called exclusively from the share button's click handler.
+   */
+  private captureContextChatPage(): boolean {
+    if (!this.state.contextChatEnabled) return false
+    if (this.destroyed) return false
+    const pathname =
+      typeof window !== 'undefined' && window.location && typeof window.location.pathname === 'string'
+        ? window.location.pathname
+        : ''
+    const title = typeof document !== 'undefined' && typeof document.title === 'string' ? document.title : ''
+    if (!this.contextChatValidPathname(pathname)) return false
+    if (!this.contextChatValidTitle(title)) return false
+    this.setContextChatPending({ pathname, title })
+    return true
+  }
+
+  /** Store the pending attachment + render the indicator chip. */
+  private setContextChatPending(ctx: PageContext): void {
+    this.state.contextChatPending = ctx
+    this.renderContextChatIndicator()
+  }
+
+  /** Drop the pending attachment + remove the indicator chip from the DOM. */
+  private clearContextChatPending(): void {
+    this.state.contextChatPending = null
+    this.renderContextChatIndicator()
+  }
+
+  /** Render/refresh/remove the pending-attachment indicator chip. */
+  private renderContextChatIndicator(): void {
+    const row = this.state.contextChatRowEl
+    if (!row) return
+    const existing = this.state.contextChatIndicatorEl
+    if (!this.state.contextChatPending) {
+      if (existing && existing.parentNode) existing.parentNode.removeChild(existing)
+      this.state.contextChatIndicatorEl = null
+      return
+    }
+    const pending = this.state.contextChatPending
+    if (existing) {
+      // Refresh the existing chip's text (re-capture of the current page).
+      const t = existing.querySelector('.sk-context-chat-title')
+      const p = existing.querySelector('.sk-context-chat-path')
+      if (t) t.textContent = pending.title // XSS-safe: textContent
+      if (p) p.textContent = pending.pathname // XSS-safe: textContent
+      return
+    }
+    const chip = el('div', 'sk-context-chat-indicator') as HTMLElement
+    chip.setAttribute('data-testid', 'context-chat-indicator')
+    const label = el('span', 'sk-context-chat-label')
+    label.textContent = STR[this.state.locale].contextAttached
+    const titleEl = el('span', 'sk-context-chat-title')
+    titleEl.textContent = pending.title // XSS-safe: textContent
+    const pathEl = el('span', 'sk-context-chat-path')
+    pathEl.textContent = pending.pathname // XSS-safe: textContent
+    pathEl.setAttribute('dir', 'ltr')
+    const clearBtn = el('button', 'sk-context-chat-clear', '\u00d7') as HTMLButtonElement
+    clearBtn.setAttribute('type', 'button')
+    clearBtn.setAttribute('data-testid', 'context-chat-clear')
+    clearBtn.setAttribute('aria-label', STR[this.state.locale].removeContext)
+    clearBtn.onclick = (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      this.clearContextChatPending()
+    }
+    chip.appendChild(label)
+    chip.appendChild(titleEl)
+    chip.appendChild(pathEl)
+    chip.appendChild(clearBtn)
+    row.appendChild(chip)
+    this.state.contextChatIndicatorEl = chip
+  }
+
+  /**
+   * Share-row visibility — visible only while the panel is open AND the
+   * composer (input bar) is available (the pre-chat form hides the
+   * composer). Free / disabled tenants never render the row at all. A
+   * Page Visibility hide (Feature 8) always wins: the row lives inside
+   * the root and is hidden with it.
+   */
+  private updateContextChatRow(): void {
+    const row = this.state.contextChatRowEl
+    if (!row) return
+    if (this.destroyed) return
+    const preChatVisible =
+      !!this.state.preChatFormEl && this.state.preChatFormEl.style.display === 'flex'
+    const show = this.state.contextChatEnabled && this.state.open && !preChatVisible
+    row.style.display = show ? 'flex' : 'none'
+  }
+
   private injectStyles(accent: string): void {
     const style = el('style')
     style.textContent =
@@ -3731,7 +4024,20 @@ export class SukhanWidget implements SukhanInstance {
       // widget. Hover affordance matches the rest of the panel surfaces.
       '.sk-alt-contact-links{box-sizing:border-box;}' +
       '.sk-alt-contact-link{display:flex;align-items:center;gap:6px;padding:6px 12px;text-decoration:none;color:inherit;border-radius:8px;transition:background .15s;}' +
-      '.sk-alt-contact-link:hover{background:rgba(0,0,0,0.06);}'
+      '.sk-alt-contact-link:hover{background:rgba(0,0,0,0.06);}' +
+      // V2 context chat (Feature 11, BETA) — the explicit "Share this page"
+      // opt-in + the pending-attachment indicator chip. Plain buttons/spans
+      // rendered via textContent; the row is part of the widget root → hidden
+      // automatically when Page Visibility hides the widget (Feature 8 wins).
+      '.sk-context-chat{box-sizing:border-box;}' +
+      '.sk-context-chat-share{box-sizing:border-box;transition:background .15s ease;font-family:inherit;}' +
+      '.sk-context-chat-share:hover{background:#e8e4dc;}' +
+      '.sk-context-chat-indicator{display:inline-flex;align-items:center;gap:6px;max-width:100%;background:#f7f5f1;border:1px solid #e8e4dc;border-radius:12px;padding:3px 6px 3px 10px;font-size:11px;color:#5c6470;min-width:0;}' +
+      '.sk-context-chat-label{white-space:nowrap;flex-shrink:0;}' +
+      '.sk-context-chat-title{font-weight:600;color:#0E1116;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;}' +
+      '.sk-context-chat-path{direction:ltr;unicode-bidi:isolate;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}' +
+      '.sk-context-chat-clear{flex-shrink:0;width:18px;height:18px;border:none;background:transparent;color:#888;cursor:pointer;font-size:14px;line-height:1;border-radius:50%;padding:0;display:inline-flex;align-items:center;justify-content:center;}' +
+      '.sk-context-chat-clear:hover{background:rgba(0,0,0,0.08);color:#333;}'
     document.head.appendChild(style)
   }
 

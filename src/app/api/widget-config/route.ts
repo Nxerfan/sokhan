@@ -117,6 +117,17 @@ import {
   hasSmartAvoidanceField,
   type SmartAvoidancePatchData,
 } from '@/lib/widget/smart-avoidance-patch'
+import {
+  resolveEffectiveContextChat,
+  getStoredContextChat,
+  type StoredContextChatInput,
+} from '@/lib/widget/effective-context-chat'
+import {
+  validateContextChatPatch,
+  mergeContextChatPatch,
+  hasContextChatField,
+  type ContextChatPatchData,
+} from '@/lib/widget/context-chat-patch'
 
 /**
  * GET /api/widget-config — dashboard widget configuration.
@@ -235,6 +246,17 @@ export async function GET() {
     }
     const effectiveSmartAvoidance = resolveEffectiveSmartAvoidance(smartAvoidanceInput, entitlements)
     const storedSmartAvoidance = getStoredSmartAvoidance(smartAvoidanceInput)
+
+    // V2 context chat: resolve effective + stored (Feature 11, BETA).
+    // The dashboard `effective` must match the public widget. The raw stored
+    // preference is exposed ONLY via `stored` (for the dashboard to show
+    // "saved but locked / restore on upgrade"), NEVER as `effective` for
+    // Free (the resolver returns false for Free even when stored is true).
+    const contextChatInput: StoredContextChatInput = {
+      appearanceV2: stored?.appearanceV2,
+    }
+    const effectiveContextChat = resolveEffectiveContextChat(contextChatInput, entitlements)
+    const storedContextChat = getStoredContextChat(contextChatInput)
 
     return {
       stored,
@@ -362,6 +384,16 @@ export async function GET() {
         effective: effectiveSmartAvoidance,
         stored: storedSmartAvoidance,
       },
+      // V2 context chat: resolve effective + stored (Feature 11, BETA).
+      // The dashboard `effective` must match the public widget — always
+      // false for Free / unknown plans, even when a paid-era stored
+      // preference exists. The raw stored preference is exposed ONLY via
+      // `stored` (restore-on-upgrade display), never as `effective`.
+      contextChat: {
+        entitlements: { enabled: entitlements?.contextChat ?? false },
+        effective: effectiveContextChat,
+        stored: storedContextChat,
+      },
     } as const
   })
   if (!result) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
@@ -379,6 +411,7 @@ export async function GET() {
     pageVisibility: result.result.pageVisibility,
     alternativeContactButtons: result.result.alternativeContactButtons,
     smartAvoidance: result.result.smartAvoidance,
+    contextChat: result.result.contextChat,
   })
 }
 
@@ -535,6 +568,17 @@ const SMART_AVOIDANCE_ERROR_STATUS: Record<string, number> = {
   smart_avoidance_no_fields: 400,
 }
 
+/** Context-chat-specific error codes → HTTP status mapping. */
+const CONTEXT_CHAT_ERROR_STATUS: Record<string, number> = {
+  context_chat_not_authorized: 403,  // unknown plan / no entitlement set
+  context_chat_not_object: 400,
+  context_chat_enabled_missing: 400,
+  context_chat_enabled_invalid: 400,
+  context_chat_not_allowed: 403,     // Free attempting a paid capability → 403
+  context_chat_unexpected_key: 400,
+  context_chat_no_fields: 400,
+}
+
 /**
  * PATCH /api/widget-config — update widget customization.
  *
@@ -592,13 +636,14 @@ export async function PATCH(req: NextRequest) {
     const hasPageVisibility = hasPageVisibilityField(body)
     const hasAlternativeContactButtons = hasAlternativeContactButtonsField(body)
     const hasSmartAvoidance = hasSmartAvoidanceField(body)
+    const hasContextChat = hasContextChatField(body)
     const hasOtherFields = hasOtherCustomizationFields(body)
 
     // Reject unrecognized top-level fields when the request contains
     // positioning, colors, launcher, attention, messagePreview, quickReplies,
-    // preChatForm, pageVisibility, alternativeContactButtons, or
-    // smartAvoidance.
-    if ((hasPositioning || hasColors || hasLauncher || hasAttention || hasMessagePreview || hasQuickReplies || hasPreChatForm || hasPageVisibility || hasAlternativeContactButtons || hasSmartAvoidance) && hasUnrecognizedFields(body)) {
+    // preChatForm, pageVisibility, alternativeContactButtons, smartAvoidance,
+    // or contextChat.
+    if ((hasPositioning || hasColors || hasLauncher || hasAttention || hasMessagePreview || hasQuickReplies || hasPreChatForm || hasPageVisibility || hasAlternativeContactButtons || hasSmartAvoidance || hasContextChat) && hasUnrecognizedFields(body)) {
       return { badRequest: true as const, code: 'unrecognized_field' }
     }
 
@@ -710,6 +755,20 @@ export async function PATCH(req: NextRequest) {
         return { smartAvoidanceError: true as const, code: saResult.code }
       }
       smartAvoidancePatch = saResult.data
+    }
+
+    // ---- Validate context chat (if present) ----
+    // NOTE: contextChat is deliberately NOT in OTHER_CUSTOMIZATION_KEYS —
+    // a Free PATCH containing ONLY contextChat must reach THIS validation
+    // (→ 403 context_chat_not_allowed), not the legacy 402 plan lock, so
+    // the dashboard gets the specific entitlement error.
+    let contextChatPatch: ContextChatPatchData | null = null
+    if (hasContextChat) {
+      const ccResult = validateContextChatPatch({ contextChat: body.contextChat }, entitlements)
+      if (!ccResult.ok) {
+        return { contextChatError: true as const, code: ccResult.code }
+      }
+      contextChatPatch = ccResult.data
     }
 
     // ---- Validate + collect other customization fields (paid only) ----
@@ -935,6 +994,22 @@ export async function PATCH(req: NextRequest) {
       data.appearanceV2 = mergedSmartAvoidance as unknown as string // Prisma Json field
     }
 
+    // ---- Apply context chat patch (if validated) ----
+    // Reads the already-merged appearanceV2 (from prior patches, if any) so
+    // all neighboring V2 capabilities are preserved.
+    if (contextChatPatch) {
+      let baseAppearanceV2: unknown = data.appearanceV2 ?? undefined
+      if (baseAppearanceV2 === undefined) {
+        const existing = await db.widgetConfig.findUnique({
+          where: { tenantId: tid },
+          select: { appearanceV2: true },
+        })
+        baseAppearanceV2 = existing?.appearanceV2
+      }
+      const mergedContextChat = mergeContextChatPatch(baseAppearanceV2, contextChatPatch, entitlements)
+      data.appearanceV2 = mergedContextChat as unknown as string // Prisma Json field
+    }
+
     if (Object.keys(data).length === 0) {
       return { badRequest: true as const, code: 'no_fields' }
     }
@@ -993,6 +1068,10 @@ export async function PATCH(req: NextRequest) {
   }
   if ('smartAvoidanceError' in r) {
     const status = SMART_AVOIDANCE_ERROR_STATUS[r.code as string] ?? 400
+    return NextResponse.json({ error: r.code }, { status })
+  }
+  if ('contextChatError' in r) {
+    const status = CONTEXT_CHAT_ERROR_STATUS[r.code as string] ?? 400
     return NextResponse.json({ error: r.code }, { status })
   }
   if ('badRequest' in r) return NextResponse.json({ error: r.code }, { status: 400 })

@@ -287,6 +287,7 @@ export function mergePositioningPatch(
     ...(base.pageVisibility ? { pageVisibility: base.pageVisibility } : {}),
     ...(base.alternativeContactButtons ? { alternativeContactButtons: base.alternativeContactButtons } : {}),
     ...(base.smartAvoidance ? { smartAvoidance: base.smartAvoidance } : {}),
+    ...(base.contextChat ? { contextChat: base.contextChat } : {}),
   }
 }
 
@@ -324,7 +325,7 @@ const ALL_RECOGNIZED_KEYS = new Set([
   'launcher',
   'attention',
   'messagePreview',
-  'quickReplies', 'preChatForm', 'pageVisibility', 'alternativeContactButtons', 'smartAvoidance',
+  'quickReplies', 'preChatForm', 'pageVisibility', 'alternativeContactButtons', 'smartAvoidance', 'contextChat',
 ])
 
 /**

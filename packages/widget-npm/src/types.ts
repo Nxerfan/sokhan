@@ -179,6 +179,19 @@ export interface WidgetConfig {
     enabled: boolean
   }
   /**
+   * V2 context chat (Phase 2 / Feature 11, BETA). Additive — the public
+   * config exposes ONLY the effective authorized boolean (`{ enabled }`),
+   * never the raw stored preference. Older backends omit the field; the
+   * widget defaults to disabled (no share control is rendered). When
+   * enabled, the visitor may EXPLICITLY opt in to attaching the current
+   * page (title + pathname only) to their next outgoing message — there is
+   * no automatic scraping, and the server re-validates + entitlement-gates
+   * the context before persistence.
+   */
+  contextChat?: {
+    enabled: boolean
+  }
+  /**
    * Backend-supplied realtime endpoint config (additive field). The widget
    * uses this as the PRIMARY runtime source. Older backends omit the
    * field; the widget falls back to the documented hosted default.
@@ -207,9 +220,29 @@ export interface MessageAttachment {
   name: string
 }
 
+/**
+ * Visitor-supplied page context attached to a message (Feature 11, BETA).
+ * STRICTLY limited to a relative URL `pathname` + a single-line `title` —
+ * never a full URL, query string, fragment, cookies, storage, credentials,
+ * form values, page HTML/DOM or arbitrary page text. Treated as
+ * user-controlled INFORMATION (not authenticated proof of the page).
+ */
+export interface PageContext {
+  /** Relative URL pathname (starts with a single '/', no query/hash). */
+  pathname: string
+  /** Sanitized page title (single line, ≤120 code points). */
+  title: string
+}
+
 export interface MessageContent {
   text?: string
   attachments?: MessageAttachment[]
+  /**
+   * Optional persisted page context (Feature 11, BETA) — present only when
+   * the visitor explicitly opted in AND the tenant's effective Context Chat
+   * configuration was enabled at send time (server-authoritative).
+   */
+  pageContext?: PageContext
 }
 
 export interface Message {
@@ -360,7 +393,14 @@ export interface SukhanInstance {
   open(): void
   close(): void
   toggle(): void
-  send(text: string): Promise<void>
+  /**
+   * Send a message. The optional `pageContext` argument (Feature 11, BETA)
+   * attaches an explicit per-message page context to THIS send — it is
+   * consumed one-shot on successful persistence. When omitted, an explicit
+   * UI opt-in (the "Share this page" attachment), if pending, is attached
+   * instead. Ordinary sends without any context work unchanged.
+   */
+  send(text: string, pageContext?: PageContext): Promise<void>
   destroy(): void
   config: WidgetConfig | null
   /**

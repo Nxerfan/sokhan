@@ -22,7 +22,7 @@ import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Send, Search, Inbox as InboxIcon, Circle, Loader2 } from 'lucide-react'
+import { Send, Search, Inbox as InboxIcon, Circle, Loader2, FileText } from 'lucide-react'
 import { toast } from 'sonner'
 
 type Contact = { id: string; name: string | null; email: string | null; avatarUrl: string | null }
@@ -45,7 +45,18 @@ type Message = {
   senderType: string
   senderUserId: string | null
   contentType: string
-  content: { text?: string; attachments?: Array<{ url: string; type: string; name: string }> }
+  content: {
+    text?: string
+    attachments?: Array<{ url: string; type: string; name: string }>
+    /**
+     * Optional persisted page context (Widget V2 Context Chat, Feature 11
+     * BETA) — present ONLY on visitor messages the visitor explicitly opted
+     * in AND the tenant's effective Context Chat configuration authorized at
+     * send time. UNTRUSTED visitor-supplied metadata: rendered as plain text
+     * (React escapes it), never as HTML, never as a navigation destination.
+     */
+    pageContext?: { pathname: string; title: string }
+  }
   createdAt: string
 }
 
@@ -662,9 +673,20 @@ export function InboxView() {
 }
 
 function MessageBubble({ msg, agentId }: { msg: Message; agentId?: string }) {
+  const t = useTranslations('dashboard')
   const isAgent = msg.senderType === 'agent'
   const isSystem = msg.senderType === 'system'
   const isOwn = isAgent && msg.senderUserId === agentId
+  // Context Chat (Feature 11, BETA): show the persisted page context ONLY on
+  // non-own (visitor) messages. The values are UNTRUSTED visitor-supplied
+  // strings — rendered as plain text via React JSX (never raw-HTML
+  // injection, never a link, never executed). Defensive
+  // typeof checks so a malformed historical payload cannot crash the inbox.
+  const pageContext =
+    !isOwn && !isSystem && msg.content && typeof msg.content.pageContext === 'object' && msg.content.pageContext !== null &&
+    typeof msg.content.pageContext.pathname === 'string' && typeof msg.content.pageContext.title === 'string'
+      ? msg.content.pageContext
+      : null
 
   if (isSystem) {
     return (
@@ -686,6 +708,22 @@ function MessageBubble({ msg, agentId }: { msg: Message; agentId?: string }) {
         dir="auto"
       >
         {msg.content.text && <p>{msg.content.text}</p>}
+        {pageContext && (
+          <div
+            className="mt-1.5 max-w-full rounded-lg border border-border/70 bg-background/60 px-2 py-1.5"
+            data-testid="agent-page-context"
+          >
+            <div className="flex items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+              <FileText className="h-3 w-3 shrink-0" aria-hidden="true" />
+              <span>{t('sharedPageLabel')}</span>
+            </div>
+            {/* UNTRUSTED visitor-supplied strings — plain text only, never a link */}
+            <div className="truncate text-xs font-semibold" title={pageContext.title}>{pageContext.title}</div>
+            <div className="truncate text-[11px] text-muted-foreground" title={pageContext.pathname}>
+              <span dir="ltr" className="font-mono">{pageContext.pathname}</span>
+            </div>
+          </div>
+        )}
         {msg.content.attachments?.map((att, i) => (
           <div key={i} className="mt-1">
             {att.type === 'image' ? (
