@@ -25,6 +25,7 @@ import { WidgetPageVisibilityPanel } from './widget-page-visibility-panel'
 import { WidgetAltContactPanel } from './widget-alt-contact-panel'
 import { WidgetSmartAvoidancePanel } from './widget-smart-avoidance-panel'
 import { WidgetContextChatPanel } from './widget-context-chat-panel'
+import { WidgetPlaygroundPanel } from './widget-playground'
 
 type WidgetConfig = {
   accentColor: string
@@ -77,7 +78,7 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
   const [copiedHtml, setCopiedHtml] = useState(false)
   const [copiedNpm, setCopiedNpm] = useState(false)
   const [copiedKey, setCopiedKey] = useState(false)
-  const [tab, setTab] = useState<'installation' | 'customization' | 'access'>('installation')
+  const [tab, setTab] = useState<'installation' | 'customization' | 'playground' | 'access'>('installation')
   const [domains, setDomains] = useState<Domain[]>([])
   const [domainLimit, setDomainLimit] = useState(0)
   const [newDomain, setNewDomain] = useState('')
@@ -169,6 +170,11 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
     effective: { enabled: boolean }
     stored: { enabled: boolean } | null
   } | null>(null)
+  // V2 playground data (from GET /api/widget-config `playground` field).
+  // LOCAL-ONLY simulation entitlement — nothing is ever persisted, so there
+  // is no effective/stored split; the dashboard component keeps every
+  // experiment in browser memory only.
+  const [playground, setPlayground] = useState<{ entitlements: { enabled: boolean } } | null>(null)
 
   const apiUrl = typeof window !== 'undefined' ? window.location.origin : HOSTED_API_URL
 
@@ -215,6 +221,8 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
     if (cfgData.smartAvoidance) setSmartAvoidance(cfgData.smartAvoidance)
     // V2 context chat data.
     if (cfgData.contextChat) setContextChat(cfgData.contextChat)
+    // V2 playground data.
+    if (cfgData.playground) setPlayground(cfgData.playground)
     const domData = await domRes.json()
     setDomains(domData.domains ?? [])
     setDomainLimit(domData.limit ?? 0)
@@ -450,6 +458,13 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
           className={cn('rounded-md px-4 py-1.5 text-sm font-medium transition-colors', tab === 'customization' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground')}
         >
           {fa ? 'سفارشی‌سازی' : 'Customization'}
+        </button>
+        <button
+          onClick={() => setTab('playground')}
+          className={cn('rounded-md px-4 py-1.5 text-sm font-medium transition-colors', tab === 'playground' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground')}
+          data-testid="playground-tab"
+        >
+          {fa ? 'محیط آزمایش' : 'Playground'}
         </button>
         <button
           onClick={() => setTab('access')}
@@ -890,6 +905,17 @@ export function WidgetPanel({ slug, tenantId }: { slug: string; tenantId: string
           </Card>
         </div>
         </div>
+      )}
+
+      {tab === 'playground' && config && (
+        <WidgetPlaygroundPanel
+          playground={playground}
+          positioning={positioning}
+          colors={colors}
+          launcher={launcher}
+          effectiveConfig={effective}
+          isLocked={isLocked}
+        />
       )}
 
       {tab === 'access' && (

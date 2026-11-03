@@ -402,6 +402,32 @@
       "dirty": "Unsaved changes",
       "saveSuccess": "Preference saved",
       "saveFail": "Failed to save preference"
+    },
+    "playground": {
+      "title": "Playground",
+      "hint": "Experiment with how your widget would look and behave — locally, in a private simulation.",
+      "notLive": "This playground is a local simulation, not a live chat. Nothing you try here is sent, saved, or applied to your real widget — visitors are never affected, and no message is ever delivered. To change your production configuration, use the Customization tab.",
+      "unavailable": "The playground is not available on your current plan.",
+      "device": "Device",
+      "desktop": "Desktop",
+      "mobile": "Mobile",
+      "language": "Language",
+      "anchor": "Position",
+      "anchorBottomStart": "Bottom start",
+      "anchorBottomEnd": "Bottom end",
+      "anchorBottomCenter": "Bottom center",
+      "palette": "Color palette",
+      "shape": "Launcher shape",
+      "shapeTab": "Tab",
+      "shapeRounded": "Rounded",
+      "shapePill": "Pill",
+      "offsetX": "Horizontal offset (px)",
+      "offsetY": "Vertical offset (px)",
+      "customAccent": "Custom accent",
+      "customAccentHint": "Six-digit hex color, e.g. #663399",
+      "paidOnly": "Paid plans only",
+      "reset": "Reset to baseline",
+      "simulationNote": "Simplified simulation — not pixel-perfect production rendering"
     }
   },
   "invite": {

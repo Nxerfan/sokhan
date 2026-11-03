@@ -258,6 +258,15 @@ export async function GET() {
     const effectiveContextChat = resolveEffectiveContextChat(contextChatInput, entitlements)
     const storedContextChat = getStoredContextChat(contextChatInput)
 
+    // V2 playground (Feature 12): the LOCAL-ONLY simulation entitlement.
+    // The playground never persists drafts — only the capability flag is
+    // exposed, resolved from the REAL authenticated tenant row via the
+    // canonical entitlement catalog. Free / Pro / Max / Self-hosted are
+    // enabled; unknown/invalid plans fail closed. Stored paid-only
+    // customization is never exposed through this field — the playground
+    // initializes from the effective values above, never from this flag.
+    const playgroundEntitlementEnabled = entitlements?.playground === true
+
     return {
       stored,
       isLocked,
@@ -394,6 +403,14 @@ export async function GET() {
         effective: effectiveContextChat,
         stored: storedContextChat,
       },
+      // V2 playground (Feature 12): LOCAL-ONLY simulation entitlement.
+      // Additive authenticated field — no effective/stored split because
+      // nothing is ever persisted. The public widget config does NOT
+      // expose this field (no public widget API is needed for the
+      // playground — it runs entirely inside the dashboard).
+      playground: {
+        entitlements: { enabled: playgroundEntitlementEnabled },
+      },
     } as const
   })
   if (!result) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
@@ -412,6 +429,7 @@ export async function GET() {
     alternativeContactButtons: result.result.alternativeContactButtons,
     smartAvoidance: result.result.smartAvoidance,
     contextChat: result.result.contextChat,
+    playground: result.result.playground,
   })
 }
 
