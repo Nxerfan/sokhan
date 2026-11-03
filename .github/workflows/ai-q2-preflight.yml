@@ -1,0 +1,40 @@
+name: AI-Q2 — independent reviewer acceptance preflight
+on:
+  push:
+    branches:
+      - feat/ai-q2-atomic-usage
+    paths:
+      - tests/unit/ai-q2-policy.test.ts
+      - tests/db-boundary/ai-q2-usage.test.ts
+      - tests/ai-q2-usage.spec.ts
+      - .github/workflows/ai-q2-preflight.yml
+jobs:
+  reviewer-contract-preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Syntax-check all three reviewer-owned TypeScript suites
+        run: |
+          node --input-type=module <<'NODE'
+          import ts from 'typescript'
+          import {readFileSync} from 'node:fs'
+          for (const file of [
+            'tests/unit/ai-q2-policy.test.ts',
+            'tests/db-boundary/ai-q2-usage.test.ts',
+            'tests/ai-q2-usage.spec.ts'
+          ]) {
+            const code=ts.createSourceFile(file,readFileSync(file,'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TS)
+            if(code.parseDiagnostics.length){
+              for(const d of code.parseDiagnostics)console.error(ts.flattenDiagnosticMessageText(d.messageText,'\n'))
+              throw Error('Malformed reviewer TypeScript: '+file)
+            }
+            console.log('Syntax OK: '+file)
+          }
+          NODE
+      - name: Discover real Full/Lite Playwright scenarios (do not run app)
+        run: bunx playwright test tests/ai-q2-usage.spec.ts --list
