@@ -37,7 +37,7 @@ export async function GET() {
 
   if (!result) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
 
-  const { state, usage } = result.result
+  const { state, usage: tenantUsage } = result.result
   const plan = getPlan(state.planSlug)
 
   return NextResponse.json({
@@ -81,6 +81,8 @@ export async function GET() {
       createdAt: i.createdAt,
       paidAt: i.paidAt,
     })),
-    usage,
+    // The inner usage object (agents, conversations, departments, aiActions,
+    // ...) — NOT the full getTenantUsage wrapper which also has planSlug.
+    usage: tenantUsage.usage,
   })
 }
