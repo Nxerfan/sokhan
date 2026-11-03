@@ -1,11 +1,7 @@
 import { NextResponse, NextRequest } from 'next/server'
 import { withSessionTenant, hasRole } from '@/lib/auth'
 import { db, getCurrentTenantId } from '@/lib/db'
-import {
-  validateAiConfigPatch,
-  mergeAiConfigPatch,
-  type AiConfigFlags,
-} from '@/lib/ai/ai-config-policy'
+import { validateAiConfigPatch } from '@/lib/ai/ai-config-policy'
 
 /**
  * GET /api/ai-config — return the current tenant's AI feature flags.
@@ -33,19 +29,25 @@ export async function GET() {
 }
 
 /**
- * PATCH /api/ai-config — update AI feature toggles with TRUE-PATCH semantics.
+ * PATCH /api/ai-config — update AI feature toggles with atomic TRUE-PATCH
+ * semantics (no lost updates under concurrency).
  *
  * - Requires admin-or-higher authorization (hasRole 'admin').
  * - Parses JSON safely (malformed / absent body → 400).
  * - Validates using validateAiConfigPatch (strict booleans, no coercion,
  *   no unknown keys, no prototype pollution, no accessor execution).
- * - Applies TRUE-PATCH: only fields explicitly provided are updated; omitted
- *   flags preserve their currently stored value (mergeAiConfigPatch).
+ * - Atomic TRUE-PATCH: the Prisma `upsert.update` write set contains ONLY
+ *   the keys explicitly supplied in the validated payload (`{ ...validated }`).
+ *   An omitted flag is NEVER written, so a concurrent PATCH setting the
+ *   other flag cannot be overwritten by a stale read of this request.
+ *   There is no read/merge/full-update race — the handler does NOT load
+ *   the current snapshot before writing.
+ * - Both flags default OFF only when a configuration row does not exist
+ *   (the `create` branch uses `validated.X ?? false`).
  * - Never trusts client-supplied tenant or quota fields (tenantId,
  *   aiActionCount, aiActionResetAt are not in the mutable key set).
  * - Concurrent creation does not create multiple records (upsert is atomic).
  * - Uses current authenticated tenant binding (getCurrentTenantId).
- * - Preserves default-OFF behavior (missing config → create with both OFF).
  */
 export async function PATCH(req: NextRequest) {
   const result = await withSessionTenant(async ({ session }) => {
@@ -61,7 +63,9 @@ export async function PATCH(req: NextRequest) {
       return { invalid: true as const }
     }
 
-    // Early validation (no DB call for invalid patches).
+    // Early validation (no DB call for invalid patches). `validated` is a
+    // Partial<AiConfigFlags> containing ONLY the mutable keys that were
+    // present and valid in the payload (actual booleans, no unknown keys).
     const validated = validateAiConfigPatch(body)
     if (!validated) {
       return { invalid: true as const }
@@ -69,36 +73,30 @@ export async function PATCH(req: NextRequest) {
 
     const tid = getCurrentTenantId()!
 
-    // Load the current stored flags (or default OFF if no record exists yet).
-    const current = await db.aiConfig.findUnique({ where: { tenantId: tid } })
-    const stored: AiConfigFlags = current
-      ? { faqEnabled: current.faqEnabled, productQaEnabled: current.productQaEnabled }
-      : { faqEnabled: false, productQaEnabled: false }
-
-    // TRUE-PATCH merge — omitted flags preserve the stored value.
-    // `validated` is already a valid partial; mergeAiConfigPatch re-validates
-    // (defense in depth) and merges. This can only return null if the
-    // validated partial is somehow malformed — which it can't be — so the
-    // null check is a defensive guard.
-    const merged = mergeAiConfigPatch(stored, validated)
-    if (!merged) {
-      return { invalid: true as const }
-    }
-
-    // Atomic upsert — concurrent creation does not create multiple records.
-    // Only the two mutable flags are written; tenantId is bound to the
-    // authenticated tenant, and aiActionCount / aiActionResetAt are never
-    // touched by this handler.
+    // Atomic TRUE-PATCH — NO stale read/merge before the write.
+    //
+    // The `update` write set is `{ ...validated }` — ONLY the keys the
+    // client explicitly supplied. Prisma's update applies only the fields
+    // present in this object, so an omitted flag is never written and a
+    // concurrent PATCH setting the other flag cannot be clobbered by a
+    // stale snapshot from this request.
+    //
+    // The `create` branch (row does not exist yet) seeds BOTH flags: the
+    // supplied ones from `validated`, and the omitted ones default OFF
+    // (`?? false`). This preserves default-OFF behavior for new records
+    // while still writing only the supplied keys on existing records.
+    //
+    // tenantId is bound to the authenticated tenant; aiActionCount and
+    // aiActionResetAt are never written by this handler.
     const config = await db.aiConfig.upsert({
       where: { tenantId: tid },
       create: {
         tenantId: tid,
-        faqEnabled: merged.faqEnabled,
-        productQaEnabled: merged.productQaEnabled,
+        faqEnabled: validated.faqEnabled ?? false,
+        productQaEnabled: validated.productQaEnabled ?? false,
       },
       update: {
-        faqEnabled: merged.faqEnabled,
-        productQaEnabled: merged.productQaEnabled,
+        ...validated,
       },
     })
     return { config } as const

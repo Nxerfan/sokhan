@@ -366,9 +366,14 @@ describe('Developer — AI config route source wiring', () => {
   const routeCode = code(routeSrc)
 
   test('the route imports and uses the strict policy module', () => {
+    // The route uses validateAiConfigPatch to validate the payload before
+    // the atomic upsert. mergeAiConfigPatch is NOT imported by the route —
+    // the atomic true-PATCH writes `{ ...validated }` directly, without a
+    // stale read/merge. (mergeAiConfigPatch remains exported by the policy
+    // module for standalone deterministic policy tests.)
     expect(routeCode).toContain('validateAiConfigPatch')
-    expect(routeCode).toContain('mergeAiConfigPatch')
-    expect(routeCode).toContain('AiConfigFlags')
+    expect(routeCode).not.toContain('mergeAiConfigPatch')
+    expect(routeCode).not.toContain('AiConfigFlags')
   })
 
   test('the old `?? false` reset bug is gone', () => {
@@ -404,8 +409,32 @@ describe('Developer — AI config route source wiring', () => {
     expect(routeCode).toContain('invalid')
   })
 
-  test('PATCH applies TRUE-PATCH via mergeAiConfigPatch', () => {
-    expect(routeCode).toContain('mergeAiConfigPatch(stored')
+  test('PATCH write set is ONLY the validated keys — no stale full-merge (atomic true-PATCH)', () => {
+    // The UPDATE branch must spread `...validated` (only supplied keys),
+    // NOT replay a stale full snapshot. This is the atomic true-PATCH
+    // contract: an omitted flag is never written, so a concurrent PATCH
+    // setting the other flag cannot be overwritten by a stale read.
+    expect(routeCode).toContain('...validated')
+    // The unsafe full-merge pattern (update: { faqEnabled: merged.X, ... })
+    // MUST NOT appear.
+    expect(routeCode).not.toMatch(/update:\s*\{\s*faqEnabled:\s*merged\.faqEnabled/)
+    expect(routeCode).not.toMatch(/faqEnabled:\s*merged\.faqEnabled/)
+    expect(routeCode).not.toMatch(/productQaEnabled:\s*merged\.productQaEnabled/)
+  })
+
+  test('PATCH does NOT load a stale snapshot before the write (no findUnique + mergeAiConfigPatch race)', () => {
+    // The handler must NOT read the current config and merge before writing —
+    // that read/merge/full-update flow is the lost-update race. The atomic
+    // true-PATCH writes directly from the validated payload.
+    expect(routeCode).not.toMatch(/db\.aiConfig\.findUnique/)
+    expect(routeCode).not.toMatch(/mergeAiConfigPatch/)
+  })
+
+  test('PATCH create branch defaults omitted flags OFF (?? false)', () => {
+    // When the row does not exist, the create branch seeds supplied flags
+    // from `validated` and omitted flags default OFF.
+    expect(routeCode).toContain('validated.faqEnabled ?? false')
+    expect(routeCode).toContain('validated.productQaEnabled ?? false')
   })
 
   test('PATCH never trusts client-supplied tenant or quota fields', () => {
@@ -418,6 +447,163 @@ describe('Developer — AI config route source wiring', () => {
 
   test('the route binds the tenant to the authenticated session', () => {
     expect(routeCode).toContain('getCurrentTenantId()')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Concurrent true-PATCH write-set contract
+//
+// The previous implementation had a lost-update race: it read the stored
+// snapshot (findUnique), merged the patch (mergeAiConfigPatch), and wrote
+// BOTH merged flags (update: { faqEnabled: merged.X, productQaEnabled:
+// merged.Y }). Under concurrent PATCHes, whichever completed last destroyed
+// the other's independent update.
+//
+// The fix: the upsert.update write set is `{ ...validated }` — ONLY the keys
+// the client explicitly supplied. Prisma applies only the fields present in
+// this object, so an omitted flag is never written and a concurrent PATCH
+// setting the other flag cannot be clobbered.
+//
+// These tests verify the write-set contract at the source level (the
+// definitive guard against the stale full-merge pattern) AND at the policy
+// level (the validated partial is exactly what gets spread into the update).
+// ---------------------------------------------------------------------------
+
+describe('Developer — concurrent true-PATCH write-set contract', () => {
+  const routeSrc = readFileSync(join(process.cwd(), 'src/app/api/ai-config/route.ts'), 'utf8')
+  const code = (src: string): string =>
+    src
+      .replace(/\/[\u002A][\s\S]*?[\u002A]\//g, '')
+      .replace(/^\s*\/\/[^\n]*$/gm, '')
+  const routeCode = code(routeSrc)
+  const patchHandler = routeSrc.split('export async function PATCH')[1] ?? ''
+
+  test('concurrent independent true/true PATCHes from off/off cannot lose either flag', () => {
+    // Request A: { faqEnabled: true }. Request B: { productQaEnabled: true }.
+    // Both start from off/off. The update write set for A must be ONLY
+    // { faqEnabled: true } and for B ONLY { productQaEnabled: true }.
+    // The `...validated` spread guarantees this — each PATCH writes only its
+    // own key, so both true values survive regardless of interleaving.
+    expect(patchHandler).toContain('...validated')
+    expect(patchHandler).not.toMatch(/faqEnabled:\s*merged\.faqEnabled/)
+    expect(patchHandler).not.toMatch(/productQaEnabled:\s*merged\.productQaEnabled/)
+    // The validated partial for { faqEnabled: true } contains ONLY faqEnabled.
+    const a = validateAiConfigPatch({ faqEnabled: true })!
+    expect(Object.keys(a)).toEqual(['faqEnabled'])
+    expect(a).toEqual({ faqEnabled: true })
+    const b = validateAiConfigPatch({ productQaEnabled: true })!
+    expect(Object.keys(b)).toEqual(['productQaEnabled'])
+    expect(b).toEqual({ productQaEnabled: true })
+  })
+
+  test('concurrent independent false/false PATCHes from on/on cannot lose either flag', () => {
+    // Request A: { faqEnabled: false }. Request B: { productQaEnabled: false }.
+    // Both start from on/on. Each writes ONLY its own key (false), so both
+    // false values survive — the final state is off/off, not a stale on/off.
+    const a = validateAiConfigPatch({ faqEnabled: false })!
+    expect(Object.keys(a)).toEqual(['faqEnabled'])
+    expect(a).toEqual({ faqEnabled: false })
+    const b = validateAiConfigPatch({ productQaEnabled: false })!
+    expect(Object.keys(b)).toEqual(['productQaEnabled'])
+    expect(b).toEqual({ productQaEnabled: false })
+    // The spread of each into a separate update does not interfere.
+    const updateA = { ...a }
+    const updateB = { ...b }
+    expect(updateA).not.toHaveProperty('productQaEnabled')
+    expect(updateB).not.toHaveProperty('faqEnabled')
+  })
+
+  test('a PATCH that explicitly changes both fields writes both keys', () => {
+    // Request: { faqEnabled: true, productQaEnabled: false }.
+    // The validated partial contains BOTH keys — the spread writes both.
+    const validated = validateAiConfigPatch({ faqEnabled: true, productQaEnabled: false })!
+    expect(Object.keys(validated).sort()).toEqual(['faqEnabled', 'productQaEnabled'])
+    const update = { ...validated }
+    expect(update).toEqual({ faqEnabled: true, productQaEnabled: false })
+  })
+
+  test('an omitted flag is never present in the update write set', () => {
+    // The core invariant: validateAiConfigPatch returns ONLY the supplied
+    // mutable keys. Spreading into `update` writes only those keys. An
+    // omitted flag is absent from the object, so Prisma never touches it.
+    for (const [patch, expectedKeys] of [
+      [{ faqEnabled: true }, ['faqEnabled']],
+      [{ faqEnabled: false }, ['faqEnabled']],
+      [{ productQaEnabled: true }, ['productQaEnabled']],
+      [{ productQaEnabled: false }, ['productQaEnabled']],
+      [{ faqEnabled: true, productQaEnabled: true }, ['faqEnabled', 'productQaEnabled']],
+      [{ faqEnabled: false, productQaEnabled: false }, ['faqEnabled', 'productQaEnabled']],
+    ] as const) {
+      const validated = validateAiConfigPatch(patch)!
+      expect(Object.keys(validated).sort()).toEqual([...expectedKeys].sort())
+      const update = { ...validated }
+      // The update write set has exactly the expected keys — no stale
+      // snapshot, no omitted flag.
+      expect(Object.keys(update).sort()).toEqual([...expectedKeys].sort())
+    }
+  })
+
+  test('the create branch seeds omitted flags OFF (atomic creation when no row exists)', () => {
+    // When the row does not exist, the create branch uses
+    // `validated.X ?? false` — supplied flags from the patch, omitted flags
+    // default OFF. This preserves default-OFF behavior for new records.
+    expect(patchHandler).toContain('validated.faqEnabled ?? false')
+    expect(patchHandler).toContain('validated.productQaEnabled ?? false')
+  })
+
+  test('the handler never loads a stale snapshot (no findUnique before the upsert)', () => {
+    // The read/merge/full-update race requires a findUnique + mergeAiConfigPatch
+    // before the write. The atomic true-PATCH has neither — it writes
+    // directly from the validated payload.
+    expect(patchHandler).not.toMatch(/db\.aiConfig\.findUnique/)
+    expect(patchHandler).not.toMatch(/mergeAiConfigPatch/)
+    expect(patchHandler).not.toMatch(/mergeAiConfigPatch\(stored/)
+  })
+
+  test('the unsafe full-merge write set pattern is absent', () => {
+    // The exact pattern the reviewer's static guard checks for: the update
+    // object must NOT contain `faqEnabled: merged.faqEnabled, productQaEnabled:
+    // merged.productQaEnabled`. This is the stale full-merge that causes
+    // lost updates.
+    const unsafe = /update:\s*\{\s*faqEnabled:\s*merged\.faqEnabled,\s*productQaEnabled:\s*merged\.productQaEnabled,?\s*\}/
+    expect(patchHandler).not.toMatch(unsafe)
+  })
+
+  test('the upsert is atomic (create-or-update in a single Prisma call)', () => {
+    // A single upsert call handles both creation and update — no
+    // find-then-create race, no duplicate records.
+    expect(patchHandler).toContain('db.aiConfig.upsert')
+    expect(patchHandler).toContain('where: { tenantId: tid }')
+    expect(patchHandler).toContain('create:')
+    expect(patchHandler).toContain('update:')
+  })
+
+  test('unknown fields and quota forgery are still rejected (validateAiConfigPatch guards the write set)', () => {
+    // The write set is derived from `validated`, which only contains the two
+    // mutable keys. Unknown / quota fields are rejected by validateAiConfigPatch
+    // before the upsert, so they can never enter the write set.
+    expect(validateAiConfigPatch({ faqEnabled: true, tenantId: 'foreign' })).toBeNull()
+    expect(validateAiConfigPatch({ productQaEnabled: true, aiActionCount: 999 })).toBeNull()
+    expect(validateAiConfigPatch({ faqEnabled: true, aiActionResetAt: '2099-01-01' })).toBeNull()
+    expect(validateAiConfigPatch({ faqEnabled: true, extra: 'x' })).toBeNull()
+    // A valid patch's write set contains NO quota / tenant fields.
+    const validated = validateAiConfigPatch({ faqEnabled: true })!
+    expect(validated).not.toHaveProperty('tenantId')
+    expect(validated).not.toHaveProperty('aiActionCount')
+    expect(validated).not.toHaveProperty('aiActionResetAt')
+  })
+
+  test('the write set never includes the tenantId (bound to the authenticated session)', () => {
+    // The tenantId in the upsert is `tid` (from getCurrentTenantId), NOT from
+    // the validated payload. The client cannot supply a foreign tenantId.
+    expect(patchHandler).toContain('tenantId: tid')
+    const validated = validateAiConfigPatch({ faqEnabled: true })!
+    expect(validated).not.toHaveProperty('tenantId')
+  })
+
+  test('PATCH authorization requires admin-or-higher', () => {
+    expect(patchHandler).toContain("hasRole(session.user.role, 'admin')")
+    expect(patchHandler).toContain('forbidden')
   })
 })
 
