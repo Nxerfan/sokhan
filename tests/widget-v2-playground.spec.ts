@@ -245,4 +245,44 @@ test.describe('Reviewer — Widget V2 Playground / Feature 12', () => {
       await expect(owner.getByTestId('playground-message').locator('script')).toHaveCount(0)
     } finally { await ctx.close() }
   })
+  test('Narrow responsive dashboard keeps simulated launcher and open chat inside the REAL clipped preview width', async ({ browser }) => {
+    const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+    try {
+      const owner = await ctx.newPage()
+      await signup(owner, 'responsive-width')
+      await openPlayground(owner)
+      // Start at desktop width so sidebar navigation is accessible, then
+      // exercise the same mounted Playground after the dashboard shrinks.
+      await owner.setViewportSize({ width: 320, height: 740 })
+      for (const device of ['desktop', 'mobile'] as const) {
+        await owner.getByTestId('playground-device-' + device).click()
+        await expect(owner.getByTestId('playground-surface')).toHaveAttribute('data-playground-device', device)
+        const surface = owner.getByTestId('playground-surface')
+        const launcher = owner.getByTestId('playground-launcher')
+        const surfaceRect = await surface.boundingBox()
+        const launcherRect = await launcher.boundingBox()
+        expect(surfaceRect).not.toBeNull()
+        expect(launcherRect).not.toBeNull()
+        expect(surfaceRect!.width).toBeLessThanOrEqual(320)
+        // CSS max-width:100% may shrink the actual preview below its 640px/
+        // 360px design size. Positioning MUST use the measured rendered size,
+        // or the launcher is clipped outside the preview on narrow screens.
+        expect(launcherRect!.x).toBeGreaterThanOrEqual(surfaceRect!.x - 1)
+        expect(launcherRect!.x + launcherRect!.width).toBeLessThanOrEqual(surfaceRect!.x + surfaceRect!.width + 1)
+        expect(launcherRect!.y).toBeGreaterThanOrEqual(surfaceRect!.y - 1)
+        expect(launcherRect!.y + launcherRect!.height).toBeLessThanOrEqual(surfaceRect!.y + surfaceRect!.height + 1)
+        await launcher.click()
+        const chat = owner.getByTestId('playground-chat')
+        await expect(chat).toBeVisible()
+        const chatRect = await chat.boundingBox()
+        expect(chatRect).not.toBeNull()
+        expect(chatRect!.x).toBeGreaterThanOrEqual(surfaceRect!.x - 1)
+        expect(chatRect!.x + chatRect!.width).toBeLessThanOrEqual(surfaceRect!.x + surfaceRect!.width + 1)
+        expect(chatRect!.y).toBeGreaterThanOrEqual(surfaceRect!.y - 1)
+        expect(chatRect!.y + chatRect!.height).toBeLessThanOrEqual(surfaceRect!.y + surfaceRect!.height + 1)
+        await launcher.click()
+        await expect(chat).toHaveCount(0)
+      }
+    } finally { await ctx.close() }
+  })
 })
