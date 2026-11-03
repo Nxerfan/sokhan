@@ -276,4 +276,51 @@ describe('Reviewer AI-Q2 — real database and atomic billable replies',()=>{
     expect(gate.allowed,'Shared billing gate must not authorize AI while all slots are committed or reserved').toBe(false)
   })
 
+  test('parallel releases of ONE reserved reply never decrement the period below zero',async()=>{
+    const tid=await tenant(),conv=await conversation(tid)
+    for(let turn=0;turn<3;turn++){
+      const mid=await inbound(tid,conv,'Concurrent release '+turn)
+      const r=await reserve(tid,conv,mid)
+      expect(r.status).toBe('reserved')
+      if(r.status!=='reserved')throw Error('No reservation')
+      await Promise.all(Array.from({length:12},()=>releaseAiReply({tenantId:tid,reservationId:r.reservationId})))
+      const period=await getAiUsageState(tid)
+      expect(period.reserved,'Exactly one reservation must be released, regardless of concurrent retries').toBe(0)
+      expect(period.used).toBe(0)
+      expect(period.remaining).toBe(1400)
+    }
+    const rows=await globalDb.aiUsagePeriod.findMany({where:{tenantId:tid}})
+    expect(rows.every(x=>x.reserved>=0)).toBe(true)
+  })
+  test('parallel retries of ONE previously released reply allocate at most ONE capacity slot',async()=>{
+    const tid=await tenant(),conv=await conversation(tid),mid=await inbound(tid,conv)
+    const first=await reserve(tid,conv,mid)
+    expect(first.status).toBe('reserved')
+    if(first.status!=='reserved')throw Error('No reservation')
+    await releaseAiReply({tenantId:tid,reservationId:first.reservationId})
+    const retries=await Promise.all(Array.from({length:12},()=>reserve(tid,conv,mid)))
+    expect(retries.filter(x=>x.status==='reserved')).toHaveLength(1)
+    expect(retries.filter(x=>x.status==='in_progress')).toHaveLength(11)
+    expect(await globalDb.aiReplyReservation.count({where:{tenantId:tid,visitorMessageId:mid}})).toBe(1)
+    expect(await getAiUsageState(tid)).toMatchObject({used:0,reserved:1,remaining:1399})
+    const winner=retries.find(x=>x.status==='reserved')
+    if(!winner||winner.status!=='reserved')throw Error('No winner')
+    await commit(tid,winner.reservationId,conv)
+    expect(await getAiUsageState(tid)).toMatchObject({used:1,reserved:0,remaining:1399})
+  })
+  test('expired ACTIVE subscription blocks shared aiActions gate instead of granting calendar fallback',async()=>{
+    const tid=await tenant('pro'),now=new Date()
+    const start=new Date(now.getTime()-40*86400000)
+    const end=new Date(now.getTime()-86400000)
+    const p=await globalDb.plan.findUnique({where:{slug:'pro'},select:{id:true}})
+    expect(p).toBeTruthy()
+    await globalDb.subscription.create({data:{
+      tenantId:tid,planId:p!.id,status:'active',gateway:'zarinpal',
+      currentPeriodStart:start,currentPeriodEnd:end,
+    }})
+    expect(await getAiUsageState(tid,now)).toMatchObject({limit:0,remaining:0})
+    const gate=await checkPlanLimit(tid,'aiActions')
+    expect(gate.allowed,'An expired active subscription must not authorize new AI reply capacity').toBe(false)
+  })
+
 })
