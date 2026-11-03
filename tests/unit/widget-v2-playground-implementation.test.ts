@@ -821,18 +821,6 @@ describe('Developer — responsive containment source wiring + lifecycle', () =>
     expect(playgroundCode).toMatch(/prev\.w\s*===\s*w\s*&&\s*prev\.h\s*===\s*h/)
   })
 
-  test('the ResizeObserver commits its measurement synchronously via flushSync (no stale effectiveW)', () => {
-    // React 18 may defer a non-discrete ResizeObserver state update past the
-    // next paint. flushSync forces the measured size to be committed before
-    // paint, so the geometry always reflects the real rendered surface —
-    // critical after a viewport resize or scroll, or the chat panel is
-    // positioned against a stale width and overflows the surface.
-    expect(playgroundCode).toContain('import { flushSync } from \'react-dom\'')
-    expect(playgroundCode).toMatch(/new ResizeObserver\(\(\)\s*=>\s*{[\s\S]*?flushSync\(measure\)/)
-    // measure is a stable extracted callback (reusable after the scroll).
-    expect(playgroundCode).toContain('const measure = useCallback(() => {')
-  })
-
   test('the responsive containment addition stays local-only — no new network, storage or unsafe rendering', () => {
     // The ResizeObserver path introduces NO network calls, NO browser
     // storage and NO innerHTML/dangerouslySetInnerHTML.
@@ -849,36 +837,27 @@ describe('Developer — responsive containment source wiring + lifecycle', () =>
     expect(playgroundCode).not.toMatch(/window\.addEventListener\(\s*['"]resize/)
   })
 
-  test('selecting a device brings the preview surface into view and re-measures synchronously', () => {
-    // On a narrow dashboard the preview surface sits below the fold. The
-    // device selector scrolls it into view so the launcher is already
-    // on-screen before it is clicked — otherwise an auto-scroll between a
-    // surface bounding-box measurement and a later open-chat measurement
-    // would compare positions at different scroll states. `block: 'nearest'`
-    // scrolls minimally and is a no-op when the surface is already visible.
-    expect(playgroundCode).toContain('const selectDevice = useCallback(')
-    expect(playgroundCode).toContain("scrollIntoView({ block: 'nearest' })")
-    // Both device buttons route through selectDevice (not setDevice directly).
-    expect(playgroundCode).toContain("onClick={() => selectDevice('desktop')}")
-    expect(playgroundCode).toContain("onClick={() => selectDevice('mobile')}")
-    // The scroll is followed by a synchronous re-measure (flushSync) so the
-    // effective width reflects the post-scroll rendered size — the scroll
-    // may change the container's available width (scrollbar), and without a
-    // re-measure the geometry would use a stale width and the chat would
-    // overflow the surface.
-    expect(playgroundCode).toContain('flushSync(measure)')
-  })
-
-  test('the launcher toggle does NOT scroll (scrolling on open would re-align the surface post-measure)', () => {
-    // The launcher onClick only flips `open` — it must NOT call
-    // scrollIntoView, or the surface would move between its bounding-box
-    // measurement and the open-chat measurement (the very mismatch the
-    // device-selector scroll prevents).
-    expect(playgroundCode).toContain('onClick={() => setOpen((o) => !o)}')
-    // No scrollIntoView call inside the launcher onClick path.
-    const launcherBlock = playgroundCode.match(/data-testid="playground-launcher"[\s\S]{0,400}?>/)
-    expect(launcherBlock).not.toBeNull()
-    expect(launcherBlock![0]).not.toContain('scrollIntoView')
+  test('the surface is sticky-bottom at narrow widths so the launcher stays on-screen (no auto-scroll between measurements)', () => {
+    // On a narrow dashboard the controls stack above the surface and can push
+    // it below the fold. If the launcher is off-screen, a Playwright click
+    // auto-scrolls it into view BETWEEN the surface bounding-box measurement
+    // and the open-chat measurement — the two rects are then compared at
+    // different scroll states and the vertical containment assertion fails
+    // against a stale surface position. `sticky bottom-0` (narrow only)
+    // pins the surface to the bottom of the scroll container's visible area
+    // so the launcher is always on-screen before it is clicked: no
+    // auto-scroll, the surface and chat are measured at the same scroll
+    // state. A `max-h` cap keeps the pinned surface short enough that the
+    // device selector above it stays visible too.
+    expect(playgroundCode).toContain('sticky bottom-0')
+    expect(playgroundCode).toContain('max-h-[300px]')
+    // At ≥sm the surface reverts to the normal flow (relative, full height).
+    expect(playgroundCode).toContain('sm:max-h-none')
+    expect(playgroundCode).toContain('sm:relative')
+    // No scrollIntoView / programmatic scroll — the sticky CSS is the sole
+    // mechanism (no timing side effects on the measured width).
+    expect(playgroundCode).not.toContain('scrollIntoView')
+    expect(playgroundCode).not.toContain('flushSync')
   })
 })
 
