@@ -323,4 +323,25 @@ describe('Reviewer AI-Q2 — real database and atomic billable replies',()=>{
     expect(gate.allowed,'An expired active subscription must not authorize new AI reply capacity').toBe(false)
   })
 
+  test('commit revalidates persisted reservation ownership, not only a matching caller conversation ID',async()=>{
+    const a=await tenant('pro'),b=await tenant('pro')
+    const aConv=await conversation(a),bConv=await conversation(b),aMid=await inbound(a,aConv)
+    const r=await reserve(a,aConv,aMid)
+    expect(r.status).toBe('reserved')
+    if(r.status!=='reserved')throw Error('Initial reservation failed')
+    // Model a legacy/corrupted reservation that points at another tenant's
+    // Conversation. A valid original reserve alone is not enough to protect
+    // the settlement boundary if stored associations become inconsistent.
+    await globalDb.aiReplyReservation.update({
+      where:{id:r.reservationId},
+      data:{conversationId:bConv},
+    })
+    const attempt=await commit(a,r.reservationId,bConv,'Must never cross tenant boundary')
+    expect(attempt.status,'Commit must verify Conversation and visitor Message ownership inside the settlement boundary').toBe('not_found')
+    expect(await globalDb.message.count({where:{tenantId:a,senderType:'ai'}})).toBe(0)
+    expect(await globalDb.message.count({where:{tenantId:b,senderType:'ai'}})).toBe(0)
+    expect((await getAiUsageState(a)).used).toBe(0)
+    await releaseAiReply({tenantId:a,reservationId:r.reservationId})
+  })
+
 })
