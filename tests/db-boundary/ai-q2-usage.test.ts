@@ -14,7 +14,7 @@
 import {beforeAll,afterAll,describe,test,expect} from 'bun:test'
 import {globalDb} from '@/lib/db'
 import {ensurePlansSeeded} from '@/lib/payments/plans'
-import {getTenantUsage} from '@/lib/payments/gating'
+import {getTenantUsage,checkPlanLimit} from '@/lib/payments/gating'
 import {resolveAiUsageWindow} from '@/lib/ai/usage-policy'
 import {getAiUsageState,reserveAiReply,commitAiReply,releaseAiReply} from '@/lib/ai/usage-service'
 const run=Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,9)
@@ -261,6 +261,19 @@ describe('Reviewer AI-Q2 — real database and atomic billable replies',()=>{
     expect(result.status,'An expired reserved lease may not commit a new AI reply').toBe('not_found')
     expect(await globalDb.message.count({where:{tenantId:tid,senderType:'ai'}})).toBe(0)
     expect((await getAiUsageState(tid,tooLate)).used).toBe(0)
+  })
+
+  test('shared aiActions plan-gating honors reserved slots, not stale monthly Message.count',async()=>{
+    const tid=await tenant(),now=new Date(),p=resolveAiUsageWindow(now,null)!
+    await globalDb.aiUsagePeriod.create({data:{
+      tenantId:tid,periodStart:p.start,periodEnd:p.end,used:1399,reserved:1,backfilled:true,
+    }})
+    const state=await getAiUsageState(tid,now)
+    expect(state).toMatchObject({limit:1400,used:1399,reserved:1,remaining:0})
+    const gate=await checkPlanLimit(tid,'aiActions')
+    expect(gate.planSlug).toBe('pro')
+    expect(gate.limit).toBe(1400)
+    expect(gate.allowed,'Shared billing gate must not authorize AI while all slots are committed or reserved').toBe(false)
   })
 
 })
