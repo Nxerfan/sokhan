@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { flushSync } from 'react-dom'
 import { useTranslations } from 'next-intl'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -298,24 +299,33 @@ export function WidgetPlaygroundPanel({
   // positioning change.
   const surfaceRef = useRef<HTMLDivElement>(null)
   const [measuredSize, setMeasuredSize] = useState<{ w: number; h: number } | null>(null)
+  // Read the surface's real border-box size and commit it to state. Only
+  // updates when the rounded integer changes (no sub-pixel feedback loop).
+  // Extracted as a stable callback so it can be re-invoked after a scroll.
+  const measure = useCallback(() => {
+    const el = surfaceRef.current
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    const w = Math.max(0, Math.round(rect.width))
+    const h = Math.max(0, Math.round(rect.height))
+    setMeasuredSize((prev) => (prev && prev.w === w && prev.h === h ? prev : { w, h }))
+  }, [])
   useEffect(() => {
     if (!caps.enabled) return
     const el = surfaceRef.current
     if (!el) return
-    const measure = () => {
-      const rect = el.getBoundingClientRect()
-      const w = Math.max(0, Math.round(rect.width))
-      const h = Math.max(0, Math.round(rect.height))
-      // Only update when the rounded integer actually changes — avoids
-      // spurious re-renders from sub-pixel fluctuations and any feedback
-      // loop between the observer and React state.
-      setMeasuredSize((prev) => (prev && prev.w === w && prev.h === h ? prev : { w, h }))
-    }
     measure() // capture the initial rendered size before the first observer tick
-    const ro = new ResizeObserver(measure)
+    const ro = new ResizeObserver(() => {
+      // flushSync guarantees the measured size is committed synchronously
+      // before the browser paints, so the geometry ALWAYS reflects the
+      // real rendered surface — no stale effectiveW across a viewport
+      // resize or scroll (React 18 may otherwise defer a non-discrete
+      // ResizeObserver state update past the next paint).
+      flushSync(measure)
+    })
     ro.observe(el)
     return () => ro.disconnect()
-  }, [caps.enabled])
+  }, [caps.enabled, measure])
 
   const currentPos = posByDevice[device]
 
@@ -412,8 +422,21 @@ export function WidgetPlaygroundPanel({
   // and is a no-op when the surface is already visible.
   const selectDevice = useCallback((d: PlaygroundDevice) => {
     setDevice(d)
-    surfaceRef.current?.scrollIntoView({ block: 'nearest' })
-  }, [])
+    // Bring the preview into view on a narrow dashboard so the launcher is
+    // already on-screen before it is clicked — no auto-scroll re-positions
+    // the surface between a surface bounding-box measurement and a later
+    // open-chat measurement. `block: 'nearest'` scrolls minimally and is a
+    // no-op when the surface is already visible.
+    const el = surfaceRef.current
+    if (el) {
+      el.scrollIntoView({ block: 'nearest' })
+      // Re-measure AFTER the scroll and commit synchronously: the scroll
+      // may change the container's available width (scrollbar
+      // addition/removal), so the effective width must reflect the
+      // post-scroll rendered size before the next geometry computation.
+      flushSync(measure)
+    }
+  }, [measure])
 
   // ---- Preview derivation (canonical catalogs + shared geometry) ----
 

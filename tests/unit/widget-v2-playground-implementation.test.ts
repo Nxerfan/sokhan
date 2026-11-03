@@ -821,6 +821,18 @@ describe('Developer — responsive containment source wiring + lifecycle', () =>
     expect(playgroundCode).toMatch(/prev\.w\s*===\s*w\s*&&\s*prev\.h\s*===\s*h/)
   })
 
+  test('the ResizeObserver commits its measurement synchronously via flushSync (no stale effectiveW)', () => {
+    // React 18 may defer a non-discrete ResizeObserver state update past the
+    // next paint. flushSync forces the measured size to be committed before
+    // paint, so the geometry always reflects the real rendered surface —
+    // critical after a viewport resize or scroll, or the chat panel is
+    // positioned against a stale width and overflows the surface.
+    expect(playgroundCode).toContain('import { flushSync } from \'react-dom\'')
+    expect(playgroundCode).toMatch(/new ResizeObserver\(\(\)\s*=>\s*{[\s\S]*?flushSync\(measure\)/)
+    // measure is a stable extracted callback (reusable after the scroll).
+    expect(playgroundCode).toContain('const measure = useCallback(() => {')
+  })
+
   test('the responsive containment addition stays local-only — no new network, storage or unsafe rendering', () => {
     // The ResizeObserver path introduces NO network calls, NO browser
     // storage and NO innerHTML/dangerouslySetInnerHTML.
@@ -837,7 +849,7 @@ describe('Developer — responsive containment source wiring + lifecycle', () =>
     expect(playgroundCode).not.toMatch(/window\.addEventListener\(\s*['"]resize/)
   })
 
-  test('selecting a device brings the preview surface into view (scrollIntoView nearest)', () => {
+  test('selecting a device brings the preview surface into view and re-measures synchronously', () => {
     // On a narrow dashboard the preview surface sits below the fold. The
     // device selector scrolls it into view so the launcher is already
     // on-screen before it is clicked — otherwise an auto-scroll between a
@@ -845,10 +857,16 @@ describe('Developer — responsive containment source wiring + lifecycle', () =>
     // would compare positions at different scroll states. `block: 'nearest'`
     // scrolls minimally and is a no-op when the surface is already visible.
     expect(playgroundCode).toContain('const selectDevice = useCallback(')
-    expect(playgroundCode).toContain('surfaceRef.current?.scrollIntoView({ block: \'nearest\' })')
+    expect(playgroundCode).toContain("scrollIntoView({ block: 'nearest' })")
     // Both device buttons route through selectDevice (not setDevice directly).
     expect(playgroundCode).toContain("onClick={() => selectDevice('desktop')}")
     expect(playgroundCode).toContain("onClick={() => selectDevice('mobile')}")
+    // The scroll is followed by a synchronous re-measure (flushSync) so the
+    // effective width reflects the post-scroll rendered size — the scroll
+    // may change the container's available width (scrollbar), and without a
+    // re-measure the geometry would use a stale width and the chat would
+    // overflow the surface.
+    expect(playgroundCode).toContain('flushSync(measure)')
   })
 
   test('the launcher toggle does NOT scroll (scrolling on open would re-align the surface post-measure)', () => {
