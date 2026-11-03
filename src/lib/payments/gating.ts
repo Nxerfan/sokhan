@@ -189,10 +189,16 @@ export async function getTenantUsage(tenantId: string): Promise<{
   const planSlug = await resolveTenantPlanSlug(tenantId)
   const plan = getPlan(planSlug) ?? getPlan('free')!
 
-  const [agents, conversations, departments] = await Promise.all([
+  // AI-Q2: aiActions usage comes from the authoritative usage service
+  // (real committed replies in the active accounting period), not a
+  // hardcoded zero. The other metrics use countUsage as before.
+  const { getAiUsageState } = await import('@/lib/ai/usage-service')
+
+  const [agents, conversations, departments, aiState] = await Promise.all([
     countUsage(tenantId, 'agents'),
     countUsage(tenantId, 'conversations'),
     countUsage(tenantId, 'departments'),
+    getAiUsageState(tenantId),
   ])
 
   return {
@@ -201,7 +207,7 @@ export async function getTenantUsage(tenantId: string): Promise<{
       agents: { current: agents, limit: plan.limits.agents },
       conversations: { current: conversations, limit: plan.limits.conversations },
       departments: { current: departments, limit: plan.limits.departments },
-      aiActions: { current: 0, limit: (plan.limits as any).aiActions ?? -1 },
+      aiActions: { current: aiState.used, limit: aiState.limit },
       websites: { current: 0, limit: (plan.limits as any).websites ?? 1 },
       weeklyMessages: { current: 0, limit: (plan.limits as any).weeklyMessages ?? 100 },
     },

@@ -645,11 +645,14 @@ describe('Developer — exact-match FAQ fast-path source wiring', () => {
     expect(matchFaqIdx).toBeGreaterThan(exactIdx)
   })
 
-  test('the plan cap check runs before the FAQ block (Free zero quota is enforced)', () => {
-    const capIdx = msgCode.indexOf('checkPlanLimit')
+  test('the AI-Q2 reservation runs before the FAQ block (Free zero quota is enforced)', () => {
+    // AI-Q2: the reservation (reserveAiReply) is the authoritative quota gate,
+    // replacing the old count-based checkPlanLimit. Free aiActions: 0 →
+    // limit_reached → no generation.
+    const reserveIdx = msgCode.indexOf('reserveAiReply')
     const faqBlockIdx = msgCode.indexOf('if (aiConfig.faqEnabled)')
-    expect(capIdx).toBeGreaterThan(-1)
-    expect(faqBlockIdx).toBeGreaterThan(capIdx)
+    expect(reserveIdx).toBeGreaterThan(-1)
+    expect(faqBlockIdx).toBeGreaterThan(reserveIdx)
   })
 
   test('the AI error is caught and never breaks the visitor message', () => {
@@ -657,12 +660,20 @@ describe('Developer — exact-match FAQ fast-path source wiring', () => {
     expect(msgCode).toMatch(/catch/)
     // The AI response is optional — the visitor message is persisted first.
     expect(msgCode).toContain('senderType: \'contact\'')
-    expect(msgCode).toContain('senderType: \'ai\'')
+    // AI-Q2: the AI message is created by commitAiReply (inside the usage
+    // service transaction), not directly by the route. The route fetches it
+    // for realtime publication.
+    expect(msgCode).toContain('commitAiReply')
   })
 
-  test('the AI message persists source and text in content', () => {
-    expect(msgCode).toContain('content: { text: aiResponse')
-    expect(msgCode).toContain('source: aiResponse')
+  test('the AI message content includes text and source (via commitAiReply)', () => {
+    // AI-Q2: the AI message is persisted by commitAiReply with
+    // content: { text, source }. The route no longer creates the message
+    // directly — it fetches it for realtime.
+    const tryBlock = msgCode.split('async function tryAiResponse')[1] ?? ''
+    expect(tryBlock).toContain('commitAiReply')
+    expect(tryBlock).toContain('text: generated.text')
+    expect(tryBlock).toContain('source: generated.source')
   })
 })
 

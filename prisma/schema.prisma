@@ -71,6 +71,8 @@ model Tenant {
   widgetDomains     WidgetDomain[]
   invitations       Invitation[]
   widgetOtpRequests WidgetOtpRequest[]
+  aiUsagePeriods    AiUsagePeriod[]
+  aiReplyReservations AiReplyReservation[]
 }
 
 /// Global identity. A user may belong to multiple tenants via Membership.
@@ -383,6 +385,55 @@ model AiConfig {
   updatedAt        DateTime @updatedAt
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+}
+
+/// AI-Q2: authoritative per-tenant billing-period usage record.
+/// One row per tenant per billing window. `used` = committed successful
+/// AI replies; `reserved` = outstanding reservations not yet committed or
+/// released. The unique constraint on [tenantId, periodStart, periodEnd]
+/// prevents duplicate accounting periods.
+model AiUsagePeriod {
+  id          String   @id @default(cuid())
+  tenantId    String
+  periodStart DateTime
+  periodEnd   DateTime
+  used        Int      @default(0)
+  reserved    Int      @default(0)
+  backfilled  Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant       Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  reservations AiReplyReservation[]
+
+  @@unique([tenantId, periodStart, periodEnd])
+  @@index([tenantId, periodEnd])
+}
+
+/// AI-Q2: reservation / settlement record for one AI reply capacity slot.
+/// Idempotent per [tenantId, visitorMessageId] — a duplicate reservation
+/// for the same visitor message returns the original, never allocates a
+/// second slot. Status lifecycle: reserved → committed (success) or
+/// released (failure/no answer). Once committed, release is a no-op
+/// (no refund of a delivered reply).
+model AiReplyReservation {
+  id              String    @id @default(cuid())
+  tenantId        String
+  visitorMessageId String
+  conversationId  String
+  usagePeriodId   String
+  status          String    @default("reserved")
+  aiMessageId     String?
+  expiresAt       DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  tenant       Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  usagePeriod AiUsagePeriod  @relation(fields: [usagePeriodId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, visitorMessageId])
+  @@index([tenantId, status])
+  @@index([tenantId, conversationId])
 }
 
 model FaqPair {

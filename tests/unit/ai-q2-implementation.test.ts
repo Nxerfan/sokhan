@@ -1,0 +1,393 @@
+/// <reference types="bun-types" />
+/**
+ * Developer-owned AI-Q2 implementation tests.
+ *
+ * Covers (beyond the 23 reviewer policy tests):
+ *   - Plan catalog: approved prices, quotas, prototype-pollution safety.
+ *   - Policy: additional edge cases for resolveAiUsageWindow and getAiRemaining.
+ *   - Source inspection: usage-service atomic patterns, widget messages
+ *     reserve/commit/release integration, billing-panel AI usage bar.
+ *   - AI-Q1 regression: existing policy + AI module tests still pass.
+ */
+import { describe, expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { getPlan, isPaidPlan, PLANS } from '../../src/lib/payments/plans'
+import {
+  resolveAiUsageWindow,
+  getAiRemaining,
+} from '../../src/lib/ai/usage-policy'
+
+const d = (iso: string) => new Date(iso)
+
+// ---------------------------------------------------------------------------
+// Plan catalog — approved prices and quotas
+// ---------------------------------------------------------------------------
+
+describe('Developer — approved plan prices and quotas', () => {
+  test('Pro is exactly 1,200,000 Toman with 1,400 AI replies and monthly interval', () => {
+    const pro = getPlan('pro')!
+    expect(pro.priceToman).toBe(1_200_000)
+    expect(pro.limits.aiActions).toBe(1_400)
+    expect(pro.interval).toBe('month')
+    expect(pro.contactSales).toBe(false)
+    expect(pro.customization).toBe(true)
+  })
+
+  test('Max is exactly 7,500,000 Toman with 10,000 AI replies and monthly interval', () => {
+    const max = getPlan('max')!
+    expect(max.priceToman).toBe(7_500_000)
+    expect(max.limits.aiActions).toBe(10_000)
+    expect(max.interval).toBe('month')
+    expect(max.contactSales).toBe(false)
+    expect(max.customization).toBe(true)
+  })
+
+  test('Free is zero price, zero AI replies, not contact-sales', () => {
+    const free = getPlan('free')!
+    expect(free.priceToman).toBe(0)
+    expect(free.limits.aiActions).toBe(0)
+    expect(free.contactSales).toBe(false)
+  })
+
+  test('Self-hosted is contact-sales with unlimited (-1) AI replies', () => {
+    const sh = getPlan('self-hosted')!
+    expect(sh.contactSales).toBe(true)
+    expect(sh.limits.aiActions).toBe(-1)
+    expect(sh.priceToman).toBe(0)
+  })
+
+  test('isPaidPlan correctly classifies all plans', () => {
+    expect(isPaidPlan('pro')).toBe(true)
+    expect(isPaidPlan('max')).toBe(true)
+    expect(isPaidPlan('free')).toBe(false)
+    expect(isPaidPlan('self-hosted')).toBe(false)
+  })
+
+  test('prototype-pollution-safe getPlan rejects constructor, __proto__, toString', () => {
+    for (const slug of ['', 'invalid', 'constructor', 'toString', '__proto__', 'prototype', 'hasOwnProperty']) {
+      expect(getPlan(slug)).toBeNull()
+    }
+  })
+
+  test('the PLANS catalog has exactly 4 plans with unique slugs', () => {
+    expect(PLANS).toHaveLength(4)
+    const slugs = PLANS.map((p) => p.slug)
+    expect(new Set(slugs).size).toBe(4)
+    expect(slugs).toContain('free')
+    expect(slugs).toContain('pro')
+    expect(slugs).toContain('max')
+    expect(slugs).toContain('self-hosted')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Policy — additional edge cases
+// ---------------------------------------------------------------------------
+
+describe('Developer — resolveAiUsageWindow additional edge cases', () => {
+  test('UTC midnight boundary: first instant of month is in the window', () => {
+    expect(resolveAiUsageWindow(d('2026-11-01T00:00:00.000Z'), null))
+      .toEqual({ start: d('2026-11-01T00:00:00Z'), end: d('2026-12-01T00:00:00Z'), source: 'calendar' })
+  })
+
+  test('UTC midnight boundary: last instant before month end is in the window', () => {
+    expect(resolveAiUsageWindow(d('2026-11-30T23:59:59.999Z'), null)?.source).toBe('calendar')
+  })
+
+  test('January 1 is in the January calendar window (year boundary from December)', () => {
+    expect(resolveAiUsageWindow(d('2027-01-01T00:00:00.000Z'), null))
+      .toEqual({ start: d('2027-01-01T00:00:00Z'), end: d('2027-02-01T00:00:00Z'), source: 'calendar' })
+  })
+
+  test('non-active subscription statuses (trialing, past_due, etc.) fall back to calendar', () => {
+    for (const status of ['trialing', 'past_due', 'incomplete', 'unknown']) {
+      const result = resolveAiUsageWindow(d('2026-11-20T00:00:00Z'), {
+        status,
+        currentPeriodStart: d('2026-11-10T00:00:00Z'),
+        currentPeriodEnd: d('2026-12-10T00:00:00Z'),
+      })
+      expect(result?.source).toBe('calendar')
+    }
+  })
+
+  test('subscription with same start and end (zero-duration) fails closed', () => {
+    expect(resolveAiUsageWindow(d('2026-11-15T00:00:00Z'), {
+      status: 'active',
+      currentPeriodStart: d('2026-11-15T00:00:00Z'),
+      currentPeriodEnd: d('2026-11-15T00:00:00Z'),
+    })).toBeNull()
+  })
+
+  test('resolver does not mutate the now Date or subscription dates', () => {
+    const now = d('2026-11-22T13:00:00Z')
+    const nowBefore = now.getTime()
+    const sub = {
+      status: 'active' as const,
+      currentPeriodStart: d('2026-11-01T00:00:00Z'),
+      currentPeriodEnd: d('2026-12-01T00:00:00Z'),
+    }
+    const startBefore = sub.currentPeriodStart.getTime()
+    const endBefore = sub.currentPeriodEnd.getTime()
+    resolveAiUsageWindow(now, sub)
+    expect(now.getTime()).toBe(nowBefore)
+    expect(sub.currentPeriodStart.getTime()).toBe(startBefore)
+    expect(sub.currentPeriodEnd.getTime()).toBe(endBefore)
+  })
+})
+
+describe('Developer — getAiRemaining additional edge cases', () => {
+  test('zero used and reserved on a paid plan returns the full limit', () => {
+    expect(getAiRemaining(0, 0, 1400)).toBe(1400)
+    expect(getAiRemaining(0, 0, 10000)).toBe(10000)
+  })
+
+  test('reserved alone counts against capacity (no committed replies yet)', () => {
+    expect(getAiRemaining(0, 1, 1400)).toBe(1399)
+    expect(getAiRemaining(0, 1400, 1400)).toBe(0)
+  })
+
+  test('used alone counts against capacity', () => {
+    expect(getAiRemaining(1, 0, 1400)).toBe(1399)
+    expect(getAiRemaining(1400, 0, 1400)).toBe(0)
+  })
+
+  test('used + reserved exactly equals limit → zero remaining', () => {
+    expect(getAiRemaining(700, 700, 1400)).toBe(0)
+    expect(getAiRemaining(1399, 1, 1400)).toBe(0)
+  })
+
+  test('non-integer limit fails closed', () => {
+    expect(getAiRemaining(0, 0, 0.5)).toBe(0)
+    expect(getAiRemaining(0, 0, 1.5)).toBe(0)
+    expect(getAiRemaining(0, 0, -0.5)).toBe(0)
+  })
+
+  test('Infinity and NaN counters fail closed', () => {
+    expect(getAiRemaining(Infinity, 0, 1400)).toBe(0)
+    expect(getAiRemaining(0, Infinity, 1400)).toBe(0)
+    expect(getAiRemaining(NaN, 0, 1400)).toBe(0)
+    expect(getAiRemaining(0, NaN, 1400)).toBe(0)
+  })
+
+  test('unlimited (-1) returns null even with very large used + reserved', () => {
+    expect(getAiRemaining(999999999, 999999999, -1)).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Source inspection — usage service atomic patterns
+// ---------------------------------------------------------------------------
+
+describe('Developer — usage service source wiring', () => {
+  const svcSrc = readFileSync(join(process.cwd(), 'src/lib/ai/usage-service.ts'), 'utf8')
+  const code = (src: string): string =>
+    src
+      .replace(/\/[\u002A][\s\S]*?[\u002A]\//g, '')
+      .replace(/^\s*\/\/[^\n]*$/gm, '')
+  const svcCode = code(svcSrc)
+
+  test('the service exports the four required functions', () => {
+    expect(svcCode).toContain('export async function getAiUsageState')
+    expect(svcCode).toContain('export async function reserveAiReply')
+    expect(svcCode).toContain('export async function commitAiReply')
+    expect(svcCode).toContain('export async function releaseAiReply')
+  })
+
+  test('the service uses globalDb (raw Prisma, not the fail-closed proxy)', () => {
+    expect(svcCode).toContain('globalDb')
+    // The service imports globalDb from @/lib/db, NOT the fail-closed `db` proxy.
+    expect(svcCode).toMatch(/import \{ globalDb \}/)
+  })
+
+  test('reservation uses a conditional atomic UPDATE (raw SQL)', () => {
+    // The atomic reservation uses $queryRaw with a WHERE condition on
+    // used + reserved < limit. This is the PostgreSQL-safe atomic boundary.
+    expect(svcCode).toContain('$queryRaw')
+    expect(svcCode).toContain('UPDATE')
+    expect(svcCode).toContain('AiUsagePeriod')
+    expect(svcCode).toContain('"reserved" = "reserved" + 1')
+    expect(svcCode).toContain('"used" + "reserved"')
+    expect(svcCode).toContain('OR')
+    expect(svcCode).toContain('= -1')
+  })
+
+  test('commit uses an interactive transaction (message + reservation + usage)', () => {
+    expect(svcCode).toContain('$transaction')
+    expect(svcCode).toMatch(/tx\.message\.create/)
+    expect(svcCode).toMatch(/tx\.aiReplyReservation\.updateMany/)
+    expect(svcCode).toMatch(/tx\.aiUsagePeriod\.update/)
+  })
+
+  test('commit is idempotent (already committed returns existing messageId)', () => {
+    expect(svcCode).toMatch(/status === 'committed'/)
+    expect(svcCode).toMatch(/aiMessageId/)
+  })
+
+  test('release is conditional (only reserved, never refunds committed)', () => {
+    expect(svcCode).toMatch(/updateMany/)
+    expect(svcCode).toMatch(/status: 'reserved'/)
+    expect(svcCode).toMatch(/status: 'released'/)
+  })
+
+  test('the service resolves the plan from the active subscription or tenant.plan', () => {
+    expect(svcCode).toContain('subscription.findFirst')
+    expect(svcCode).toContain('tenant.findUnique')
+    expect(svcCode).toContain('getPlan')
+  })
+
+  test('the service resolves the usage window via resolveAiUsageWindow', () => {
+    expect(svcCode).toContain('resolveAiUsageWindow')
+  })
+
+  test('backfill counts historical AI messages when creating a period', () => {
+    expect(svcCode).toContain('message.count')
+    expect(svcCode).toMatch(/senderType.*ai/)
+    expect(svcCode).toContain('backfilled')
+  })
+
+  test('stale reservation recovery exists', () => {
+    expect(svcCode).toContain('releaseStaleReservations')
+    expect(svcCode).toContain('expiresAt')
+  })
+
+  test('cross-tenant commit returns not_found (no data leak)', () => {
+    expect(svcCode).toMatch(/tenantId !== tenantId/)
+    expect(svcCode).toContain('not_found')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Source inspection — widget messages route (reserve/commit/release)
+// ---------------------------------------------------------------------------
+
+describe('Developer — widget messages route AI-Q2 integration', () => {
+  const msgSrc = readFileSync(join(process.cwd(), 'src/app/api/widget/[slug]/messages/route.ts'), 'utf8')
+
+  test('tryAiResponse accepts visitorMessageId for reservation idempotency', () => {
+    expect(msgSrc).toContain('visitorMessageId')
+  })
+
+  test('the route reserves before generating and commits after', () => {
+    expect(msgSrc).toContain('reserveAiReply')
+    expect(msgSrc).toContain('commitAiReply')
+    expect(msgSrc).toContain('releaseAiReply')
+  })
+
+  test('the old checkPlanLimit is removed (reservation handles quota)', () => {
+    // The AI-Q2 reservation is the authoritative quota gate — the old
+    // count-based checkPlanLimit is no longer used in tryAiResponse.
+    const tryBlock = msgSrc.split('async function tryAiResponse')[1] ?? ''
+    expect(tryBlock).not.toContain('checkPlanLimit')
+  })
+
+  test('the visitor message is persisted BEFORE the AI reservation', () => {
+    const visitorCreate = msgSrc.indexOf("senderType: 'contact'")
+    const reserveCall = msgSrc.indexOf('reserveAiReply')
+    expect(visitorCreate).toBeGreaterThan(-1)
+    expect(reserveCall).toBeGreaterThan(visitorCreate)
+  })
+
+  test('AI failure does not destroy the visitor message (try/catch around AI)', () => {
+    expect(msgSrc).toMatch(/try\s*{[\s\S]*?tryAiResponse[\s\S]*?}\s*catch/)
+  })
+
+  test('the AI message is persisted by commitAiReply (not by the route)', () => {
+    // The route no longer creates the AI message directly — commitAiReply
+    // does it inside a transaction. The route only fetches it for realtime.
+    const tryBlock = msgSrc.split('async function tryAiResponse')[1] ?? ''
+    expect(tryBlock).not.toMatch(/db\.message\.create.*senderType.*ai/)
+    expect(tryBlock).toContain('commitAiReply')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Source inspection — billing panel AI usage bar
+// ---------------------------------------------------------------------------
+
+describe('Developer — billing panel AI usage bar', () => {
+  const panelSrc = readFileSync(join(process.cwd(), 'src/components/dashboard/views/billing-panel.tsx'), 'utf8')
+
+  test('the AI usage bar has the required testids', () => {
+    // The UsageBar component accepts a testId prop that renders as
+    // data-testid={testId}. The AI usage bar passes testId="billing-ai-usage".
+    // The current/limit sub-elements use dynamic testids: `${testId}-current`
+    // and `${testId}-limit`.
+    expect(panelSrc).toContain('billing-ai-usage')
+    expect(panelSrc).toContain('${testId}-current')
+    expect(panelSrc).toContain('${testId}-limit')
+  })
+
+  test('the existing usage bars also have testids', () => {
+    expect(panelSrc).toContain('billing-agents-usage')
+    expect(panelSrc).toContain('billing-conversations-usage')
+    expect(panelSrc).toContain('billing-departments-usage')
+  })
+
+  test('the UsageInfo type includes aiActions', () => {
+    expect(panelSrc).toMatch(/aiActions.*current.*limit/)
+  })
+
+  test('the UsageBar component accepts a testId prop', () => {
+    expect(panelSrc).toContain('testId')
+    expect(panelSrc).toMatch(/data-testid=\{testId\}/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Source inspection — gating.ts reports real AI usage
+// ---------------------------------------------------------------------------
+
+describe('Developer — gating reports real AI usage', () => {
+  const gatingSrc = readFileSync(join(process.cwd(), 'src/lib/payments/gating.ts'), 'utf8')
+
+  test('getTenantUsage imports and uses getAiUsageState for aiActions', () => {
+    expect(gatingSrc).toContain('getAiUsageState')
+    expect(gatingSrc).toContain('aiState.used')
+  })
+
+  test('getTenantUsage no longer hardcodes aiActions.current = 0', () => {
+    // The old bug: aiActions: { current: 0, ... }
+    expect(gatingSrc).not.toMatch(/aiActions:\s*\{\s*current:\s*0/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Source inspection — Prisma schema (AiUsagePeriod + AiReplyReservation)
+// ---------------------------------------------------------------------------
+
+describe('Developer — Prisma schema AI-Q2 models', () => {
+  const schemaSrc = readFileSync(join(process.cwd(), 'prisma/schema.prisma'), 'utf8')
+
+  test('AiUsagePeriod model exists with the required fields', () => {
+    expect(schemaSrc).toContain('model AiUsagePeriod')
+    expect(schemaSrc).toContain('tenantId')
+    expect(schemaSrc).toContain('periodStart')
+    expect(schemaSrc).toContain('periodEnd')
+    expect(schemaSrc).toContain('used')
+    expect(schemaSrc).toContain('reserved')
+  })
+
+  test('AiUsagePeriod has a unique constraint on tenant + period', () => {
+    expect(schemaSrc).toMatch(/@@unique\(\[tenantId,\s*periodStart,\s*periodEnd\]\)/)
+  })
+
+  test('AiReplyReservation model exists with the required fields', () => {
+    expect(schemaSrc).toContain('model AiReplyReservation')
+    expect(schemaSrc).toContain('visitorMessageId')
+    expect(schemaSrc).toContain('conversationId')
+    expect(schemaSrc).toContain('usagePeriodId')
+    expect(schemaSrc).toContain('status')
+    expect(schemaSrc).toContain('aiMessageId')
+  })
+
+  test('AiReplyReservation has idempotency unique on tenant + visitorMessageId', () => {
+    expect(schemaSrc).toMatch(/@@unique\(\[tenantId,\s*visitorMessageId\]\)/)
+  })
+
+  test('both models are in the tenant-scoped list (db.ts)', () => {
+    const dbSrc = readFileSync(join(process.cwd(), 'src/lib/db.ts'), 'utf8')
+    expect(dbSrc).toContain('AiUsagePeriod')
+    expect(dbSrc).toContain('AiReplyReservation')
+  })
+})

@@ -400,32 +400,28 @@ export async function POST(
     })
   }
 
-  // === AI features (Module 4) — fire AFTER the visitor message is persisted ===
-  // Both features are opt-in (default OFF) and respect the AI usage cap.
-  // If the cap is hit, they gracefully stop firing (fall through to human routing).
-  // Runs in a fresh withTenant context — tryAiResponse queries tenant-scoped
-  // models (AiConfig, FaqPair, Product, Message, Conversation).
-  let aiResponse: { text: string; source: 'faq' | 'product' } | null = null
+  // === AI features — fire AFTER the visitor message is persisted ===
+  // AI-Q2: atomic reserve → generate → commit/release flow.
+  // - Reserve one AI capacity unit before generation (atomic, respects quota).
+  // - If quota exhausted, no AI; human chat continues normally.
+  // - If no answer produced, release the reservation (frees the slot).
+  // - If an answer is produced, atomically commit (persist AI message +
+  //   settle reservation + update usage counters in one transaction).
+  // - Realtime publication happens after durable commit; failure doesn't
+  //   double-charge.
+  // - If any provider or accounting operation fails, the visitor's
+  //   already-persisted message is NOT destroyed.
+  let aiResponse: { messageId: string; text: string; source: string } | null = null
   try {
-    aiResponse = await withTenant(tenantId, () => tryAiResponse(text, tenantId, conversation.id))
+    aiResponse = await withTenant(tenantId, () => tryAiResponse(text, tenantId, conversation.id, message.id))
   } catch (e) {
     console.error('[widget:messages] AI error:', e instanceof Error ? e.message : e)
   }
 
   if (aiResponse) {
-    // Persist the AI message inside the tenant context
-    const aiMessage = await withTenant(tenantId, async () => {
-      const m = await db.message.create({
-        data: {
-          conversationId: conversation.id,
-          tenantId,
-          senderType: 'ai',
-          senderUserId: null,
-          contentType: 'text',
-          content: { text: aiResponse!.text, source: aiResponse!.source },
-          status: 'sent',
-        },
-      })
+    // The AI message is already persisted by commitAiReply. Update the
+    // conversation metadata and publish to realtime.
+    await withTenant(tenantId, async () => {
       await db.conversation.updateMany({
         where: { id: conversation.id },
         data: {
@@ -433,108 +429,136 @@ export async function POST(
           lastMessagePreview: `[AI] ${aiResponse!.text.slice(0, 116)}`,
         },
       })
-      return m
     })
 
-    // Publish the AI response to realtime (not a DB call — outside context)
-    await publishToRealtime({
-      room: room.conversation(conversation.id),
-      event: EVENTS.MESSAGE_NEW,
-      payload: { ...aiMessage, isNewConversation: false },
-    })
+    // Fetch the committed AI message for realtime publication.
+    const aiMessage = await withTenant(tenantId, () =>
+      db.message.findUnique({ where: { id: aiResponse!.messageId } }),
+    )
+
+    if (aiMessage) {
+      await publishToRealtime({
+        room: room.conversation(conversation.id),
+        event: EVENTS.MESSAGE_NEW,
+        payload: { ...aiMessage, isNewConversation: false },
+      })
+    }
   }
 
-  return widgetHeaders(NextResponse.json({ message, conversationId: conversation.id, aiResponse, clientMessageId: clientMessageId || undefined }))
+  return widgetHeaders(NextResponse.json({
+    message,
+    conversationId: conversation.id,
+    aiResponse: aiResponse ? { text: aiResponse.text, source: aiResponse.source } : null,
+    clientMessageId: clientMessageId || undefined,
+  }))
 }
 
 /**
  * Try to generate an AI response for the visitor's message.
- * Checks: AI config (feature toggles), plan cap (aiActions).
- * Order: FAQ matching first, then product Q&A.
- * Returns null if no AI feature fires (falls through to human routing).
+ *
+ * AI-Q2 flow:
+ * 1. Check AI config (feature toggles).
+ * 2. Reserve one AI capacity unit (atomic, respects quota).
+ * 3. If reservation succeeds, attempt exact FAQ → semantic FAQ → Product Q&A.
+ * 4. If no answer, release the reservation (no charge).
+ * 5. If an answer is produced, atomically commit (persist AI message +
+ *    settle reservation + update usage).
+ * 6. Return the committed messageId + text + source, or null.
+ *
+ * The `visitorMessageId` (the persisted visitor Message ID) is used for
+ * reservation idempotency — a duplicate reservation for the same visitor
+ * message returns the original, never allocates a second slot.
  */
 async function tryAiResponse(
   visitorMessage: string,
   tenantId: string,
   conversationId: string,
-): Promise<{ text: string; source: 'faq' | 'product' } | null> {
+  visitorMessageId: string,
+): Promise<{ messageId: string; text: string; source: 'faq' | 'product' } | null> {
   const { db } = await import('@/lib/db')
-  const { checkPlanLimit } = await import('@/lib/payments/gating')
   const { matchFaq, answerProductQuestion } = await import('@/lib/ai')
+  const { reserveAiReply, commitAiReply, releaseAiReply } = await import('@/lib/ai/usage-service')
 
   // Load AI config
-  let aiConfig = await db.aiConfig.findUnique({ where: { tenantId } })
-  if (!aiConfig) {
-    // Default config — both features OFF
+  const aiConfig = await db.aiConfig.findUnique({ where: { tenantId } })
+  if (!aiConfig) return null
+
+  // At least one feature must be enabled.
+  if (!aiConfig.faqEnabled && !aiConfig.productQaEnabled) return null
+
+  // --- Reserve one AI capacity unit (atomic, respects quota) ---
+  const reservation = await reserveAiReply({ tenantId, conversationId, visitorMessageId })
+  if (reservation.status !== 'reserved') {
+    // limit_reached (Free zero, exhausted quota), in_progress (duplicate),
+    // or already_committed (retry) — no new generation.
     return null
   }
 
-  // Check plan cap for AI actions
-  const capCheck = await checkPlanLimit(tenantId, 'aiActions')
-  if (!capCheck.allowed) {
-    // Cap hit — graceful fallback to human routing
+  // --- Generate the AI response ---
+  let generated: { text: string; source: 'faq' | 'product' } | null = null
+
+  try {
+    // Feature 1: FAQ matching (if enabled)
+    if (aiConfig.faqEnabled) {
+      const faqPairs = await db.faqPair.findMany({
+        where: { tenantId, enabled: true },
+        select: { id: true, question: true, answer: true },
+      })
+
+      if (faqPairs.length > 0) {
+        // Exact-match fast path (deterministic, no LLM)
+        const norm = (s: string) => s.trim().replace(/\s+/g, ' ')
+        const exact = faqPairs.find(f => norm(f.question) === norm(visitorMessage))
+        if (exact) {
+          generated = { text: exact.answer, source: 'faq' }
+        } else {
+          // Semantic classification (LLM-based)
+          const match = await matchFaq(visitorMessage, faqPairs)
+          if (match.matched && match.answer) {
+            generated = { text: match.answer, source: 'faq' }
+          }
+        }
+      }
+    }
+
+    // Feature 2: Product Q&A (if enabled)
+    if (!generated && aiConfig.productQaEnabled) {
+      const products = await db.product.findMany({
+        where: { tenantId },
+        select: { id: true, name: true, description: true, price: true, availability: true },
+      })
+
+      if (products.length > 0) {
+        const result = await answerProductQuestion(visitorMessage, products)
+        if (result.answered && result.answer) {
+          generated = { text: result.answer, source: 'product' }
+        }
+      }
+    }
+  } catch (e) {
+    console.error('[widget:messages] AI generation error:', e instanceof Error ? e.message : e)
+  }
+
+  // --- Commit or release ---
+  if (!generated) {
+    // No answer — release the reservation (frees the slot, no charge).
+    await releaseAiReply({ tenantId, reservationId: reservation.reservationId })
     return null
   }
 
-  // Feature 1: FAQ matching (if enabled)
-  if (aiConfig.faqEnabled) {
-    const faqPairs = await db.faqPair.findMany({
-      where: { tenantId, enabled: true },
-      select: { id: true, question: true, answer: true },
-    })
+  // Atomically commit: persist AI message + settle reservation + update usage.
+  const commit = await commitAiReply({
+    tenantId,
+    reservationId: reservation.reservationId,
+    conversationId,
+    text: generated.text,
+    source: generated.source,
+  })
 
-    if (faqPairs.length > 0) {
-      // === AI-Q1: exact-match fast path (deterministic, no LLM) ===
-      // A minimal-whitespace-normalized exact match against an EXISTING
-      // enabled FAQ belonging to this tenant returns the owner-authored
-      // answer directly — no external LLM call, no probabilistic skip.
-      // This guarantees a real positive FAQ end-to-end: the visitor's
-      // exact question produces a persisted AI Message (senderType 'ai',
-      // source 'faq') with the owner-authored text.
-      //
-      // Guards preserved:
-      // - Only when FAQ AI is enabled (this block).
-      // - Only after the plan cap check above (Free aiActions: 0 → cap
-      //   hit → returned null before reaching here).
-      // - Only for an actual stored, enabled FAQ of this tenant (the
-      //   fail-closed Prisma extension scopes findMany to tenantId).
-      // - No bypass of visitor authorization, domain restrictions, rate
-      //   limits or pre-chat form checks (all enforced before the AI
-      //   block in the POST handler).
-      // - No new public API (this is inside the existing POST handler).
-      // - No duplicate response (the fast path returns before the LLM
-      //   path runs).
-      // - The semantic classification path below is preserved for
-      //   non-exact questions.
-      const norm = (s: string) => s.trim().replace(/\s+/g, ' ')
-      const normalizedVisitor = norm(visitorMessage)
-      const exact = faqPairs.find(f => norm(f.question) === normalizedVisitor)
-      if (exact) {
-        return { text: exact.answer, source: 'faq' }
-      }
-
-      // Semantic classification (LLM-based) for non-exact questions.
-      const match = await matchFaq(visitorMessage, faqPairs)
-      if (match.matched && match.answer) {
-        return { text: match.answer, source: 'faq' }
-      }
-    }
+  if (commit.status !== 'committed') {
+    // Reservation was stale/reclaimed — no charge, no message.
+    return null
   }
 
-  // Feature 2: Product Q&A (if enabled)
-  if (aiConfig.productQaEnabled) {
-    const products = await db.product.findMany({
-      where: { tenantId },
-      select: { id: true, name: true, description: true, price: true, availability: true },
-    })
-
-    if (products.length > 0) {
-      const result = await answerProductQuestion(visitorMessage, products)
-      if (result.answered && result.answer) {
-        return { text: result.answer, source: 'product' }
-      }
-    }
-  }
-
-  return null
+  return { messageId: commit.messageId, text: generated.text, source: generated.source }
 }
