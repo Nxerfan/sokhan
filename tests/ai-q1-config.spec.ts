@@ -228,4 +228,30 @@ test.describe('Reviewer — AI-Q1 Settings and reliable positive AI', () => {
       expect((await thread(page, result.conversationId)).filter(x => x.senderType === 'ai')).toHaveLength(0)
     } finally { await ctx.close() }
   })
+
+  test('parallel independent PATCHes do not lose either flag (real DB concurrency)', async ({ browser }) => {
+    const ctx = await browser.newContext()
+    try {
+      const page = await ctx.newPage()
+      await signup(page, 'concurrent-toggles')
+      // All requests ONLY turn their own flag ON, so regardless of
+      // interleaving, the final value of BOTH flags MUST be true.
+      for (let round = 0; round < 3; round++) {
+        await patch(page, { faqEnabled: false, productQaEnabled: false })
+        const payloads = Array.from({ length: 12 }, (_, i) =>
+          i % 2 === 0 ? { faqEnabled: true } : { productQaEnabled: true })
+        const results = await Promise.all(payloads.map(body =>
+          page.request.patch(APP + '/api/ai-config', {
+            headers: JSON_HEADERS,
+            data: body,
+          }),
+        ))
+        for (const r of results) expect(r.status(), await r.text()).toBe(200)
+        expect(await config(page)).toMatchObject({
+          faqEnabled: true,
+          productQaEnabled: true,
+        })
+      }
+    } finally { await ctx.close() }
+  })
 })

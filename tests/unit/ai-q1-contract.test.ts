@@ -173,3 +173,23 @@ describe('Reviewer AI-Q1 — deterministic product Q&A positive/negative LLM con
     expect(await answerProductQuestion('هدفون اسپارک', products, provider)).toEqual({ answered: false, answer: null, productIds: [] })
   })
 })
+
+
+describe('Reviewer AI-Q1 — concurrent independent PATCH writes', () => {
+  test('PATCH upsert must not replay stale OTHER flags in its update write set', async () => {
+    // A client sets only faqEnabled=true. While it is reading the current
+    // snapshot, a second client sets productQaEnabled=true. If the first
+    // client writes BOTH merged flags, it can incorrectly restore the
+    // second flag to false. This exact stale-read/write bug was identified
+    // in the first implementation; a truly atomic true-PATCH writes ONLY
+    // explicitly supplied fields in the UPDATE branch.
+    const source = await Bun.file(
+      new URL('../../src/app/api/ai-config/route.ts', import.meta.url),
+    ).text()
+    const handler = source.split('export async function PATCH')[1]
+    expect(handler).toBeDefined()
+    expect(handler).toContain('db.aiConfig.upsert')
+    const unsafe = /update:\s*\{\s*faqEnabled:\s*merged\.faqEnabled,\s*productQaEnabled:\s*merged\.productQaEnabled,?\s*\}/
+    expect(handler).not.toMatch(unsafe)
+  })
+})
