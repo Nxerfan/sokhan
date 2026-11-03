@@ -400,6 +400,21 @@ export function WidgetPlaygroundPanel({
     // The current device is kept — its baseline positioning is restored.
   }, [baselineSnapshot, entitlements])
 
+  // Switch the simulated device AND bring the preview surface into view.
+  // On a narrow dashboard the preview can sit below the fold (the device /
+  // locale / anchor / palette / shape / offset controls stack above it), so
+  // bringing it into view when the owner switches device keeps the preview
+  // (and its launcher + open chat) observable — and ensures the launcher is
+  // already on-screen before it is clicked, so no auto-scroll re-positions
+  // the surface between a bounding-box measurement of the surface and a
+  // later measurement of the open chat (which would otherwise be compared
+  // against a stale surface position). `block: 'nearest'` scrolls minimally
+  // and is a no-op when the surface is already visible.
+  const selectDevice = useCallback((d: PlaygroundDevice) => {
+    setDevice(d)
+    surfaceRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [])
+
   // ---- Preview derivation (canonical catalogs + shared geometry) ----
 
   const pv = previewStrings(view.locale)
@@ -529,7 +544,7 @@ export function WidgetPlaygroundPanel({
                 <button
                   type="button"
                   data-testid="playground-device-desktop"
-                  onClick={() => setDevice('desktop')}
+                  onClick={() => selectDevice('desktop')}
                   aria-pressed={view.device === 'desktop'}
                   className={cn(
                     'rounded-md border px-3 py-1.5 text-sm font-medium transition-colors',
@@ -543,7 +558,7 @@ export function WidgetPlaygroundPanel({
                 <button
                   type="button"
                   data-testid="playground-device-mobile"
-                  onClick={() => setDevice('mobile')}
+                  onClick={() => selectDevice('mobile')}
                   aria-pressed={view.device === 'mobile'}
                   className={cn(
                     'rounded-md border px-3 py-1.5 text-sm font-medium transition-colors',

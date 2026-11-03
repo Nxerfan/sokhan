@@ -836,6 +836,32 @@ describe('Developer — responsive containment source wiring + lifecycle', () =>
     // resize signal (cleaner, scoped to the surface element).
     expect(playgroundCode).not.toMatch(/window\.addEventListener\(\s*['"]resize/)
   })
+
+  test('selecting a device brings the preview surface into view (scrollIntoView nearest)', () => {
+    // On a narrow dashboard the preview surface sits below the fold. The
+    // device selector scrolls it into view so the launcher is already
+    // on-screen before it is clicked — otherwise an auto-scroll between a
+    // surface bounding-box measurement and a later open-chat measurement
+    // would compare positions at different scroll states. `block: 'nearest'`
+    // scrolls minimally and is a no-op when the surface is already visible.
+    expect(playgroundCode).toContain('const selectDevice = useCallback(')
+    expect(playgroundCode).toContain('surfaceRef.current?.scrollIntoView({ block: \'nearest\' })')
+    // Both device buttons route through selectDevice (not setDevice directly).
+    expect(playgroundCode).toContain("onClick={() => selectDevice('desktop')}")
+    expect(playgroundCode).toContain("onClick={() => selectDevice('mobile')}")
+  })
+
+  test('the launcher toggle does NOT scroll (scrolling on open would re-align the surface post-measure)', () => {
+    // The launcher onClick only flips `open` — it must NOT call
+    // scrollIntoView, or the surface would move between its bounding-box
+    // measurement and the open-chat measurement (the very mismatch the
+    // device-selector scroll prevents).
+    expect(playgroundCode).toContain('onClick={() => setOpen((o) => !o)}')
+    // No scrollIntoView call inside the launcher onClick path.
+    const launcherBlock = playgroundCode.match(/data-testid="playground-launcher"[\s\S]{0,400}?>/)
+    expect(launcherBlock).not.toBeNull()
+    expect(launcherBlock![0]).not.toContain('scrollIntoView')
+  })
 })
 
 describe('Developer — dashboard integration (source wiring)', () => {
