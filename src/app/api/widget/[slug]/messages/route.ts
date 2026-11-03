@@ -419,29 +419,46 @@ export async function POST(
   }
 
   if (aiResponse) {
-    // The AI message is already persisted by commitAiReply. Update the
-    // conversation metadata and publish to realtime.
-    await withTenant(tenantId, async () => {
-      await db.conversation.updateMany({
-        where: { id: conversation.id },
-        data: {
-          lastMessageAt: new Date(),
-          lastMessagePreview: `[AI] ${aiResponse!.text.slice(0, 116)}`,
-        },
+    // The AI message is already durably persisted by commitAiReply. The
+    // usage charge is already settled. Post-commit operations (metadata
+    // update, Realtime publication) are best-effort — a transient failure
+    // here must NOT cause the client to believe the AI reply failed and
+    // retry (which would charge a second unit).
+    try {
+      await withTenant(tenantId, async () => {
+        await db.conversation.updateMany({
+          where: { id: conversation.id },
+          data: {
+            lastMessageAt: new Date(),
+            lastMessagePreview: `[AI] ${aiResponse!.text.slice(0, 116)}`,
+          },
+        })
       })
-    })
+    } catch (e) {
+      // Metadata update failure is recoverable — the AI message and its
+      // usage charge are already durable. Log and continue.
+      console.error('[widget:messages] post-commit metadata error:', e instanceof Error ? e.message : e)
+    }
 
     // Fetch the committed AI message for realtime publication.
     const aiMessage = await withTenant(tenantId, () =>
       db.message.findUnique({ where: { id: aiResponse!.messageId } }),
-    )
+    ).catch(() => null)
 
     if (aiMessage) {
-      await publishToRealtime({
-        room: room.conversation(conversation.id),
-        event: EVENTS.MESSAGE_NEW,
-        payload: { ...aiMessage, isNewConversation: false },
-      })
+      try {
+        await publishToRealtime({
+          room: room.conversation(conversation.id),
+          event: EVENTS.MESSAGE_NEW,
+          payload: { ...aiMessage, isNewConversation: false },
+        })
+      } catch (e) {
+        // Realtime publication failure is recoverable — the AI message is
+        // already persisted with a stable ID. The client can reconcile via
+        // the message ID returned in the response. Do NOT generate another
+        // AI reply or charge another unit to retry publication.
+        console.error('[widget:messages] post-commit realtime error:', e instanceof Error ? e.message : e)
+      }
     }
   }
 

@@ -334,6 +334,54 @@ describe('Developer — corrected AI-Q2 defects (source inspection)', () => {
     expect(svcCode).toContain("'faq'")
     expect(svcCode).toContain("'product'")
   })
+
+  // --- Final concurrency corrections ---
+
+  test('Defect A fix: release decrements ONLY when updateMany count === 1', () => {
+    const releaseBlock = svcCode.split('export async function releaseAiReply')[1] ?? ''
+    expect(releaseBlock).toContain('updated.count === 1')
+    // The decrement must be conditional, not unconditional.
+    expect(releaseBlock).not.toMatch(/decrement.*\n.*\n.*\n.*\n.*\n.*\n.*\n.*\n.*\n.*\n.*\n.*\n.*\n.*\}/)
+  })
+
+  test('Defect B fix: reactivation checks updateMany count and rolls back on 0', () => {
+    const reserveBlock = svcCode.split('export async function reserveAiReply')[1] ?? ''
+    expect(reserveBlock).toContain('REACTIVATION_LOST')
+    expect(reserveBlock).toMatch(/reactivated\.count/)
+  })
+
+  test('Defect D fix: commit verifies conversation + message ownership inside transaction', () => {
+    const commitBlock = svcCode.split('export async function commitAiReply')[1] ?? ''
+    expect(commitBlock).toContain('verifyOwnershipInTx')
+    expect(commitBlock).toContain('OWNERSHIP_INVALID')
+  })
+
+  test('Defect E fix: stale cleanup re-checks expiresAt in the conditional update', () => {
+    const staleBlock = svcCode.split('async function releaseStaleReservations')[1] ?? ''
+    expect(staleBlock).toContain('expiresAt')
+    expect(staleBlock).toMatch(/lt: now/)
+  })
+
+  test('Defect C fix: checkPlanLimit for aiActions derives limit from getAiUsageState', () => {
+    const gatingSrc = readFileSync(join(process.cwd(), 'src/lib/payments/gating.ts'), 'utf8')
+    const gatingCode = gatingSrc
+      .replace(/\/[\u002A][\s\S]*?[\u002A]\//g, '')
+      .replace(/^\s*\/\/[^\n]*$/gm, '')
+    const checkBlock = gatingCode.split('export async function checkPlanLimit')[1] ?? ''
+    expect(checkBlock).toContain("limit === 'aiActions'")
+    expect(checkBlock).toContain('getAiUsageState')
+    // The aiActions branch must use state.limit (from getAiUsageState).
+    expect(checkBlock).toContain('state.limit')
+    // The aiActions branch must use state.planSlug.
+    expect(checkBlock).toContain('state.planSlug')
+  })
+
+  test('post-commit delivery: metadata and realtime failures are caught', () => {
+    const msgSrc = readFileSync(join(process.cwd(), 'src/app/api/widget/[slug]/messages/route.ts'), 'utf8')
+    expect(msgSrc).toContain('post-commit metadata error')
+    expect(msgSrc).toContain('post-commit realtime error')
+    expect(msgSrc).toContain('.catch(() => null)')
+  })
 })
 
 // ---------------------------------------------------------------------------

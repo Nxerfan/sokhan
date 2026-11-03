@@ -1,46 +1,29 @@
 /**
- * AI-Q2 — Atomic successful-reply accounting service (corrected).
+ * AI-Q2 — Atomic successful-reply accounting service (final corrections).
  *
- * Server-side only. Uses `globalDb` (raw Prisma client) directly because:
- * - The service receives an explicit `tenantId` (no ALS context needed).
- * - Atomic transactions require the raw client's `$transaction` / `$queryRaw`.
- * - The reviewer DB tests call these functions without `withTenant`.
+ * ## Corrected defects (final reviewer corrections)
  *
- * ## Corrected defects (reviewer AI-Q2 corrections)
+ * A. Concurrent release negative counters: the conditional `updateMany` result
+ *    count is checked. `reserved` is decremented ONLY when `count === 1`.
+ *    Concurrent duplicate releases are idempotent — no negative counters.
  *
- * A. Released reservation retry: a released reservation for the same visitor
- *    message is REACTIVATED (conditional status transition `released → reserved`)
- *    inside the same transaction that increments capacity. No second row is
- *    inserted.
+ * B. Concurrent reactivation multiple slots: the reactivation `updateMany`
+ *    result count is checked. If `count === 0` (another concurrent request
+ *    already reactivated), the capacity increment is rolled back (throw to
+ *    abort the transaction). Only ONE of 12 concurrent retries succeeds.
  *
- * B. Foreign visitor Message IDs: `reserveAiReply` verifies the Message exists,
- *    has `senderType === 'contact'`, `message.tenantId === tenantId`, and
- *    `message.conversationId === conversationId` before reserving. The
- *    Conversation is also verified to belong to the same tenant.
+ * C. Expired active subscription gating: `checkPlanLimit('aiActions')` in
+ *    gating.ts derives BOTH limit and current from `getAiUsageState` — an
+ *    expired active subscription returns limit=0, so the gate denies.
  *
- * C. Foreign Conversation IDs: the same ownership chain is enforced at both
- *    reserve and commit time (inside the settlement transaction).
+ * D. Commit-time tenant ownership: inside the settlement transaction, the
+ *    Conversation is verified to belong to `tenantId`, and the visitor
+ *    Message is verified to belong to the same tenant and conversation. A
+ *    corrupted reservation pointing at a foreign conversation → `not_found`.
  *
- * D. Expired lease: `commitAiReply` checks `expiresAt` INSIDE the settlement
- *    transaction. An expired lease → `not_found` (no message, no charge).
- *
- * E. `checkPlanLimit('aiActions')` uses `getAiUsageState` (authoritative) via
- *    `countUsage` in gating.ts (fixed in gating.ts).
- *
- * ## Transactional crash consistency
- *
- * Reserve: the capacity increment AND the reservation create/reactivate happen
- * in ONE `$transaction`. A crash between them is impossible — both succeed or
- * neither does.
- *
- * Release: the status transition AND the counter decrement happen in ONE
- * `$transaction`. Same for stale-reservation recovery.
- *
- * Commit: the message create, reservation settlement, and usage counter update
- * happen in ONE `$transaction`. Settlement is conditional on `status =
- * 'reserved'` AND `expiresAt > now`.
- *
- * No external LLM request is ever placed inside a database transaction.
+ * E. Stale cleanup vs renewal race: the stale cleanup `updateMany` checks
+ *    `expiresAt < now` IN ADDITION to `status = 'reserved'`. A reactivated
+ *    reservation with a fresh `expiresAt` is not released by a stale cleanup.
  */
 
 import { globalDb } from '@/lib/db'
@@ -71,11 +54,7 @@ export type CommitResult =
   | { status: 'committed'; messageId: string }
   | { status: 'not_found' }
 
-// Reservation lease: a reserved slot that is never committed or released
-// (e.g. crashed request) expires after this many ms, allowing stale recovery.
 const RESERVATION_LEASE_MS = 5 * 60 * 1000 // 5 minutes
-
-// Valid AI reply sources.
 const VALID_SOURCES = ['faq', 'product'] as const
 type ValidSource = (typeof VALID_SOURCES)[number]
 
@@ -172,16 +151,9 @@ async function getOrCreatePeriod(
 }
 
 // ---------------------------------------------------------------------------
-// Visitor message + conversation ownership verification (Defects B + C)
+// Visitor message + conversation ownership verification
 // ---------------------------------------------------------------------------
 
-/**
- * Verify that the visitor Message exists, belongs to the given tenant, is in
- * the given conversation, and has senderType 'contact'. Also verify the
- * Conversation belongs to the same tenant.
- *
- * Returns true if all checks pass, false otherwise.
- */
 async function verifyMessageOwnership(
   tenantId: string,
   conversationId: string,
@@ -196,7 +168,6 @@ async function verifyMessageOwnership(
   if (msg.conversationId !== conversationId) return false
   if (msg.senderType !== 'contact') return false
 
-  // Verify the conversation belongs to the same tenant.
   const conv = await globalDb.conversation.findUnique({
     where: { id: conversationId },
     select: { tenantId: true },
@@ -206,8 +177,36 @@ async function verifyMessageOwnership(
   return true
 }
 
+/**
+ * Verify ownership INSIDE a transaction (for commit-time validation).
+ * Uses the transaction client `tx`.
+ */
+async function verifyOwnershipInTx(
+  tx: Parameters<Parameters<typeof globalDb.$transaction>[0]>[0],
+  tenantId: string,
+  conversationId: string,
+  visitorMessageId: string,
+): Promise<boolean> {
+  const conv = await tx.conversation.findUnique({
+    where: { id: conversationId },
+    select: { tenantId: true },
+  })
+  if (!conv || conv.tenantId !== tenantId) return false
+
+  const msg = await tx.message.findUnique({
+    where: { id: visitorMessageId },
+    select: { tenantId: true, conversationId: true, senderType: true },
+  })
+  if (!msg) return false
+  if (msg.tenantId !== tenantId) return false
+  if (msg.conversationId !== conversationId) return false
+  if (msg.senderType !== 'contact') return false
+
+  return true
+}
+
 // ---------------------------------------------------------------------------
-// Stale reservation recovery (atomic: status transition + counter decrement)
+// Stale reservation recovery (atomic + expiry re-check)
 // ---------------------------------------------------------------------------
 
 async function releaseStaleReservations(tenantId: string, now: Date): Promise<void> {
@@ -222,15 +221,16 @@ async function releaseStaleReservations(tenantId: string, now: Date): Promise<vo
   })
 
   for (const r of stale) {
-    // Atomic: status transition + counter decrement in ONE transaction.
-    // Conditional on status = 'reserved' — a concurrent commit/release
-    // that already transitioned the status makes this a no-op.
     await globalDb.$transaction(async (tx) => {
+      // Conditional: status = 'reserved' AND expiresAt < now.
+      // The expiresAt re-check prevents releasing a reservation that was
+      // reactivated with a fresh lease between the select and this update.
       const updated = await tx.aiReplyReservation.updateMany({
-        where: { id: r.id, tenantId, status: 'reserved' },
+        where: { id: r.id, tenantId, status: 'reserved', expiresAt: { lt: now } },
         data: { status: 'released' },
       })
-      if (updated.count > 0) {
+      // Decrement ONLY when the transition succeeded (count === 1).
+      if (updated.count === 1) {
         await tx.aiUsagePeriod.update({
           where: { id: r.usagePeriodId },
           data: { reserved: { decrement: 1 } },
@@ -270,16 +270,6 @@ export async function getAiUsageState(
   }
 }
 
-/**
- * Reserve one AI reply capacity unit before generation.
- *
- * Corrected:
- * - Verifies visitor Message + Conversation ownership (Defects B, C).
- * - Reactivates released reservations in the same transaction as the capacity
- *   increment (Defect A).
- * - Capacity increment + reservation create/reactivate are ONE transaction
- *   (crash consistency).
- */
 export async function reserveAiReply(input: {
   tenantId: string
   conversationId: string
@@ -289,7 +279,7 @@ export async function reserveAiReply(input: {
   const { tenantId, conversationId, visitorMessageId } = input
   const now = input.now ?? new Date()
 
-  const { planSlug: _planSlug, limit, window } = await resolvePlanAndWindow(tenantId, now)
+  const { limit, window } = await resolvePlanAndWindow(tenantId, now)
 
   await releaseStaleReservations(tenantId, now)
 
@@ -297,13 +287,13 @@ export async function reserveAiReply(input: {
     return { status: 'limit_reached' }
   }
 
-  // --- Ownership verification (Defects B, C) ---
+  // --- Ownership verification ---
   const owned = await verifyMessageOwnership(tenantId, conversationId, visitorMessageId)
   if (!owned) {
     return { status: 'limit_reached' }
   }
 
-  // --- Check for an existing reservation for this visitor message ---
+  // --- Check for an existing reservation ---
   const existing = await globalDb.aiReplyReservation.findUnique({
     where: { tenantId_visitorMessageId: { tenantId, visitorMessageId } },
     select: { id: true, status: true, aiMessageId: true, usagePeriodId: true },
@@ -323,10 +313,10 @@ export async function reserveAiReply(input: {
   const expiresAt = new Date(now.getTime() + RESERVATION_LEASE_MS)
 
   // --- Atomic reserve: capacity increment + reservation create/reactivate
-  // in ONE transaction (crash consistency) ---
+  // in ONE transaction ---
   try {
     const result = await globalDb.$transaction(async (tx) => {
-      // Conditional capacity increment (PostgreSQL row-lock).
+      // Conditional capacity increment.
       const rows = await tx.$queryRaw<Array<{ id: string }>>`
         UPDATE "AiUsagePeriod"
         SET "reserved" = "reserved" + 1, "updatedAt" = NOW()
@@ -340,9 +330,10 @@ export async function reserveAiReply(input: {
 
       // Create or reactivate the reservation row.
       if (existing && existing.status === 'released') {
-        // Reactivate: conditional on status = 'released'. Update the period
-        // reference, conversationId, expiresAt, and status.
-        await tx.aiReplyReservation.updateMany({
+        // Reactivation: conditional on status = 'released'. If another
+        // concurrent request already reactivated (count = 0), abort the
+        // transaction to roll back the capacity increment.
+        const reactivated = await tx.aiReplyReservation.updateMany({
           where: { id: existing.id, tenantId, status: 'released' },
           data: {
             status: 'reserved',
@@ -352,9 +343,13 @@ export async function reserveAiReply(input: {
             aiMessageId: null,
           },
         })
+        if (reactivated.count === 0) {
+          // Lost the reactivation race — another request reactivated first.
+          // Roll back the capacity increment.
+          throw new Error('REACTIVATION_LOST')
+        }
         return { reservationId: existing.id }
       } else {
-        // Create a new reservation.
         const reservation = await tx.aiReplyReservation.create({
           data: {
             tenantId,
@@ -375,14 +370,13 @@ export async function reserveAiReply(input: {
     }
     return { status: 'reserved', reservationId: result.reservationId }
   } catch {
-    // Concurrent create might have hit the unique constraint. Re-query.
+    // Either REACTIVATION_LOST or a unique constraint violation.
+    // Re-query the current state and return the correct idempotent result.
     const concurrent = await globalDb.aiReplyReservation.findUnique({
       where: { tenantId_visitorMessageId: { tenantId, visitorMessageId } },
       select: { id: true, status: true, aiMessageId: true },
     })
     if (!concurrent) {
-      // The transaction failed for another reason. The capacity increment
-      // was rolled back (it was in the same transaction).
       return { status: 'limit_reached' }
     }
     if (concurrent.status === 'committed' && concurrent.aiMessageId) {
@@ -391,21 +385,12 @@ export async function reserveAiReply(input: {
     if (concurrent.status === 'reserved') {
       return { status: 'in_progress', reservationId: concurrent.id }
     }
-    // status === 'released' — a concurrent request released it. The caller
-    // can retry.
+    // status === 'released' — a concurrent request released it after
+    // reactivation. The caller can retry.
     return { status: 'limit_reached' }
   }
 }
 
-/**
- * Commit an AI reply: atomically persist the AI Message, settle the
- * reservation, and update the usage counters.
- *
- * Corrected:
- * - Checks expiresAt INSIDE the settlement transaction (Defect D).
- * - Validates blank/invalid text and source (content validation).
- * - Enforces conversation ownership inside the transaction (Defect C).
- */
 export async function commitAiReply(input: {
   tenantId: string
   reservationId: string
@@ -417,7 +402,7 @@ export async function commitAiReply(input: {
   const { tenantId, reservationId, conversationId, text, source } = input
   const now = input.now ?? new Date()
 
-  // --- Content validation (billable reply content) ---
+  // --- Content validation ---
   if (!text || !text.trim()) {
     return { status: 'not_found' }
   }
@@ -435,6 +420,7 @@ export async function commitAiReply(input: {
       aiMessageId: true,
       usagePeriodId: true,
       conversationId: true,
+      visitorMessageId: true,
       expiresAt: true,
     },
   })
@@ -459,15 +445,10 @@ export async function commitAiReply(input: {
   }
 
   // --- Atomic commit: interactive transaction ---
-  // The settlement is conditional on:
-  //   status = 'reserved' AND expiresAt > now
-  // This prevents an expired lease from committing (Defect D) even before
-  // stale cleanup runs.
   try {
     const messageId = await globalDb.$transaction(async (tx) => {
-      // 1. Settle the reservation to 'committed' — conditional on status =
-      // 'reserved' AND expiresAt > now. This is the atomic expiry check
-      // (Defect D).
+      // 1. Settle the reservation — conditional on status = 'reserved'
+      // AND expiresAt > now (atomic expiry check).
       const settled = await tx.aiReplyReservation.updateMany({
         where: {
           id: reservationId,
@@ -479,12 +460,24 @@ export async function commitAiReply(input: {
       })
 
       if (settled.count === 0) {
-        // Either the reservation was already settled/released by a concurrent
-        // request, OR the lease has expired. Either way, no commit.
         throw new Error('RESERVATION_NOT_SETTLABLE')
       }
 
-      // 2. Create the AI Message.
+      // 2. Commit-time ownership revalidation (Defect D).
+      // Verify the Conversation belongs to the same tenant AND the visitor
+      // Message belongs to the same tenant and conversation — inside the
+      // transaction, not just a pre-read.
+      const owned = await verifyOwnershipInTx(
+        tx,
+        tenantId,
+        conversationId,
+        reservation.visitorMessageId,
+      )
+      if (!owned) {
+        throw new Error('OWNERSHIP_INVALID')
+      }
+
+      // 3. Create the AI Message.
       const msg = await tx.message.create({
         data: {
           tenantId,
@@ -498,7 +491,7 @@ export async function commitAiReply(input: {
         select: { id: true },
       })
 
-      // 3. Link the message to the reservation and update usage counters.
+      // 4. Link the message and update usage counters.
       await tx.aiReplyReservation.update({
         where: { id: reservationId },
         data: { aiMessageId: msg.id },
@@ -514,10 +507,7 @@ export async function commitAiReply(input: {
 
     return { status: 'committed', messageId }
   } catch (e) {
-    if (e instanceof Error && e.message === 'RESERVATION_NOT_SETTLABLE') {
-      // The reservation was expired or already settled. Return not_found.
-      // If it was concurrently committed by another request, the caller
-      // can re-query.
+    if (e instanceof Error && (e.message === 'RESERVATION_NOT_SETTLABLE' || e.message === 'OWNERSHIP_INVALID')) {
       const refetched = await globalDb.aiReplyReservation.findUnique({
         where: { id: reservationId },
         select: { status: true, aiMessageId: true },
@@ -531,40 +521,39 @@ export async function commitAiReply(input: {
   }
 }
 
-/**
- * Release a reservation (generation failed or produced no answer).
- *
- * Corrected:
- * - Status transition + counter decrement in ONE transaction (crash consistency).
- * - Idempotent: a second release is a no-op.
- * - Never refunds an already-committed reply.
- */
 export async function releaseAiReply(input: {
   tenantId: string
   reservationId: string
 }): Promise<void> {
   const { tenantId, reservationId } = input
 
-  // Atomic: status transition + counter decrement in ONE transaction.
-  // Conditional on status = 'reserved' — a committed reservation is never
-  // refunded, a released reservation is a no-op.
+  // Atomic: conditional status transition + counter decrement in ONE
+  // transaction. The decrement happens ONLY when the conditional
+  // updateMany succeeds (count === 1). Concurrent duplicate releases are
+  // idempotent — no negative counters.
   await globalDb.$transaction(async (tx) => {
+    // Get the usagePeriodId (needed for the decrement).
     const reservation = await tx.aiReplyReservation.findUnique({
       where: { id: reservationId },
-      select: { usagePeriodId: true, status: true, tenantId: true },
+      select: { usagePeriodId: true, tenantId: true },
     })
 
     if (!reservation || reservation.tenantId !== tenantId) return
-    if (reservation.status !== 'reserved') return
 
-    await tx.aiReplyReservation.updateMany({
+    // Conditional status transition — only if still 'reserved'.
+    const updated = await tx.aiReplyReservation.updateMany({
       where: { id: reservationId, tenantId, status: 'reserved' },
       data: { status: 'released' },
     })
 
-    await tx.aiUsagePeriod.update({
-      where: { id: reservation.usagePeriodId },
-      data: { reserved: { decrement: 1 } },
-    })
+    // Decrement ONLY when the transition succeeded.
+    // This prevents concurrent duplicate releases from driving `reserved`
+    // below zero.
+    if (updated.count === 1) {
+      await tx.aiUsagePeriod.update({
+        where: { id: reservation.usagePeriodId },
+        data: { reserved: { decrement: 1 } },
+      })
+    }
   })
 }

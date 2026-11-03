@@ -144,6 +144,20 @@ export async function checkPlanLimit(
   tenantId: string,
   limit: LimitKind,
 ): Promise<PlanLimitResult> {
+  // AI-Q2: for AI actions, derive ALL fields (planSlug, limit, current)
+  // from the authoritative getAiUsageState — NOT the catalog limit via
+  // resolveTenantPlanSlug. An expired active subscription returns limit=0
+  // from getAiUsageState, so the gate correctly denies even though the
+  // catalog says 'pro' (1400).
+  if (limit === 'aiActions') {
+    const { getAiUsageState } = await import('@/lib/ai/usage-service')
+    const state = await getAiUsageState(tenantId)
+    const current = state.used + state.reserved
+    const limitValue = state.limit
+    const allowed = limitValue === -1 || current < limitValue
+    return { allowed, current, limit: limitValue, planSlug: state.planSlug }
+  }
+
   const planSlug = await resolveTenantPlanSlug(tenantId)
   const plan = getPlan(planSlug) ?? getPlan('free')!
   const limitValue = plan.limits[limit]
