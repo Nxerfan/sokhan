@@ -12,6 +12,7 @@ import {
   FAQ_CONFIDENCE_THRESHOLD,
   normalizeFaqQuestion,
   resolveExactFaq,
+  selectUnambiguousFaqs,
   validateSemanticMatch,
 } from '../../src/lib/ai/faq-policy'
 
@@ -71,15 +72,19 @@ describe('Developer — resolveExactFaq edge cases', () => {
     expect(resolveExactFaq('Q', dup).status).toBe('ambiguous')
   })
 
-  test('blank answer disqualifies a match entirely (not ambiguous)', () => {
+  test('a blank-answer canonical duplicate still makes the question ambiguous (BLOCKER 2)', () => {
     const list = [
       { id: '1', question: 'Q?', answer: '' },
       { id: '2', question: 'Q?', answer: 'Valid' },
     ]
-    // The blank answer is filtered out; only one deliverable remains.
-    expect(resolveExactFaq('Q', list)).toEqual({
-      status: 'matched', faqPairId: '2', answer: 'Valid',
-    })
+    // BLOCKER 2: canonical duplicates are detected among ALL eligible rows
+    // BEFORE evaluating deliverability. Two rows with the same canonical
+    // question are ambiguous regardless of answer content or row order.
+    for (const order of [list, [...list].reverse()]) {
+      expect(resolveExactFaq('Q', order)).toEqual({
+        status: 'ambiguous', faqPairId: null, answer: null,
+      })
+    }
   })
 
   test('all-blank answers yield none, not matched', () => {
@@ -185,6 +190,137 @@ describe('Developer — matchFaq integration with strict gate', () => {
     const r = await matchFaq('سوال', [...faqs], provider)
     expect(r.matched).toBe(false)
     expect(r.confidence).toBe(0)
+  })
+})
+
+describe('Developer — selectUnambiguousFaqs partitioning (BLOCKER 3)', () => {
+  test('two canonical duplicates are both excluded from the unambiguous set', () => {
+    const pairs = [
+      { id: 'yes', question: 'آیا ارسال رایگان دارید؟', answer: 'بله' },
+      { id: 'no', question: 'آيا ارسال رايگان داريد؟', answer: 'خیر' },
+    ]
+    expect(selectUnambiguousFaqs(pairs)).toEqual([])
+  })
+
+  test('three canonical duplicates are all excluded', () => {
+    const pairs = [
+      { id: 'a', question: 'Returns?', answer: 'Seven days' },
+      { id: 'b', question: 'returns?', answer: 'Thirty days' },
+      { id: 'c', question: 'RETURNS؟', answer: 'Fourteen days' },
+    ]
+    expect(selectUnambiguousFaqs(pairs)).toEqual([])
+  })
+
+  test('a unique FAQ alongside an ambiguous pair: only the unique one survives', () => {
+    const pairs = [
+      { id: 'dup-a', question: 'Returns?', answer: 'Seven days' },
+      { id: 'dup-b', question: 'RETURNS؟', answer: 'Thirty days' },
+      { id: 'unique', question: 'Shipping ETA?', answer: 'Two days' },
+    ]
+    expect(selectUnambiguousFaqs(pairs)).toEqual([
+      { id: 'unique', question: 'Shipping ETA?', answer: 'Two days' },
+    ])
+  })
+
+  test('a single FAQ with a blank answer is excluded (not deliverable)', () => {
+    expect(selectUnambiguousFaqs([{ id: 'blank', question: 'Q?', answer: '   ' }])).toEqual([])
+  })
+
+  test('a single FAQ with an empty ID is excluded (never deliverable)', () => {
+    expect(selectUnambiguousFaqs([{ id: '', question: 'Q?', answer: 'Valid' }])).toEqual([])
+  })
+
+  test('all unique valid FAQs are preserved in the unambiguous set', () => {
+    const pairs = [
+      { id: 'd-1', question: 'آیا تحویل حضوری دارید؟', answer: 'بله، در فروشگاه.' },
+      { id: 'd-2', question: 'Do you ship internationally?', answer: 'Yes, worldwide.' },
+    ]
+    expect(selectUnambiguousFaqs(pairs)).toEqual(pairs)
+  })
+
+  test('source records are never mutated by partitioning', () => {
+    const pairs = Object.freeze([
+      Object.freeze({ id: 'a', question: 'Q?', answer: 'A' }),
+      Object.freeze({ id: 'b', question: 'q?', answer: 'B' }),
+    ])
+    const original = JSON.stringify(pairs)
+    selectUnambiguousFaqs(pairs)
+    expect(JSON.stringify(pairs)).toBe(original)
+  })
+})
+
+describe('Developer — matchFaq semantic duplicate safety (BLOCKER 3)', () => {
+  test('all-ambiguous candidates → no provider call, safe negative', async () => {
+    const pairs = [
+      { id: 'yes', question: 'آیا ارسال رایگان دارید؟', answer: 'بله' },
+      { id: 'no', question: 'آيا ارسال رايگان داريد؟', answer: 'خیر' },
+    ]
+    let called = 0
+    const provider = { complete: async () => { called++; return JSON.stringify({ matched: true, id: 'yes', confidence: 0.99 }) } }
+    const r = await matchFaq('برای ارسال هزینه پرداخت می‌کنم؟', pairs, provider)
+    expect(r).toMatchObject({ matched: false, faqPairId: null, answer: null })
+    expect(called).toBe(0)
+  })
+
+  test('mixed ambiguous + unique: provider IS called, only unique ID accepted', async () => {
+    const pairs = [
+      { id: 'dup-a', question: 'Returns?', answer: 'Seven days' },
+      { id: 'dup-b', question: 'RETURNS؟', answer: 'Thirty days' },
+      { id: 'unique', question: 'Shipping ETA?', answer: 'Two days' },
+    ]
+    let called = 0
+    const provider = { complete: async () => { called++; return JSON.stringify({ matched: true, id: 'unique', confidence: 0.8 }) } }
+    const r = await matchFaq('How soon will the package arrive?', pairs, provider)
+    expect(r).toEqual({ matched: true, faqPairId: 'unique', answer: 'Two days', confidence: 0.8 })
+    expect(called).toBe(1)
+  })
+
+  test('mixed ambiguous + unique: ambiguous ID rejected even with confidence 1', async () => {
+    const pairs = [
+      { id: 'dup-a', question: 'Returns?', answer: 'Seven days' },
+      { id: 'dup-b', question: 'RETURNS؟', answer: 'Thirty days' },
+      { id: 'unique', question: 'Shipping ETA?', answer: 'Two days' },
+    ]
+    let called = 0
+    const provider = { complete: async () => { called++; return JSON.stringify({ matched: true, id: 'dup-a', confidence: 1 }) } }
+    const r = await matchFaq('How soon will the package arrive?', pairs, provider)
+    expect(r).toMatchObject({ matched: false, faqPairId: null, answer: null })
+    // Provider IS called (unique candidate exists), but the ambiguous ID
+    // 'dup-a' is not in the unambiguous set → rejected.
+    expect(called).toBe(1)
+  })
+
+  test('a single blank-answer FAQ → no provider call, safe negative', async () => {
+    let called = 0
+    const provider = { complete: async () => { called++; return JSON.stringify({ matched: true, id: 'blank', confidence: 1 }) } }
+    const r = await matchFaq('سوال', [{ id: 'blank', question: 'سوال', answer: '   ' }], provider)
+    expect(r).toMatchObject({ matched: false, faqPairId: null, answer: null })
+    expect(called).toBe(0)
+  })
+})
+
+describe('Developer — Unicode NFC normalization (BLOCKER 4)', () => {
+  test('NFC composes decomposed ALEF + MADDA ABOVE into pre-composed ALEF WITH MADDA ABOVE', () => {
+    const composed = 'آیا ارسال امروز است؟'
+    const decomposed = 'ا\u0653یا ارسال امروز است؟'
+    expect(composed).not.toBe(decomposed)
+    expect(composed.normalize('NFC')).toBe(decomposed.normalize('NFC'))
+    expect(normalizeFaqQuestion(composed)).toBe(normalizeFaqQuestion(decomposed))
+  })
+
+  test('NFC-resolved decomposed question exact-matches the composed stored FAQ', () => {
+    const composed = 'آیا ارسال امروز است؟'
+    const decomposed = 'ا\u0653یا ارسال امروز است؟'
+    expect(resolveExactFaq(decomposed, [{ id: 'one', question: composed, answer: 'بله' }]))
+      .toEqual({ status: 'matched', faqPairId: 'one', answer: 'بله' })
+  })
+
+  test('meaningful diacritics (kasra) are NOT stripped by NFC', () => {
+    const withKasra = normalizeFaqQuestion('كِتاب؟')
+    const withoutKasra = normalizeFaqQuestion('کتاب؟')
+    expect(withKasra).not.toBe(withoutKasra)
+    expect(normalizeFaqQuestion(withKasra)).toBe(withKasra)
+    expect(normalizeFaqQuestion(withoutKasra)).toBe(withoutKasra)
   })
 })
 

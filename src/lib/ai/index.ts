@@ -45,7 +45,7 @@
  */
 
 import ZAI from 'z-ai-web-dev-sdk'
-import { validateSemanticMatch } from '@/lib/ai/faq-policy'
+import { selectUnambiguousFaqs, validateSemanticMatch } from '@/lib/ai/faq-policy'
 
 let zaiInstance: Awaited<ReturnType<typeof ZAI.create>> | null = null
 
@@ -114,11 +114,23 @@ export async function matchFaq(
   faqPairs: Array<{ id: string; question: string; answer: string }>,
   provider?: AiProvider,
 ): Promise<FaqMatchResult> {
-  if (faqPairs.length === 0) {
+  // AI-Q3 BLOCKER 3: partition FAQ pairs into UNAMBIGUOUS semantic
+  // candidates BEFORE any provider call. Groups of 2+ FAQs that
+  // canonicalize to the same question are contradictory/duplicate — ALL
+  // their IDs are excluded from the prompt AND from validation. The model
+  // can never select an ambiguous ID, even with confidence 1. This is
+  // enforced in code (selectUnambiguousFaqs + validateSemanticMatch
+  // membership check), not merely described in the LLM prompt.
+  const eligible = selectUnambiguousFaqs(faqPairs)
+
+  if (eligible.length === 0) {
+    // No unambiguous candidate remains — safe negative WITHOUT calling
+    // the provider (BLOCKER 3, point 5). This covers the zero-candidate
+    // case AND the all-candidates-ambiguous case.
     return { matched: false, faqPairId: null, answer: null, confidence: 0 }
   }
 
-  const faqList = faqPairs.map((p, i) => `${i + 1}. [ID:${p.id}] ${p.question}`).join('\n')
+  const faqList = eligible.map((p, i) => `${i + 1}. [ID:${p.id}] ${p.question}`).join('\n')
 
   const prompt = `You are a FAQ matching assistant. Given a visitor's message and a list of FAQ questions, determine which FAQ question (if any) is semantically equivalent to the visitor's message.
 
@@ -157,11 +169,14 @@ Rules:
     const jsonStr = stripFences(text)
     const parsed: unknown = JSON.parse(jsonStr)
 
-    // AI-Q3: strict semantic confidence gate. A positive result requires
-    // matched===true (strict boolean), a valid exact-member string ID, a
-    // finite numeric confidence in [0.7, 1], and a nonblank stored answer.
-    // No default confidence. No coercion. No clamping into acceptance.
-    const validated = validateSemanticMatch(parsed, faqPairs)
+    // AI-Q3: strict semantic confidence gate against the UNAMBIGUOUS
+    // candidate list. A positive result requires matched===true (strict
+    // boolean), a valid exact-member string ID (must be in `eligible` —
+    // an ambiguous ID can never pass because it was excluded from the
+    // prompt and from this list), a finite numeric confidence in [0.7, 1],
+    // and a nonblank stored answer. No default confidence. No coercion.
+    // No clamping into acceptance.
+    const validated = validateSemanticMatch(parsed, eligible)
     if (validated) {
       return {
         matched: true,

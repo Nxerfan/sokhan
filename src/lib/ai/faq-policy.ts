@@ -10,6 +10,10 @@
  * Persian/Arabic and English orthographic variants as identical, while
  * NEVER discarding meaningful distinctions:
  *
+ * - Unicode NFC canonical composition FIRST — so a decomposed ALEF + MADDA
+ *   ABOVE (U+0627 + U+0653) and the pre-composed ALEF WITH MADDA ABOVE
+ *   (U+0622) canonicalize to the same character. Meaningful diacritics
+ *   like kasra (U+0650) do NOT compose away under NFC — they are preserved.
  * - Leading/trailing whitespace removal + repeated whitespace collapse.
  * - Persian ZWNJ (U+200C) → regular space (and vice versa — both become space).
  * - NBSP (U+00A0) and tabs → regular space.
@@ -21,21 +25,33 @@
  *
  * Never touched: negation particles, numbers, decimal points, percentages,
  * word order, meaningful internal punctuation, diacritics (kasra/damma etc.
- * are preserved — they carry meaning in some contexts).
+ * are preserved — NFC does not compose them away).
  *
- * ## Exact-match ambiguity
+ * ## Exact-match ambiguity (BLOCKER 2)
  *
- * `resolveExactFaq` returns `ambiguous` when multiple eligible FAQs
- * canonicalize to the same question — regardless of answer equality. An
- * ambiguous exact match never selects an arbitrary row, never invokes
- * semantic classification, and never produces a charge.
+ * `resolveExactFaq` detects canonical duplicates among ALL supplied eligible
+ * FAQ rows BEFORE evaluating deliverability. Two or more rows with the same
+ * canonical question → `ambiguous`, regardless of answer content or row
+ * order. A single canonical match with a blank answer → `none`. A single
+ * match with an empty/invalid ID → `none` (never deliverable). Never mutates
+ * source FAQ records. Never chooses an arbitrary database row.
+ *
+ * ## Semantic candidate partitioning (BLOCKER 3)
+ *
+ * `selectUnambiguousFaqs` groups FAQ pairs by canonical question. Groups
+ * with 2+ members (contradictory or duplicate canonical questions) are
+ * EXCLUDED entirely from semantic classification — an ambiguous ID can
+ * never be selected by the model, even with confidence 1. Only
+ * single-member groups with a non-empty ID and a nonblank answer remain
+ * eligible. If no unambiguous candidate remains, `matchFaq` returns a safe
+ * negative WITHOUT calling the provider.
  *
  * ## Semantic confidence gate
  *
  * `FAQ_CONFIDENCE_THRESHOLD = 0.7` — a semantic match requires:
  *   1. Parsed output is a non-null, non-array object.
  *   2. `matched === true` (strictly boolean).
- *   3. `id` is an exact string member of the supplied list.
+ *   3. `id` is an exact string member of the supplied UNAMBIGUOUS list.
  *   4. `confidence` is a finite number (typeof === 'number').
  *   5. `confidence >= 0.7 && confidence <= 1`.
  *   6. The stored answer is nonblank.
@@ -63,37 +79,43 @@ export const FAQ_CONFIDENCE_THRESHOLD = 0.7
  */
 export function normalizeFaqQuestion(input: string): string {
   if (typeof input !== 'string') return ''
-  let s = input
+  // Unicode NFC canonical composition FIRST. This unifies visually identical
+  // representations: e.g. decomposed ALEF (U+0627) + MADDA ABOVE (U+0653)
+  // composes to pre-composed ALEF WITH MADDA ABOVE (U+0622). Meaningful
+  // diacritics like kasra (U+0650) are preserved — NFC does not compose them
+  // away. NFC is itself idempotent, so re-normalizing an NFC string is a
+  // no-op.
+  let s = input.normalize('NFC')
 
-  // 1. Persian ZWNJ (U+200C) → regular space.
+  // 2. Persian ZWNJ (U+200C) → regular space.
   s = s.replace(/\u200C/g, ' ')
 
-  // 2. NBSP (U+00A0) and tabs → regular space.
+  // 3. NBSP (U+00A0) and tabs → regular space.
   s = s.replace(/[\u00A0\t]/g, ' ')
 
-  // 3. Arabic Yeh (U+064A) → Persian Yeh (U+06CC).
+  // 4. Arabic Yeh (U+064A) → Persian Yeh (U+06CC).
   s = s.replace(/\u064A/g, '\u06CC')
 
-  // 4. Arabic Kaf (U+0643) → Persian Kaf (U+06A9).
+  // 5. Arabic Kaf (U+0643) → Persian Kaf (U+06A9).
   s = s.replace(/\u0643/g, '\u06A9')
 
-  // 5. Collapse repeated whitespace into single spaces.
+  // 6. Collapse repeated whitespace into single spaces.
   s = s.replace(/\s+/g, ' ')
 
-  // 6. Trim leading/trailing whitespace.
+  // 7. Trim leading/trailing whitespace.
   s = s.trim()
 
-  // 7. English case-folding (lowercase) — applied after trim so it doesn't
+  // 8. English case-folding (lowercase) — applied after trim so it doesn't
   //    affect whitespace handling. This affects ASCII A-Z only; Persian and
   //    Arabic characters are unaffected.
   s = s.toLowerCase()
 
-  // 8. Strip equivalent trailing question marks (both Latin `?` and
+  // 9. Strip equivalent trailing question marks (both Latin `?` and
   //    Arabic/Persian `؟`) — ONLY at the very end, after all other
   //    normalization. Internal question marks (meaningful) are preserved.
   s = s.replace(/[?؟]+$/, '')
 
-  // 9. Final trim (in case stripping trailing marks left trailing space).
+  // 10. Final trim (in case stripping trailing marks left trailing space).
   s = s.trim()
 
   return s
@@ -112,13 +134,21 @@ export type ExactFaqResult =
  * Resolve a visitor message against a list of eligible FAQ pairs using
  * deterministic exact matching.
  *
+ * BLOCKER 2: canonical duplicates are detected among ALL supplied eligible
+ * FAQ rows BEFORE evaluating deliverability. A row with a blank answer or
+ * an empty ID still counts toward canonical-duplicate detection — it is a
+ * persisted FAQ row claiming that question, so two such rows are ambiguous
+ * regardless of answer content or row order.
+ *
  * Returns:
- * - `matched` — exactly one FAQ canonicalizes to the visitor message AND
- *   has a nonblank stored answer. The persisted ID and owner-authored
- *   answer are returned verbatim.
- * - `ambiguous` — multiple FAQs canonicalize to the same question. Never
- *   selects an arbitrary row, never bills.
- * - `none` — no FAQ matches, or the matching FAQ has a blank answer.
+ * - `matched` — exactly ONE FAQ row canonicalizes to the visitor message,
+ *   has a non-empty string ID, AND has a nonblank stored answer. The
+ *   persisted ID and owner-authored answer are returned verbatim.
+ * - `ambiguous` — two or more FAQ rows canonicalize to the same question
+ *   as the visitor message, regardless of answer content or row order.
+ *   Never selects an arbitrary row, never bills.
+ * - `none` — no FAQ matches; OR the single matching row has a blank answer;
+ *   OR the single matching row has an empty/invalid ID (never deliverable).
  *
  * Never mutates the input array or its objects.
  */
@@ -135,31 +165,100 @@ export function resolveExactFaq(
     return { status: 'none', faqPairId: null, answer: null }
   }
 
-  // Find ALL FAQs whose canonical question equals the canonical visitor
-  // message AND whose answer is nonblank (deliverable).
-  const matches: Array<{ id: string; answer: string }> = []
+  // Collect ALL FAQ rows whose canonical question equals the canonical
+  // visitor message, regardless of ID validity or answer content. A row
+  // with a blank answer or an empty ID is still a persisted FAQ row
+  // claiming that question — it counts toward canonical-duplicate
+  // detection (BLOCKER 2). This prevents a blank-answer row from being
+  // silently filtered out before the duplicate check, which would
+  // incorrectly produce a positive answer from a neighboring duplicate.
+  const matchingGroup: Array<{ id: string; answer: string }> = []
   for (const faq of faqPairs) {
-    if (typeof faq.id !== 'string' || typeof faq.question !== 'string' || typeof faq.answer !== 'string') {
-      continue
-    }
+    if (faq === null || typeof faq !== 'object') continue
+    if (typeof faq.question !== 'string') continue
     const canonicalQuestion = normalizeFaqQuestion(faq.question)
-    if (canonicalQuestion === canonicalVisitor && faq.answer.trim()) {
-      matches.push({ id: faq.id, answer: faq.answer })
-    }
+    if (canonicalQuestion !== canonicalVisitor) continue
+    const id = typeof faq.id === 'string' ? faq.id : ''
+    const answer = typeof faq.answer === 'string' ? faq.answer : ''
+    matchingGroup.push({ id, answer })
   }
 
-  if (matches.length === 0) {
+  if (matchingGroup.length === 0) {
     return { status: 'none', faqPairId: null, answer: null }
   }
 
-  if (matches.length > 1) {
+  if (matchingGroup.length > 1) {
     // Multiple canonical duplicates → ambiguous. Never first-row-wins,
     // never semantic classification to guess, never a charge.
     return { status: 'ambiguous', faqPairId: null, answer: null }
   }
 
-  // Exactly one deliverable match.
-  return { status: 'matched', faqPairId: matches[0].id, answer: matches[0].answer }
+  // Exactly one row matches the canonical question. Check deliverability:
+  // the ID must be a non-empty string (an empty/invalid ID is never a
+  // deliverable source), and the answer must be nonblank.
+  const only = matchingGroup[0]
+  if (!only.id) {
+    return { status: 'none', faqPairId: null, answer: null }
+  }
+  if (!only.answer.trim()) {
+    return { status: 'none', faqPairId: null, answer: null }
+  }
+
+  return { status: 'matched', faqPairId: only.id, answer: only.answer }
+}
+
+// ---------------------------------------------------------------------------
+// Semantic candidate partitioning (BLOCKER 3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Partition FAQ pairs into unambiguous semantic candidates (BLOCKER 3).
+ *
+ * Groups FAQ pairs by canonical question. A group with 2+ members
+ * (contradictory or duplicate canonical questions) is AMBIGUOUS — ALL its
+ * members are excluded from semantic matching. The model can never select
+ * an ambiguous ID, even with confidence 1. A group with exactly 1 member is
+ * unambiguous — but it is included ONLY if it has a non-empty string ID and
+ * a nonblank stored answer (otherwise it cannot be delivered).
+ *
+ * Returns the list of unambiguous, deliverable FAQ candidates suitable for
+ * semantic classification. Never mutates the input array or its objects.
+ *
+ * If the returned list is empty, `matchFaq` MUST return a safe negative
+ * WITHOUT calling the provider (BLOCKER 3, point 5).
+ */
+export function selectUnambiguousFaqs(
+  faqPairs: ReadonlyArray<{ id: string; question: string; answer: string }>,
+): Array<{ id: string; question: string; answer: string }> {
+  // Group by canonical question. Preserve original object shape (no
+  // mutation of source records).
+  const groups = new Map<string, Array<{ id: string; question: string; answer: string }>>()
+  for (const faq of faqPairs) {
+    if (faq === null || typeof faq !== 'object') continue
+    if (typeof faq.id !== 'string' || typeof faq.question !== 'string' || typeof faq.answer !== 'string') continue
+    const canonical = normalizeFaqQuestion(faq.question)
+    if (!canonical) continue
+    let group = groups.get(canonical)
+    if (!group) {
+      group = []
+      groups.set(canonical, group)
+    }
+    group.push({ id: faq.id, question: faq.question, answer: faq.answer })
+  }
+
+  const result: Array<{ id: string; question: string; answer: string }> = []
+  for (const group of groups.values()) {
+    if (group.length === 1) {
+      const only = group[0]
+      // Include only if ID is non-empty AND answer is nonblank — a
+      // blank-answer or empty-ID single row cannot be delivered.
+      if (only.id && only.answer.trim()) {
+        result.push(only)
+      }
+    }
+    // group.length > 1 → ambiguous, exclude ALL members.
+  }
+  return result
 }
 
 // ---------------------------------------------------------------------------
@@ -168,6 +267,10 @@ export function resolveExactFaq(
 
 /**
  * Validate a parsed semantic model output against the strict AI-Q3 gate.
+ *
+ * The `faqPairs` argument MUST be the UNAMBIGUOUS candidate list (output of
+ * `selectUnambiguousFaqs`). An ambiguous ID can never pass this check
+ * because it is not a member of the supplied list.
  *
  * Returns the matched FAQ pair + confidence if ALL conditions hold:
  *   1. `parsed` is a non-null, non-array object.
