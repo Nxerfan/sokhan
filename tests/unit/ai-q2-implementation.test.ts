@@ -570,3 +570,60 @@ describe('Developer — durable HTTP idempotency', () => {
     expect(msgSrc).toContain('tenantId_visitorMessageId')
   })
 })
+
+// ---------------------------------------------------------------------------
+// Idempotent replay after quota exhaustion + tenant-scoped transaction
+// ---------------------------------------------------------------------------
+
+describe('Developer — idempotent replay and tenant-scoped transaction', () => {
+  const msgSrc = readFileSync(join(process.cwd(), 'src/app/api/widget/[slug]/messages/route.ts'), 'utf8')
+
+  test('idempotency check is BEFORE the message limit check (replay after Free quota exhaustion)', () => {
+    const idempotencyIdx = msgSrc.indexOf('AI-Q2: Durable HTTP idempotency — checked BEFORE the message limit')
+    const messageLimitIdx = msgSrc.indexOf('const messageCheck = await checkMessageLimit')
+    expect(idempotencyIdx).toBeGreaterThan(-1)
+    expect(messageLimitIdx).toBeGreaterThan(-1)
+    expect(idempotencyIdx).toBeLessThan(messageLimitIdx)
+  })
+
+  test('the transaction uses the fail-closed db proxy, not globalDb', () => {
+    // The transaction must go through the tenant-scoped fail-closed proxy.
+    expect(msgSrc).toContain('db.$transaction')
+    // globalDb must NOT be imported or used in the insert path.
+    const insertSection = msgSrc.slice(
+      msgSrc.indexOf('// Find or create the conversation.'),
+      msgSrc.indexOf('// Update conversation metadata.'),
+    )
+    expect(insertSection).not.toContain('globalDb')
+  })
+
+  test('collision recovery uses db (fail-closed), not globalDb', () => {
+    const collisionSection = msgSrc.slice(
+      msgSrc.indexOf('// Concurrent idempotency create'),
+      msgSrc.indexOf("throw new Error('Failed to persist visitor message')"),
+    )
+    expect(collisionSection).not.toContain('globalDb')
+    expect(collisionSection).toContain('db.visitorMessageIdempotency.findUnique')
+    expect(collisionSection).toContain('db.message.findUnique')
+    expect(collisionSection).toContain('db.conversation.findUnique')
+  })
+
+  test('domain check still runs before idempotency (security preserved)', () => {
+    const domainIdx = msgSrc.indexOf('isDomainAllowed')
+    const idempotencyIdx = msgSrc.indexOf('AI-Q2: Durable HTTP idempotency — checked BEFORE')
+    expect(domainIdx).toBeGreaterThan(-1)
+    expect(idempotencyIdx).toBeGreaterThan(domainIdx)
+  })
+
+  test('the idempotent replay returns the original message even when message limit would block', () => {
+    // The idempotency check returns 'ok' with isIdempotentRetry before
+    // reaching the message_limit check. The message_limit check only
+    // runs for NEW messages.
+    const idempotencyBlock = msgSrc.slice(
+      msgSrc.indexOf('AI-Q2: Durable HTTP idempotency — checked BEFORE'),
+      msgSrc.indexOf('const messageCheck = await checkMessageLimit'),
+    )
+    expect(idempotencyBlock).toContain('isIdempotentRetry')
+    expect(idempotencyBlock).toContain('idempotency_conflict')
+  })
+})

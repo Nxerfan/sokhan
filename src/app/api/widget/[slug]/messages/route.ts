@@ -245,6 +245,52 @@ export async function POST(
       return { kind: 'domain_not_allowed' as const }
     }
 
+    // === AI-Q2: Durable HTTP idempotency — checked BEFORE the message limit ===
+    // A previously persisted visitor message must remain retrievable using
+    // its original clientMessageId, even when that message exhausted the
+    // Free weekly limit. Authentication, tenant authorization, access
+    // policies and domain restrictions have already been enforced above.
+    // The message limit is a quota gate for NEW messages — a replay of an
+    // already-persisted message must NOT be blocked by it.
+    if (clientMessageId) {
+      const existing = await db.visitorMessageIdempotency.findUnique({
+        where: {
+          tenantId_contactId_clientMessageId: {
+            tenantId,
+            contactId,
+            clientMessageId,
+          },
+        },
+        select: { messageId: true, conversationId: true, messageText: true },
+      })
+
+      if (existing) {
+        // Conflict detection: same key, different text → 409.
+        if (existing.messageText !== text) {
+          return { kind: 'idempotency_conflict' as const }
+        }
+
+        // Idempotent retry — return the original message.
+        const origMessage = await db.message.findUnique({
+          where: { id: existing.messageId },
+        })
+        const origConversation = await db.conversation.findUnique({
+          where: { id: existing.conversationId },
+        })
+        if (origMessage && origConversation) {
+          return {
+            kind: 'ok' as const,
+            message: origMessage,
+            conversation: origConversation,
+            isNew: false,
+            isIdempotentRetry: true,
+          }
+        }
+        // If the original message/conversation was deleted (cascade), fall
+        // through to create a new one.
+      }
+    }
+
     const messageCheck = await checkMessageLimit(tenantId)
     if (!messageCheck.allowed) {
       return { kind: 'message_limit' as const, reason: messageCheck.reason ?? 'message_limit' }
@@ -303,61 +349,18 @@ export async function POST(
       }
     }
 
-    // === AI-Q2: Durable HTTP idempotency ===
-    // If the request carries a valid clientMessageId, check for an existing
-    // idempotency record scoped to (tenantId, contactId, clientMessageId).
-    // If found, return the original persisted visitor Message — no duplicate
-    // message, no duplicate AI reservation, no duplicate charge.
-    if (clientMessageId) {
-      const existing = await db.visitorMessageIdempotency.findUnique({
-        where: {
-          tenantId_contactId_clientMessageId: {
-            tenantId,
-            contactId,
-            clientMessageId,
-          },
-        },
-        select: { messageId: true, conversationId: true, messageText: true },
-      })
-
-      if (existing) {
-        // Conflict detection: same key, different text → 409.
-        if (existing.messageText !== text) {
-          return { kind: 'idempotency_conflict' as const }
-        }
-
-        // Idempotent retry — return the original message.
-        const origMessage = await db.message.findUnique({
-          where: { id: existing.messageId },
-        })
-        const origConversation = await db.conversation.findUnique({
-          where: { id: existing.conversationId },
-        })
-        if (origMessage && origConversation) {
-          return {
-            kind: 'ok' as const,
-            message: origMessage,
-            conversation: origConversation,
-            isNew: false,
-            isIdempotentRetry: true,
-          }
-        }
-        // If the original message/conversation was deleted (cascade), fall
-        // through to create a new one.
-      }
-    }
-
     // Find or create the conversation. The visitor Message, idempotency
     // claim, AND conversation creation must be inside ONE database
     // transaction so a losing concurrent request cannot leave orphan
     // Messages, Conversations or routing side effects.
-    const { globalDb } = await import('@/lib/db')
+    // Uses the fail-closed db proxy (already inside withTenant) — tenantId
+    // is auto-injected and enforced by the Prisma extension.
     let conversation: { id: string } | null = null
     let message: { id: string; content: unknown; senderType: string; conversationId: string; createdAt: Date; status: string } | null = null
     let isNew = false
 
     try {
-      const txResult = await globalDb.$transaction(async (tx) => {
+      const txResult = await db.$transaction(async (tx) => {
         // Find an existing open conversation for this contact.
         let conv = await tx.conversation.findFirst({
           where: { contactId, tenantId, status: 'open' },
@@ -421,10 +424,11 @@ export async function POST(
     } catch (e) {
       // Concurrent idempotency create — unique constraint violation.
       // The ENTIRE transaction was rolled back (no orphan Message or
-      // Conversation). Re-query and return the original — with text
-      // comparison for conflict detection (Defect B).
+      // Conversation). Re-query using the fail-closed db proxy (tenant-
+      // scoped) and return the original — with text comparison for
+      // conflict detection.
       if (clientMessageId) {
-        const concurrent = await globalDb.visitorMessageIdempotency.findUnique({
+        const concurrent = await db.visitorMessageIdempotency.findUnique({
           where: {
             tenantId_contactId_clientMessageId: {
               tenantId,
@@ -439,11 +443,11 @@ export async function POST(
           if (concurrent.messageText !== text) {
             return { kind: 'idempotency_conflict' as const }
           }
-          const origMessage = await globalDb.message.findUnique({
+          const origMessage = await db.message.findUnique({
             where: { id: concurrent.messageId },
             select: { id: true, content: true, senderType: true, conversationId: true, createdAt: true, status: true },
           })
-          const origConversation = await globalDb.conversation.findUnique({
+          const origConversation = await db.conversation.findUnique({
             where: { id: concurrent.conversationId },
             select: { id: true },
           })
