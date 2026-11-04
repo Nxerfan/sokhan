@@ -357,6 +357,62 @@ async function switchWorkspace(
     headers: { 'Content-Type': 'application/json' },
   })
   const body = await res.json().catch(() => ({}))
+
+  // STRICT VERIFICATION (Failure B root cause fix):
+  // NextAuth's POST /api/auth/session returns 200 even when the jwt
+  // callback throws during trigger='update' — the catch block in
+  // core/routes/session.js logs the error and pushes sessionStore.clean()
+  // cookies, but the HTTP status stays 200 and the body becomes {}.
+  // Without checking the response body, a switch that silently failed
+  // server-side would be masked by the 200 status, and the next session
+  // read would return the OLD workspaceId (or null if the cookie was
+  // cleaned). This is NOT a retry — it is a strict assertion that the
+  // server-side update was reflected in the response body.
+  if (res.status() === 200) {
+    const bodyWorkspace = (body as any)?.user?.workspaceId
+    if (bodyWorkspace !== workspaceId) {
+      throw new Error(
+        `switchWorkspace server-side verification FAILED: ` +
+          `requested workspaceId=${workspaceId} ` +
+          `but response body user.workspaceId=${String(bodyWorkspace)} ` +
+          `(status=200 body=${JSON.stringify(body).slice(0, 200)}). ` +
+          `The NextAuth jwt callback may have thrown (not_active_member) ` +
+          `or the update trigger did not fire — the response body must ` +
+          `reflect the new workspaceId on a successful switch.`,
+      )
+    }
+
+    // Bounded session propagation verification: the POST response body
+    // confirms the server updated the token, but the Set-Cookie header
+    // may not have been fully processed by Playwright's APIRequestContext
+    // cookie jar before the next request. A short bounded poll (5s, 250ms
+    // intervals) verifies the session GET also reflects the new workspace.
+    // This is the same pattern used by signInExisting (15s poll) — not a
+    // retry that masks failures, but a verification that the cookie
+    // propagated. If the timeout is reached, throw with diagnostics
+    // (NEVER silently accept the old value).
+    const verifyDeadline = Date.now() + 5000
+    let lastSessionWorkspace: string | null = null
+    while (Date.now() < verifyDeadline) {
+      const sRes = await page.request.get(`${BASE}/api/auth/session`)
+      const sBody = (await sRes.json().catch(() => ({}))) as {
+        user?: { workspaceId?: string | null }
+      }
+      lastSessionWorkspace = sBody.user?.workspaceId ?? null
+      if (lastSessionWorkspace === workspaceId) {
+        return { status: res.status(), body }
+      }
+      await page.waitForTimeout(250)
+    }
+    throw new Error(
+      `switchWorkspace session propagation FAILED: ` +
+        `POST returned 200 with body.user.workspaceId=${workspaceId} ` +
+        `but session GET still returns workspaceId=${String(lastSessionWorkspace)} after 5s. ` +
+        `The Set-Cookie header from the POST was not processed by the ` +
+        `cookie jar. This indicates a cookie propagation race, not a ` +
+        `server-side defect (the server confirmed the update in the body).`,
+    )
+  }
   return { status: res.status(), body }
 }
 
