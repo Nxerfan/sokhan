@@ -41,6 +41,7 @@
     "settings": "تنظیمات",
     "members": "اعضا",
     "departments": "دپارتمان‌ها",
+      "aiActions": "پاسخ‌های هوش مصنوعی",
     "widget": "ویجت",
     "general": "عمومی",
     "billing": "صورتحساب",
@@ -492,7 +493,8 @@
     "usage": {
       "agents": "کارشناسان",
       "conversations": "گفت‌وگوها (این ماه)",
-      "departments": "دپارتمان‌ها"
+      "departments": "دپارتمان‌ها",
+      "aiActions": "پاسخ‌های هوش مصنوعی"
     },
     "limits": {
       "agents": "کارشناسان",
@@ -738,6 +740,7 @@
           "agents": "کارشناسان",
           "conversations": "گفت‌وگو / ماه",
           "departments": "دپارتمان‌ها",
+      "aiActions": "پاسخ‌های هوش مصنوعی",
           "realtime": "گفت‌وگوی زنده",
           "widget": "سفارشی‌سازی ویجت",
           "csat": "نظرسنجی CSAT",

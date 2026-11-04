@@ -107,11 +107,17 @@ async function countUsage(tenantId: string, limit: LimitKind): Promise<number> {
         return db.department.count({})
       }
       case 'aiActions': {
-        const now = new Date()
-        const startOfMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
-        return db.message.count({
-          where: { senderType: 'ai', createdAt: { gte: startOfMonth } },
-        })
+        // AI-Q2: use the authoritative usage service (getAiUsageState) which
+        // honors active subscription periods, reserved slots, and historical
+        // backfill — NOT a stale calendar-month Message.count.
+        const { getAiUsageState } = await import('@/lib/ai/usage-service')
+        const state = await getAiUsageState(tenantId)
+        // `used` represents the authoritative committed reply count in the
+        // effective billing period. The shared gate checks used + reserved
+        // < limit via getAiRemaining in the usage state, but checkPlanLimit
+        // uses `current < limitValue`. To honor reserved slots, we report
+        // `used + reserved` as the current count.
+        return state.used + state.reserved
       }
       case 'weeklyMessages': {
         // Messages sent by visitors in the last 7 days (rolling window)
@@ -138,6 +144,20 @@ export async function checkPlanLimit(
   tenantId: string,
   limit: LimitKind,
 ): Promise<PlanLimitResult> {
+  // AI-Q2: for AI actions, derive ALL fields (planSlug, limit, current)
+  // from the authoritative getAiUsageState — NOT the catalog limit via
+  // resolveTenantPlanSlug. An expired active subscription returns limit=0
+  // from getAiUsageState, so the gate correctly denies even though the
+  // catalog says 'pro' (1400).
+  if (limit === 'aiActions') {
+    const { getAiUsageState } = await import('@/lib/ai/usage-service')
+    const state = await getAiUsageState(tenantId)
+    const current = state.used + state.reserved
+    const limitValue = state.limit
+    const allowed = limitValue === -1 || current < limitValue
+    return { allowed, current, limit: limitValue, planSlug: state.planSlug }
+  }
+
   const planSlug = await resolveTenantPlanSlug(tenantId)
   const plan = getPlan(planSlug) ?? getPlan('free')!
   const limitValue = plan.limits[limit]
@@ -189,10 +209,16 @@ export async function getTenantUsage(tenantId: string): Promise<{
   const planSlug = await resolveTenantPlanSlug(tenantId)
   const plan = getPlan(planSlug) ?? getPlan('free')!
 
-  const [agents, conversations, departments] = await Promise.all([
+  // AI-Q2: aiActions usage comes from the authoritative usage service
+  // (real committed replies in the active accounting period), not a
+  // hardcoded zero. The other metrics use countUsage as before.
+  const { getAiUsageState } = await import('@/lib/ai/usage-service')
+
+  const [agents, conversations, departments, aiState] = await Promise.all([
     countUsage(tenantId, 'agents'),
     countUsage(tenantId, 'conversations'),
     countUsage(tenantId, 'departments'),
+    getAiUsageState(tenantId),
   ])
 
   return {
@@ -201,7 +227,7 @@ export async function getTenantUsage(tenantId: string): Promise<{
       agents: { current: agents, limit: plan.limits.agents },
       conversations: { current: conversations, limit: plan.limits.conversations },
       departments: { current: departments, limit: plan.limits.departments },
-      aiActions: { current: 0, limit: (plan.limits as any).aiActions ?? -1 },
+      aiActions: { current: aiState.used, limit: aiState.limit },
       websites: { current: 0, limit: (plan.limits as any).websites ?? 1 },
       weeklyMessages: { current: 0, limit: (plan.limits as any).weeklyMessages ?? 100 },
     },

@@ -27,6 +27,7 @@ type UsageInfo = {
     agents: { current: number; limit: number }
     conversations: { current: number; limit: number }
     departments: { current: number; limit: number }
+    aiActions?: { current: number; limit: number }
   }
 }
 
@@ -230,22 +231,37 @@ export function BillingPanel() {
                 current={usage.agents.current}
                 limit={usage.agents.limit}
                 t={t}
+                testId="billing-agents-usage"
               />
               <UsageBar
                 label={t('usage.conversations')}
                 current={usage.conversations.current}
                 limit={usage.conversations.limit}
                 t={t}
+                testId="billing-conversations-usage"
               />
               <UsageBar
                 label={t('usage.departments')}
                 current={usage.departments.current}
                 limit={usage.departments.limit}
                 t={t}
+                testId="billing-departments-usage"
               />
             </div>
           ) : (
             <p className="text-sm text-muted-foreground">{t('noUsageData')}</p>
+          )}
+          {/* AI-Q2: visible AI usage bar (consumed / max successful replies) */}
+          {usage?.aiActions && (
+            <div className="mt-2">
+              <UsageBar
+                label={t('usage.aiActions')}
+                current={usage.aiActions.current}
+                limit={usage.aiActions.limit}
+                t={t}
+                testId="billing-ai-usage"
+              />
+            </div>
           )}
           {data?.subscription && (
             <div className="mt-4 border-t border-border pt-4 text-xs text-muted-foreground">
@@ -482,23 +498,25 @@ function UsageBar({
   current,
   limit,
   t,
+  testId,
 }: {
   label: string
   current: number
   limit: number
   t: (k: string) => string
+  testId?: string
 }) {
   const value = pct(current, limit)
   const isUnlimited = limit === -1
   const isWarning = !isUnlimited && value >= 80
   return (
-    <div className="space-y-1.5">
+    <div className="space-y-1.5" data-testid={testId}>
       <div className="flex items-center justify-between text-xs">
         <span className="text-muted-foreground">{label}</span>
         <span className={cn('font-medium', isWarning && 'text-saffron')}>
           {isUnlimited
-            ? `${formatToman(current)} / ${t('unlimited')}`
-            : `${formatToman(current)} / ${formatToman(limit)}`}
+            ? <><span data-testid={testId ? `${testId}-current` : undefined}>{formatToman(current)}</span> / {t('unlimited')}</>
+            : <><span data-testid={testId ? `${testId}-current` : undefined}>{formatToman(current)}</span> / <span data-testid={testId ? `${testId}-limit` : undefined}>{formatToman(limit)}</span></>}
         </span>
       </div>
       <Progress value={isUnlimited ? 0 : value} className={cn(isWarning && 'bg-saffron/20')} />

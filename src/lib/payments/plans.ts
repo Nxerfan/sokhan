@@ -2,10 +2,16 @@
  * Plan catalog (Module 6 restructure).
  *
  * Plans: Free (30-day trial, 100 msgs/week, 1 website, locked customization),
- * Pro (500K msgs/month, 3 websites, full customization), Max (1M msgs/month,
- * 8 websites, full customization), Self-Hosted (contact us).
+ * Pro (1,200,000 Toman/month, 1,400 AI replies, full customization),
+ * Max (7,500,000 Toman/month, 10,000 AI replies, full customization),
+ * Self-Hosted (contact sales, unlimited).
  *
- * `getPlan(slug)` looks up by slug. `ensurePlansSeeded()` syncs to DB.
+ * AI-Q2 owner-approved pricing: Pro 1.2M Toman / 1,400 successful AI replies,
+ * Max 7.5M Toman / 10,000 replies. Free built-in AI is zero. Self-hosted
+ * remains contact-sales with unlimited (-1).
+ *
+ * `getPlan(slug)` looks up by slug (prototype-pollution-safe).
+ * `ensurePlansSeeded()` syncs to DB.
  */
 
 import { db } from '@/lib/db'
@@ -58,9 +64,9 @@ export const PLANS: Plan[] = [
   {
     slug: 'pro',
     name: 'Pro',
-    priceToman: 0, // Coming Soon — price TBD
+    priceToman: 1_200_000,
     interval: 'month',
-    limits: { agents: 5, conversations: 500_000, departments: 5, aiActions: 500, websites: 3, weeklyMessages: -1 },
+    limits: { agents: 5, conversations: 500_000, departments: 5, aiActions: 1_400, websites: 3, weeklyMessages: -1 },
     contactSales: false,
     customization: true,
     trialDays: 0,
@@ -68,9 +74,9 @@ export const PLANS: Plan[] = [
   {
     slug: 'max',
     name: 'Max',
-    priceToman: 0, // Coming Soon — price TBD
+    priceToman: 7_500_000,
     interval: 'month',
-    limits: { agents: 20, conversations: 1_000_000, departments: -1, aiActions: 2_000, websites: 8, weeklyMessages: -1 },
+    limits: { agents: 20, conversations: 1_000_000, departments: -1, aiActions: 10_000, websites: 8, weeklyMessages: -1 },
     contactSales: false,
     customization: true,
     trialDays: 0,
@@ -87,12 +93,19 @@ export const PLANS: Plan[] = [
   },
 ]
 
-const PLAN_BY_SLUG: Record<string, Plan> = Object.fromEntries(
-  PLANS.map((p) => [p.slug, p]),
+// Null-prototype backing store — prototype pollution safe. `getPlan('constructor')`
+// etc. returns null, not the Object constructor.
+const PLAN_BY_SLUG: Readonly<Record<string, Plan>> = Object.assign(
+  Object.create(null) as Record<string, Plan>,
+  ...PLANS.map((p) => ({ [p.slug]: p })),
 )
 
 export function getPlan(slug: string): Plan | null {
-  return PLAN_BY_SLUG[slug] ?? null
+  // Explicit hasOwnProperty check on a null-prototype object — safe against
+  // `constructor`, `__proto__`, `toString`, etc.
+  return Object.prototype.hasOwnProperty.call(PLAN_BY_SLUG, slug)
+    ? PLAN_BY_SLUG[slug]
+    : null
 }
 
 export function isPaidPlan(slug: string): boolean {

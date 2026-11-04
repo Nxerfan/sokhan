@@ -2517,8 +2517,20 @@ ${POSITIONING_FN_SOURCE}
   // by text — the old failed placeholder's _clientMessageId is
   // replaced with the new one so the merge matches correctly).
   function retrySendMessage(optimisticId, text){
-    // Generate a new clientMessageId for the retry.
-    var retryCmid = 'cmsg_retry_' + (++state.optimisticSeq) + '_' + Date.now();
+    // AI-Q2: Reuse the ORIGINAL _clientMessageId for the retry, so the
+    // server's idempotency layer resolves this to the same visitor Message
+    // if the first response was lost after durable persistence. Generating
+    // a new key would create a duplicate message and a duplicate AI charge.
+    var retryCmid = null;
+    for (var i = 0; i < state.messages.length; i++) {
+      if (state.messages[i].id === optimisticId && state.messages[i]._clientMessageId) {
+        retryCmid = state.messages[i]._clientMessageId;
+        break;
+      }
+    }
+    // Fall back to a new ID only if the original was never assigned (legacy
+    // or corrupted optimistic entry).
+    if (!retryCmid) retryCmid = 'cmsg_' + (++state.optimisticSeq) + '_' + Date.now();
     // V2 Context Chat (Feature 11): a failed send PRESERVED the pending page
     // attachment for exactly this explicit retry — attach it again so the
     // retried message carries the context the visitor opted into. Consumed

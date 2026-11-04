@@ -56,8 +56,10 @@ import { PLANS as CATALOG_PLANS } from '@/lib/payments/plans'
 
 const RUN_ID = `${Date.now()}-${Math.floor(Math.random() * 100000)}`
 
-// A test-only paid plan (priceToman > 0). The production catalog has all paid
-// plans at price 0 ("Coming Soon") — tests inject this plan via deps.getPlan.
+// Test-only paid plans for isolated checkout scenarios. The production
+// catalog (AI-Q2) has Pro at 1,200,000 Toman and Max at 7,500,000 Toman —
+// these test plans provide independent slugs so the mock provider can be
+// exercised without touching real gateway configuration.
 const TEST_PAID_PLAN = {
   slug: 'test-pro',
   name: 'Test Pro',
@@ -117,6 +119,31 @@ beforeAll(async () => {
       active: true,
     },
     update: { priceToman: TEST_PAID_PLAN_2.priceToman, active: true },
+  })
+
+  await globalDb.plan.upsert({
+    where: { slug: 'pro' },
+    create: {
+      slug: 'pro',
+      name: 'Pro',
+      priceToman: CATALOG_PLANS.find((p) => p.slug === 'pro')!.priceToman,
+      interval: 'month',
+      limits: CATALOG_PLANS.find((p) => p.slug === 'pro')!.limits as unknown as object,
+      active: true,
+    },
+    update: { priceToman: CATALOG_PLANS.find((p) => p.slug === 'pro')!.priceToman, active: true },
+  })
+  await globalDb.plan.upsert({
+    where: { slug: 'max' },
+    create: {
+      slug: 'max',
+      name: 'Max',
+      priceToman: CATALOG_PLANS.find((p) => p.slug === 'max')!.priceToman,
+      interval: 'month',
+      limits: CATALOG_PLANS.find((p) => p.slug === 'max')!.limits as unknown as object,
+      active: true,
+    },
+    update: { priceToman: CATALOG_PLANS.find((p) => p.slug === 'max')!.priceToman, active: true },
   })
 
   const freeRow = await globalDb.plan.findUnique({ where: { slug: 'free' }, select: { id: true } })
@@ -282,31 +309,37 @@ describe('§ Zero-price non-free plans (PR#4 §1)', () => {
     mock = createMockProvider()
   })
 
-  test('pro (catalog price 0) -> rejected with plan_unavailable; provider NOT called', async () => {
+  test('pro (catalog price 1,200,000) -> checkout proceeds; pending subscription + invoice created; provider called', async () => {
     const deps = makeDeps(mock)
-    let thrown: unknown = null
-    try {
-      await createCheckout({ tenantId: tenantA.id, planSlug: 'pro', gatewayName: 'mock', origin: 'https://app.test', deps })
-    } catch (e) { thrown = e }
-    expect(thrown).toBeInstanceOf(BillingError)
-    expect((thrown as BillingError).code).toBe('plan_unavailable')
-    expect(mock.callCount('createPayment')).toBe(0)
-    // No subscription/invoice created.
+    const result = await createCheckout({ tenantId: tenantA.id, planSlug: 'pro', gatewayName: 'mock', origin: 'https://app.test', deps })
+    expect(result.subscriptionId).toBeTruthy()
+    expect(mock.callCount('createPayment')).toBe(1)
+    // Pending subscription + invoice created (NOT yet active — payment integrity preserved).
     await withTenant(tenantA.id, async () => {
-      expect(await db.subscription.count({ where: {} })).toBe(0)
-      expect(await db.invoice.count({ where: {} })).toBe(0)
+      const subs = await db.subscription.findMany({ where: { status: 'pending' } })
+      expect(subs.length).toBe(1)
+      expect(subs[0].planId).toBeTruthy()
+      const invoices = await db.invoice.findMany({ where: { status: 'pending' } })
+      expect(invoices.length).toBe(1)
+      expect(invoices[0].amountToman).toBe(1_200_000)
+      // Tenant plan is NOT yet upgraded (no verified callback).
+      const tenant = await db.tenant.findUnique({ where: { id: tenantA.id }, select: { plan: true } })
+      expect(tenant!.plan).toBe('free')
     })
   })
 
-  test('max (catalog price 0) -> rejected with plan_unavailable; provider NOT called', async () => {
+  test('max (catalog price 7,500,000) -> checkout proceeds; pending subscription + invoice created; provider called', async () => {
     const deps = makeDeps(mock)
-    let thrown: unknown = null
-    try {
-      await createCheckout({ tenantId: tenantA.id, planSlug: 'max', gatewayName: 'mock', origin: 'https://app.test', deps })
-    } catch (e) { thrown = e }
-    expect(thrown).toBeInstanceOf(BillingError)
-    expect((thrown as BillingError).code).toBe('plan_unavailable')
-    expect(mock.callCount('createPayment')).toBe(0)
+    const result = await createCheckout({ tenantId: tenantA.id, planSlug: 'max', gatewayName: 'mock', origin: 'https://app.test', deps })
+    expect(result.subscriptionId).toBeTruthy()
+    expect(mock.callCount('createPayment')).toBe(1)
+    await withTenant(tenantA.id, async () => {
+      const invoices = await db.invoice.findMany({ where: { status: 'pending' } })
+      expect(invoices.length).toBe(1)
+      expect(invoices[0].amountToman).toBe(7_500_000)
+      const tenant = await db.tenant.findUnique({ where: { id: tenantA.id }, select: { plan: true } })
+      expect(tenant!.plan).toBe('free')
+    })
   })
 
   test('free -> internal free transition succeeds; provider NOT called', async () => {

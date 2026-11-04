@@ -245,6 +245,52 @@ export async function POST(
       return { kind: 'domain_not_allowed' as const }
     }
 
+    // === AI-Q2: Durable HTTP idempotency — checked BEFORE the message limit ===
+    // A previously persisted visitor message must remain retrievable using
+    // its original clientMessageId, even when that message exhausted the
+    // Free weekly limit. Authentication, tenant authorization, access
+    // policies and domain restrictions have already been enforced above.
+    // The message limit is a quota gate for NEW messages — a replay of an
+    // already-persisted message must NOT be blocked by it.
+    if (clientMessageId) {
+      const existing = await db.visitorMessageIdempotency.findUnique({
+        where: {
+          tenantId_contactId_clientMessageId: {
+            tenantId,
+            contactId,
+            clientMessageId,
+          },
+        },
+        select: { messageId: true, conversationId: true, messageText: true },
+      })
+
+      if (existing) {
+        // Conflict detection: same key, different text → 409.
+        if (existing.messageText !== text) {
+          return { kind: 'idempotency_conflict' as const }
+        }
+
+        // Idempotent retry — return the original message.
+        const origMessage = await db.message.findUnique({
+          where: { id: existing.messageId },
+        })
+        const origConversation = await db.conversation.findUnique({
+          where: { id: existing.conversationId },
+        })
+        if (origMessage && origConversation) {
+          return {
+            kind: 'ok' as const,
+            message: origMessage,
+            conversation: origConversation,
+            isNew: false,
+            isIdempotentRetry: true,
+          }
+        }
+        // If the original message/conversation was deleted (cascade), fall
+        // through to create a new one.
+      }
+    }
+
     const messageCheck = await checkMessageLimit(tenantId)
     if (!messageCheck.allowed) {
       return { kind: 'message_limit' as const, reason: messageCheck.reason ?? 'message_limit' }
@@ -303,53 +349,131 @@ export async function POST(
       }
     }
 
-    // Find or create the conversation. tenantId is auto-injected by the
-    // fail-closed extension; passing it explicitly is defense-in-depth.
-    let conversation = await db.conversation.findFirst({
-      where: { contactId, status: 'open' },
-      orderBy: { createdAt: 'desc' },
-    })
+    // Find or create the conversation. The visitor Message, idempotency
+    // claim, AND conversation creation must be inside ONE database
+    // transaction so a losing concurrent request cannot leave orphan
+    // Messages, Conversations or routing side effects.
+    // Uses the fail-closed db proxy (already inside withTenant) — tenantId
+    // is auto-injected and enforced by the Prisma extension.
+    let conversation: { id: string } | null = null
+    let message: { id: string; content: unknown; senderType: string; conversationId: string; createdAt: Date; status: string } | null = null
+    let isNew = false
 
-    const isNew = !conversation
-    if (!conversation) {
-      conversation = await db.conversation.create({
-        data: {
-          tenantId,
-          contactId,
-          status: 'open',
-          channel: 'widget',
-          tags: [],
-        },
+    try {
+      const txResult = await db.$transaction(async (tx) => {
+        // Find an existing open conversation for this contact.
+        let conv = await tx.conversation.findFirst({
+          where: { contactId, tenantId, status: 'open' },
+          orderBy: { createdAt: 'desc' },
+          select: { id: true },
+        })
+
+        const createdNew = !conv
+        if (!conv) {
+          conv = await tx.conversation.create({
+            data: {
+              tenantId,
+              contactId,
+              status: 'open',
+              channel: 'widget',
+              tags: [],
+            },
+            select: { id: true },
+          })
+        }
+
+        // Create the visitor Message inside the transaction.
+        const msg = await tx.message.create({
+          data: {
+            conversationId: conv.id,
+            tenantId,
+            senderType: 'contact',
+            senderUserId: null,
+            contentType: 'text',
+            content: pageContext
+              ? { text, pageContext: { pathname: pageContext.pathname, title: pageContext.title } }
+              : { text },
+            status: 'sent',
+          },
+          select: { id: true, content: true, senderType: true, conversationId: true, createdAt: true, status: true },
+        })
+
+        // Create the idempotency claim inside the SAME transaction.
+        // If a concurrent request already created the record, the unique
+        // constraint throws — the ENTIRE transaction rolls back (no orphan
+        // Message, no orphan Conversation).
+        if (clientMessageId) {
+          await tx.visitorMessageIdempotency.create({
+            data: {
+              tenantId,
+              contactId,
+              clientMessageId,
+              messageId: msg.id,
+              conversationId: conv.id,
+              messageText: text,
+            },
+          })
+        }
+
+        return { conv, msg, createdNew }
       })
-      // Evaluate routing rules for the new conversation.
-      // evaluateRoutingRules wraps itself in withTenant — nesting the same
-      // tenantId is a no-op (the inner context simply shadows the outer
-      // with the same value).
-      await evaluateRoutingRules(conversation.id, tenantId, text)
+
+      conversation = txResult.conv
+      message = txResult.msg
+      isNew = txResult.createdNew
+    } catch (e) {
+      // Concurrent idempotency create — unique constraint violation.
+      // The ENTIRE transaction was rolled back (no orphan Message or
+      // Conversation). Re-query using the fail-closed db proxy (tenant-
+      // scoped) and return the original — with text comparison for
+      // conflict detection.
+      if (clientMessageId) {
+        const concurrent = await db.visitorMessageIdempotency.findUnique({
+          where: {
+            tenantId_contactId_clientMessageId: {
+              tenantId,
+              contactId,
+              clientMessageId,
+            },
+          },
+          select: { messageId: true, conversationId: true, messageText: true },
+        })
+        if (concurrent) {
+          // Compare text — different content with the same key is a conflict.
+          if (concurrent.messageText !== text) {
+            return { kind: 'idempotency_conflict' as const }
+          }
+          const origMessage = await db.message.findUnique({
+            where: { id: concurrent.messageId },
+            select: { id: true, content: true, senderType: true, conversationId: true, createdAt: true, status: true },
+          })
+          const origConversation = await db.conversation.findUnique({
+            where: { id: concurrent.conversationId },
+            select: { id: true },
+          })
+          if (origMessage && origConversation) {
+            return {
+              kind: 'ok' as const,
+              message: origMessage,
+              conversation: origConversation,
+              isNew: false,
+              isIdempotentRetry: true,
+            }
+          }
+        }
+      }
+      throw new Error('Failed to persist visitor message')
     }
 
-    // Persist the visitor message. tenantId auto-injected by extension.
-    // Context Chat (Feature 11): the sanitized authorized pageContext (or
-    // null) is persisted inside the EXISTING Message JSON content alongside
-    // the text — no schema change, no extra table. Ordinary messages
-    // without context keep the plain { text } content shape.
-    const message = await db.message.create({
-      data: {
-        conversationId: conversation.id,
-        tenantId,
-        senderType: 'contact',
-        senderUserId: null,
-        contentType: 'text',
-        // Fresh object literal (spread into primitives) so the Prisma
-        // InputJsonValue typing accepts the nested page context.
-        content: pageContext
-          ? { text, pageContext: { pathname: pageContext.pathname, title: pageContext.title } }
-          : { text },
-        status: 'sent',
-      },
-    })
+    // Evaluate routing rules for a new conversation — ONLY after the
+    // winning transaction has committed. Losing transactions rolled back
+    // their conversation creation, so this fires exactly once.
+    if (isNew) {
+      await evaluateRoutingRules(conversation!.id, tenantId, text)
+    }
 
     // Update conversation metadata. tenantId auto-injected in where.
+    // Only for non-idempotent (first) submissions — retries skip this.
     await db.conversation.updateMany({
       where: { id: conversation.id },
       data: {
@@ -375,17 +499,57 @@ export async function POST(
   if (result.kind === 'pre_chat_required') {
     return widgetHeaders(NextResponse.json({ error: 'pre_chat_required' }, { status: 403 }))
   }
+  if (result.kind === 'idempotency_conflict') {
+    return widgetHeaders(NextResponse.json({ error: 'idempotency_conflict' }, { status: 409 }))
+  }
   if (result.kind !== 'ok') {
     // Unreachable — exhaustiveness guard
     return widgetHeaders(NextResponse.json({ error: 'internal_error' }, { status: 500 }))
   }
 
   const { message, conversation, isNew } = result
+  const isIdempotentRetry = 'isIdempotentRetry' in result && result.isIdempotentRetry
+
+  // === AI-Q2: Idempotent retry short-circuit ===
+  // If this is a retry resolved to the original visitor Message, skip all
+  // side effects: no Realtime duplicate, no AI reservation, no AI charge.
+  // Fetch the original AI reply (if any) so the response includes it.
+  if (isIdempotentRetry) {
+    let retryAiResponse: { text: string; source: string } | null = null
+    try {
+      // Check if an AI reservation exists for the original visitor message.
+      const reservation = await withTenant(tenantId, () =>
+        db.aiReplyReservation.findUnique({
+          where: { tenantId_visitorMessageId: { tenantId, visitorMessageId: message.id } },
+          select: { status: true, aiMessageId: true },
+        }),
+      )
+      if (reservation?.status === 'committed' && reservation.aiMessageId) {
+        const aiMsg = await withTenant(tenantId, () =>
+          db.message.findUnique({
+            where: { id: reservation.aiMessageId! },
+            select: { content: true },
+          }),
+        )
+        if (aiMsg?.content) {
+          const c = aiMsg.content as { text?: string; source?: string }
+          retryAiResponse = c.text && c.source ? { text: c.text, source: c.source } : null
+        }
+      }
+    } catch {
+      // If we can't fetch the original AI reply, return null — the client
+      // can reconcile from the message thread.
+    }
+
+    return widgetHeaders(NextResponse.json({
+      message,
+      conversationId: conversation.id,
+      aiResponse: retryAiResponse,
+      clientMessageId: clientMessageId || undefined,
+    }))
+  }
 
   // Publish to realtime — fan out to agents in the conversation room + tenant room.
-  // Include the ephemeral clientMessageId in the message:new payload so the
-  // widget can reconcile its optimistic placeholder with the exact persisted
-  // message (not just by text, which is unsafe for duplicate identical sends).
   await publishToRealtime({
     room: room.conversation(conversation.id),
     event: EVENTS.MESSAGE_NEW,
@@ -400,141 +564,172 @@ export async function POST(
     })
   }
 
-  // === AI features (Module 4) — fire AFTER the visitor message is persisted ===
-  // Both features are opt-in (default OFF) and respect the AI usage cap.
-  // If the cap is hit, they gracefully stop firing (fall through to human routing).
-  // Runs in a fresh withTenant context — tryAiResponse queries tenant-scoped
-  // models (AiConfig, FaqPair, Product, Message, Conversation).
-  let aiResponse: { text: string; source: 'faq' | 'product' } | null = null
+  // === AI features — fire AFTER the visitor message is persisted ===
+  let aiResponse: { messageId: string; text: string; source: string } | null = null
   try {
-    aiResponse = await withTenant(tenantId, () => tryAiResponse(text, tenantId, conversation.id))
+    aiResponse = await withTenant(tenantId, () => tryAiResponse(text, tenantId, conversation.id, message.id))
   } catch (e) {
     console.error('[widget:messages] AI error:', e instanceof Error ? e.message : e)
   }
 
   if (aiResponse) {
-    // Persist the AI message inside the tenant context
-    const aiMessage = await withTenant(tenantId, async () => {
-      const m = await db.message.create({
-        data: {
-          conversationId: conversation.id,
-          tenantId,
-          senderType: 'ai',
-          senderUserId: null,
-          contentType: 'text',
-          content: { text: aiResponse!.text, source: aiResponse!.source },
-          status: 'sent',
-        },
+    // The AI message is already durably persisted by commitAiReply. The
+    // usage charge is already settled. Post-commit operations (metadata
+    // update, Realtime publication) are best-effort — a transient failure
+    // here must NOT cause the client to believe the AI reply failed and
+    // retry (which would charge a second unit).
+    try {
+      await withTenant(tenantId, async () => {
+        await db.conversation.updateMany({
+          where: { id: conversation.id },
+          data: {
+            lastMessageAt: new Date(),
+            lastMessagePreview: `[AI] ${aiResponse!.text.slice(0, 116)}`,
+          },
+        })
       })
-      await db.conversation.updateMany({
-        where: { id: conversation.id },
-        data: {
-          lastMessageAt: new Date(),
-          lastMessagePreview: `[AI] ${aiResponse!.text.slice(0, 116)}`,
-        },
-      })
-      return m
-    })
+    } catch (e) {
+      // Metadata update failure is recoverable — the AI message and its
+      // usage charge are already durable. Log and continue.
+      console.error('[widget:messages] post-commit metadata error:', e instanceof Error ? e.message : e)
+    }
 
-    // Publish the AI response to realtime (not a DB call — outside context)
-    await publishToRealtime({
-      room: room.conversation(conversation.id),
-      event: EVENTS.MESSAGE_NEW,
-      payload: { ...aiMessage, isNewConversation: false },
-    })
+    // Fetch the committed AI message for realtime publication.
+    const aiMessage = await withTenant(tenantId, () =>
+      db.message.findUnique({ where: { id: aiResponse!.messageId } }),
+    ).catch(() => null)
+
+    if (aiMessage) {
+      try {
+        await publishToRealtime({
+          room: room.conversation(conversation.id),
+          event: EVENTS.MESSAGE_NEW,
+          payload: { ...aiMessage, isNewConversation: false },
+        })
+      } catch (e) {
+        // Realtime publication failure is recoverable — the AI message is
+        // already persisted with a stable ID. The client can reconcile via
+        // the message ID returned in the response. Do NOT generate another
+        // AI reply or charge another unit to retry publication.
+        console.error('[widget:messages] post-commit realtime error:', e instanceof Error ? e.message : e)
+      }
+    }
   }
 
-  return widgetHeaders(NextResponse.json({ message, conversationId: conversation.id, aiResponse, clientMessageId: clientMessageId || undefined }))
+  return widgetHeaders(NextResponse.json({
+    message,
+    conversationId: conversation.id,
+    aiResponse: aiResponse ? { text: aiResponse.text, source: aiResponse.source } : null,
+    clientMessageId: clientMessageId || undefined,
+  }))
 }
 
 /**
  * Try to generate an AI response for the visitor's message.
- * Checks: AI config (feature toggles), plan cap (aiActions).
- * Order: FAQ matching first, then product Q&A.
- * Returns null if no AI feature fires (falls through to human routing).
+ *
+ * AI-Q2 flow:
+ * 1. Check AI config (feature toggles).
+ * 2. Reserve one AI capacity unit (atomic, respects quota).
+ * 3. If reservation succeeds, attempt exact FAQ → semantic FAQ → Product Q&A.
+ * 4. If no answer, release the reservation (no charge).
+ * 5. If an answer is produced, atomically commit (persist AI message +
+ *    settle reservation + update usage).
+ * 6. Return the committed messageId + text + source, or null.
+ *
+ * The `visitorMessageId` (the persisted visitor Message ID) is used for
+ * reservation idempotency — a duplicate reservation for the same visitor
+ * message returns the original, never allocates a second slot.
  */
 async function tryAiResponse(
   visitorMessage: string,
   tenantId: string,
   conversationId: string,
-): Promise<{ text: string; source: 'faq' | 'product' } | null> {
+  visitorMessageId: string,
+): Promise<{ messageId: string; text: string; source: 'faq' | 'product' } | null> {
   const { db } = await import('@/lib/db')
-  const { checkPlanLimit } = await import('@/lib/payments/gating')
   const { matchFaq, answerProductQuestion } = await import('@/lib/ai')
+  const { reserveAiReply, commitAiReply, releaseAiReply } = await import('@/lib/ai/usage-service')
 
   // Load AI config
-  let aiConfig = await db.aiConfig.findUnique({ where: { tenantId } })
-  if (!aiConfig) {
-    // Default config — both features OFF
+  const aiConfig = await db.aiConfig.findUnique({ where: { tenantId } })
+  if (!aiConfig) return null
+
+  // At least one feature must be enabled.
+  if (!aiConfig.faqEnabled && !aiConfig.productQaEnabled) return null
+
+  // --- Reserve one AI capacity unit (atomic, respects quota) ---
+  const reservation = await reserveAiReply({ tenantId, conversationId, visitorMessageId })
+  if (reservation.status !== 'reserved') {
+    // limit_reached (Free zero, exhausted quota), in_progress (duplicate),
+    // or already_committed (retry) — no new generation.
     return null
   }
 
-  // Check plan cap for AI actions
-  const capCheck = await checkPlanLimit(tenantId, 'aiActions')
-  if (!capCheck.allowed) {
-    // Cap hit — graceful fallback to human routing
+  // --- Generate the AI response ---
+  let generated: { text: string; source: 'faq' | 'product' } | null = null
+
+  try {
+    // Feature 1: FAQ matching (if enabled)
+    if (aiConfig.faqEnabled) {
+      const faqPairs = await db.faqPair.findMany({
+        where: { tenantId, enabled: true },
+        select: { id: true, question: true, answer: true },
+      })
+
+      if (faqPairs.length > 0) {
+        // Exact-match fast path (deterministic, no LLM)
+        const norm = (s: string) => s.trim().replace(/\s+/g, ' ')
+        const exact = faqPairs.find(f => norm(f.question) === norm(visitorMessage))
+        if (exact) {
+          generated = { text: exact.answer, source: 'faq' }
+        } else {
+          // Semantic classification (LLM-based)
+          const match = await matchFaq(visitorMessage, faqPairs)
+          if (match.matched && match.answer) {
+            generated = { text: match.answer, source: 'faq' }
+          }
+        }
+      }
+    }
+
+    // Feature 2: Product Q&A (if enabled)
+    if (!generated && aiConfig.productQaEnabled) {
+      const products = await db.product.findMany({
+        where: { tenantId },
+        select: { id: true, name: true, description: true, price: true, availability: true },
+      })
+
+      if (products.length > 0) {
+        const result = await answerProductQuestion(visitorMessage, products)
+        if (result.answered && result.answer) {
+          generated = { text: result.answer, source: 'product' }
+        }
+      }
+    }
+  } catch (e) {
+    console.error('[widget:messages] AI generation error:', e instanceof Error ? e.message : e)
+  }
+
+  // --- Commit or release ---
+  if (!generated) {
+    // No answer — release the reservation (frees the slot, no charge).
+    await releaseAiReply({ tenantId, reservationId: reservation.reservationId })
     return null
   }
 
-  // Feature 1: FAQ matching (if enabled)
-  if (aiConfig.faqEnabled) {
-    const faqPairs = await db.faqPair.findMany({
-      where: { tenantId, enabled: true },
-      select: { id: true, question: true, answer: true },
-    })
+  // Atomically commit: persist AI message + settle reservation + update usage.
+  const commit = await commitAiReply({
+    tenantId,
+    reservationId: reservation.reservationId,
+    conversationId,
+    text: generated.text,
+    source: generated.source,
+  })
 
-    if (faqPairs.length > 0) {
-      // === AI-Q1: exact-match fast path (deterministic, no LLM) ===
-      // A minimal-whitespace-normalized exact match against an EXISTING
-      // enabled FAQ belonging to this tenant returns the owner-authored
-      // answer directly — no external LLM call, no probabilistic skip.
-      // This guarantees a real positive FAQ end-to-end: the visitor's
-      // exact question produces a persisted AI Message (senderType 'ai',
-      // source 'faq') with the owner-authored text.
-      //
-      // Guards preserved:
-      // - Only when FAQ AI is enabled (this block).
-      // - Only after the plan cap check above (Free aiActions: 0 → cap
-      //   hit → returned null before reaching here).
-      // - Only for an actual stored, enabled FAQ of this tenant (the
-      //   fail-closed Prisma extension scopes findMany to tenantId).
-      // - No bypass of visitor authorization, domain restrictions, rate
-      //   limits or pre-chat form checks (all enforced before the AI
-      //   block in the POST handler).
-      // - No new public API (this is inside the existing POST handler).
-      // - No duplicate response (the fast path returns before the LLM
-      //   path runs).
-      // - The semantic classification path below is preserved for
-      //   non-exact questions.
-      const norm = (s: string) => s.trim().replace(/\s+/g, ' ')
-      const normalizedVisitor = norm(visitorMessage)
-      const exact = faqPairs.find(f => norm(f.question) === normalizedVisitor)
-      if (exact) {
-        return { text: exact.answer, source: 'faq' }
-      }
-
-      // Semantic classification (LLM-based) for non-exact questions.
-      const match = await matchFaq(visitorMessage, faqPairs)
-      if (match.matched && match.answer) {
-        return { text: match.answer, source: 'faq' }
-      }
-    }
+  if (commit.status !== 'committed') {
+    // Reservation was stale/reclaimed — no charge, no message.
+    return null
   }
 
-  // Feature 2: Product Q&A (if enabled)
-  if (aiConfig.productQaEnabled) {
-    const products = await db.product.findMany({
-      where: { tenantId },
-      select: { id: true, name: true, description: true, price: true, availability: true },
-    })
-
-    if (products.length > 0) {
-      const result = await answerProductQuestion(visitorMessage, products)
-      if (result.answered && result.answer) {
-        return { text: result.answer, source: 'product' }
-      }
-    }
-  }
-
-  return null
+  return { messageId: commit.messageId, text: generated.text, source: generated.source }
 }

@@ -41,6 +41,7 @@
     "settings": "Settings",
     "members": "Members",
     "departments": "Departments",
+      "aiActions": "AI replies",
     "widget": "Widget",
     "general": "General",
     "billing": "Billing",
@@ -492,12 +493,14 @@
     "usage": {
       "agents": "Agents",
       "conversations": "Conversations (this month)",
-      "departments": "Departments"
+      "departments": "Departments",
+      "aiActions": "AI replies"
     },
     "limits": {
       "agents": "Agents",
       "conversations": "Conversations / month",
-      "departments": "Departments"
+      "departments": "Departments",
+      "aiActions": "AI replies"
     },
     "status": {
       "pending": "Pending",
@@ -738,6 +741,7 @@
           "agents": "Agents",
           "conversations": "Conversations / month",
           "departments": "Departments",
+      "aiActions": "AI replies",
           "realtime": "Real-time chat",
           "widget": "Widget customization",
           "csat": "CSAT surveys",
