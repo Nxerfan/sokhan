@@ -25,6 +25,21 @@ jobs:
         env:
           DATABASE_URL: postgresql://user:password@localhost:5432/dummy
           DIRECT_URL: postgresql://user:password@localhost:5432/dummy
+      - name: Enforce reviewer-owned acceptance test content integrity
+        run: |
+          node --input-type=module <<'NODE'
+          import { execFileSync } from 'node:child_process'
+          const hashes={
+            'tests/unit/ai-q3-faq-contract.test.ts':'5038fb8036b8699bb9c048c58a82007ddf6938ba',
+            'tests/db-boundary/ai-q3-faq.test.ts':'fbe9032979f62d3546438725c446aabd2d28f28f',
+            'tests/ai-q3-faq.spec.ts':'4b73548ba4dab02b551993ae46e3c3d5f8bf2355',
+          }
+          for(const [file,expected] of Object.entries(hashes)){
+            const actual=execFileSync('git',['hash-object',file],{encoding:'utf8'}).trim()
+            if(actual!==expected)throw Error('Reviewer acceptance file was modified: '+file)
+            console.log('Reviewer-owned integrity OK: '+file)
+          }
+          NODE
       - name: Syntax-check all three reviewer-owned AI-Q3 suites
         run: |
           node --input-type=module <<'NODE'
