@@ -166,6 +166,8 @@ test('All expected tenant-scoped models are present (snapshot of the known set)'
   // clearer "missing from registry" or "orphaned entry" message.
   expect(modelsWithTenantIdScalar).toEqual([
     'AiConfig',
+    'AiReplyReservation',
+    'AiUsagePeriod',
     'ConnectorConfig',
     'Contact',
     'Conversation',
@@ -179,6 +181,7 @@ test('All expected tenant-scoped models are present (snapshot of the known set)'
     'Product',
     'RoutingRule',
     'Subscription',
+    'VisitorMessageIdempotency',
     'WidgetConfig',
     'WidgetDomain',
     'WidgetOtpRequest',
