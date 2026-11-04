@@ -47,10 +47,10 @@ async function addFaq(page:Page,question:string,answer:string){
   const r=await page.request.post(APP+'/api/faqs',{data:{question,answer,enabled:true},headers:HEADERS})
   expect(r.ok(),await r.text()).toBe(true)
 }
-async function visitor(page:Page,slug:string){
+async function visitor(page:Page,slug:string,testIp?:string){
   await setAccessMode(page,'anonymous')
   const r=await page.request.post(BASE+'/api/widget/'+slug+'/contact',{
-    data:{visitorId:'q2-'+Date.now()+'-'+Math.random().toString(36).slice(2)},headers:HEADERS,
+    data:{visitorId:'q2-'+Date.now()+'-'+Math.random().toString(36).slice(2)},headers:testIp?{...HEADERS,'x-forwarded-for':testIp}:HEADERS,
   })
   expect(r.ok(),await r.text()).toBe(true)
   const data=await r.json()
@@ -266,10 +266,11 @@ test.describe('Reviewer AI-Q2 — real successful-reply quota in Full and Lite',
       const question='آیا پیام هم‌زمان فقط یک بار باید ثبت شود؟'
       const answer='بله، فقط یک پاسخ موفق AI در سهمیه ثبت می‌شود.'
       await addFaq(p,question,answer)
-      const token=await visitor(p,slug)
+      const testIp='198.51.100.201'
+      const token=await visitor(p,slug,testIp)
       const clientMessageId='cmsg_q2_first_race_'+Date.now()
       const posts=await Promise.all(Array.from({length:8},()=>p.request.post(BASE+'/api/widget/'+slug+'/messages',{
-        headers:{...HEADERS,Authorization:'Bearer '+token},
+        headers:{...HEADERS,Authorization:'Bearer '+token,'x-forwarded-for':testIp},
         data:{text:question,clientMessageId},
       })))
       for(const r of posts)expect(r.status(),await r.text()).toBe(200)
@@ -298,10 +299,11 @@ test.describe('Reviewer AI-Q2 — real successful-reply quota in Full and Lite',
       const textB='آیا پیام دوم با همین شناسه مجاز است؟'
       await addFaq(p,textA,'پاسخ اختصاصی اول')
       await addFaq(p,textB,'پاسخ اختصاصی دوم')
-      const token=await visitor(p,slug)
+      const testIp='198.51.100.202'
+      const token=await visitor(p,slug,testIp)
       const clientMessageId='cmsg_q2_conflict_'+Date.now()
       const responses=await Promise.all([textA,textB].map(text=>p.request.post(BASE+'/api/widget/'+slug+'/messages',{
-        headers:{...HEADERS,Authorization:'Bearer '+token},
+        headers:{...HEADERS,Authorization:'Bearer '+token,'x-forwarded-for':testIp},
         data:{text,clientMessageId},
       })))
       const statuses=responses.map(r=>r.status()).sort((a,b)=>a-b)
