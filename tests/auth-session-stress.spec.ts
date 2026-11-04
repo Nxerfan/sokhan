@@ -458,11 +458,30 @@ test.describe('Auth + session stress — real PostgreSQL, real HTTP/session stac
         'B session is either still on B or null (cookie cleaned) — never on A',
       ).toContain(wsAfterFailedSwitch)
 
-      // B cannot read A's conversations even with a direct API call.
+      // B cannot read A's conversations. Two valid outcomes prove no
+      // cross-tenant leak:
+      //   - If session survived (still on B): /api/conversations returns
+      //     200 with B's own conversations (NOT A's).
+      //   - If session was cleaned by NextAuth's error handler (cookie
+      //     deleted): /api/conversations returns 401 (no session → no
+      //     data access at all).
+      // BOTH outcomes are secure — B never sees A's data. A 200 with A's
+      // data would be the only failing outcome.
       const convRes = await b.page.request.get(`${BASE}/api/conversations`)
-      // B is on B — this returns B's conversations, not A's. Verify it's 200
-      // (B reading B's own data) and NOT A's data.
-      expect(convRes.status(), 'B reading own data is fine').toBe(200)
+      expect(
+        [200, 401],
+        'B gets either own data (200) or no session (401) — never A data',
+      ).toContain(convRes.status())
+      if (convRes.status() === 200) {
+        // If 200, verify the conversations belong to B (not A).
+        const convBody = (await convRes.json().catch(() => ({}))) as {
+          conversations?: Array<{ tenantId?: string }>
+        }
+        const hasTenantA = convBody.conversations?.some(
+          (c) => c.tenantId === a.tenantId,
+        )
+        expect(hasTenantA, 'B conversation list must NOT contain A data').toBeFalsy()
+      }
     } finally {
       await a.page.context().close()
       await b.page.context().close()
