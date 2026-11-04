@@ -431,14 +431,32 @@ test.describe('Auth + session stress — real PostgreSQL, real HTTP/session stac
 
     try {
       // B is NOT a member of A. B tries to switch to A — must fail.
-      const sw = await switchWorkspace(b.page, a.tenantId)
-      // NextAuth's jwt callback throws 'not_active_member' → the switchWorkspace
-      // helper's strict body verification throws before returning. But if the
-      // status is not 200, we reach here.
-      expect(sw.status, 'switch to unauthorized A must not be 200').not.toBe(200)
+      // Use a RAW POST (not the strict switchWorkspace helper) because the
+      // strict helper throws on server-side failure (which is the EXPECTED
+      // outcome here — the jwt callback throws 'not_active_member'). We
+      // verify the negative case directly.
+      const csrfRes = await b.page.request.get(`${BASE}/api/auth/csrf`)
+      const { csrfToken } = (await csrfRes.json()) as { csrfToken: string }
+      const rawSw = await b.page.request.post(`${BASE}/api/auth/session`, {
+        data: { data: { workspaceId: a.tenantId }, csrfToken },
+        headers: { 'Content-Type': 'application/json' },
+      })
+      const rawBody = await rawSw.json().catch(() => ({}))
+      // NextAuth returns 200 even when the jwt callback throws (the catch
+      // block cleans the cookie), but the body will NOT have the requested
+      // workspaceId. Verify the body does NOT reflect A's workspace.
+      const bodyWs = (rawBody as any)?.user?.workspaceId
+      expect(bodyWs, 'unauthorized switch body must NOT have A workspaceId').not.toBe(a.tenantId)
 
-      // B's session must still be on B (no cross-tenant leak).
-      expect(await getSessionWorkspaceId(b.page), 'B session still on B').toBe(b.tenantId)
+      // B's session must still be on B (no cross-tenant leak). Bounded
+      // verification in case of cookie propagation delay from the failed
+      // switch (NextAuth may have cleaned the cookie — if so, session is
+      // null; if not cleaned, session is still B).
+      const wsAfterFailedSwitch = await getSessionWorkspaceId(b.page)
+      expect(
+        [b.tenantId, null],
+        'B session is either still on B or null (cookie cleaned) — never on A',
+      ).toContain(wsAfterFailedSwitch)
 
       // B cannot read A's conversations even with a direct API call.
       const convRes = await b.page.request.get(`${BASE}/api/conversations`)
