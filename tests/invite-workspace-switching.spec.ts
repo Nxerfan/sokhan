@@ -397,10 +397,16 @@ async function acceptCompleteNewUser(args: {
 async function getUsage(page: Page): Promise<{ current: number; limit: number }> {
   const res = await page.request.get(`${BASE}/api/billing/subscription`)
   expect(res.status(), 'GET /api/billing/subscription should be 200').toBe(200)
+  // AI-Q2 flattened the billing/subscription `usage` field: it now returns
+  // the inner usage object directly ({ agents, conversations, departments,
+  // aiActions, ... }) rather than the full getTenantUsage wrapper which
+  // also carried planSlug. The dashboard billing-panel and the AI-Q2/AI-Q3
+  // browser suites already consume the flat shape. This helper is updated
+  // to match — no assertion logic is changed.
   const body = (await res.json()) as {
-    usage?: { usage?: { agents?: { current: number; limit: number } } }
+    usage?: { agents?: { current: number; limit: number } }
   }
-  const agents = body.usage?.usage?.agents
+  const agents = body.usage?.agents
   if (!agents) throw new Error('No agents usage in billing response')
   return agents
 }
