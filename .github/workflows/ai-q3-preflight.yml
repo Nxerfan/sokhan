@@ -33,6 +33,7 @@ jobs:
             'tests/unit/ai-q3-faq-contract.test.ts':'5038fb8036b8699bb9c048c58a82007ddf6938ba',
             'tests/db-boundary/ai-q3-faq.test.ts':'fbe9032979f62d3546438725c446aabd2d28f28f',
             'tests/ai-q3-faq.spec.ts':'4b73548ba4dab02b551993ae46e3c3d5f8bf2355',
+            'tests/unit/ai-q3-faq-adversarial-review.test.ts':'83b4441bfb6997db5f79c5762f18c5f9ff00de2f',
           }
           for(const [file,expected] of Object.entries(hashes)){
             const actual=execFileSync('git',['hash-object',file],{encoding:'utf8'}).trim()
@@ -47,6 +48,7 @@ jobs:
           import { readFileSync } from 'node:fs'
           for(const file of [
             'tests/unit/ai-q3-faq-contract.test.ts',
+            'tests/unit/ai-q3-faq-adversarial-review.test.ts',
             'tests/db-boundary/ai-q3-faq.test.ts',
             'tests/ai-q3-faq.spec.ts'
           ]) {
@@ -60,6 +62,8 @@ jobs:
             } else console.log('Syntax OK: '+file)
           }
           NODE
+      - name: Run immutable reviewer adversarial FAQ behavior regression
+        run: bun test tests/unit/ai-q3-faq-adversarial-review.test.ts
       - name: Enumerate real Playwright acceptance without launching app
         run: bunx playwright test tests/ai-q3-faq.spec.ts --list
       - name: Verify full Full/Lite CI includes new reviewer browser suite
