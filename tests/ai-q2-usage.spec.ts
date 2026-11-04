@@ -1,6 +1,7 @@
 import {test,expect,type Page} from '@playwright/test'
 import {otpSignupPlaywright} from './helpers/otp-signup'
 import {setAccessMode} from './helpers/set-access'
+import {globalDb} from '@/lib/db'
 /** Reviewer-owned AI-Q2 real Full/Lite API and dashboard acceptance.
  * No route mocks, fake LLM, test-only quota mutation endpoints, or sleeps.
  * Deterministic exact-FAQ replies come from the existing AI-Q1 fast path.
@@ -316,6 +317,57 @@ test.describe('Reviewer AI-Q2 — real successful-reply quota in Full and Lite',
       expect([textA,textB]).toContain(visitorMessages[0].content.text)
       expect(messages.filter(x=>x.senderType==='ai')).toHaveLength(1)
       expect(quota(await billing(p))).toEqual({current:1,limit:1400})
+    }finally{await ctx.close()}
+  })
+
+
+  test('Free weekly cap: replay returns the original persisted Message while new send is denied',async({browser})=>{
+    const ctx=await browser.newContext()
+    try{
+      const p=await ctx.newPage(),slug=await signup(p,'free-quota-replay')
+      const token=await visitor(p,slug)
+      const clientMessageId='cmsg_q2_free_cap_'+Date.now()
+      const question='آخرین پیام مجاز پلن رایگان'
+      const endpoint=APP+'/api/widget/'+slug+'/messages'
+      const headers={...HEADERS,Authorization:'Bearer '+token}
+      const first=await p.request.post(endpoint,{headers,data:{text:question,clientMessageId}})
+      expect(first.status(),await first.text()).toBe(200)
+      const initial=await first.json() as {message:{id:string},conversationId:string}
+      const tenantRes=await p.request.get(APP+'/api/tenants/me')
+      expect(tenantRes.ok(),await tenantRes.text()).toBe(true)
+      const tenantId=(await tenantRes.json()).tenant?.id as string
+      expect(tenantId).toBeTruthy()
+      // Seed real historical visitor messages, not a fake quota override.
+      // Free allows 100 visitor messages per rolling seven days.
+      await globalDb.message.createMany({
+        data:Array.from({length:99},(_,i)=>({
+          tenantId,
+          conversationId:initial.conversationId,
+          senderType:'contact' as const,
+          contentType:'text' as const,
+          content:{text:'previous visitor message '+i},
+          status:'sent' as const,
+        })),
+      })
+      const before=await globalDb.message.count({where:{tenantId,senderType:'contact'}})
+      expect(before).toBe(100)
+
+      const replay=await p.request.post(endpoint,{headers,data:{text:question,clientMessageId}})
+      expect(replay.status(),await replay.text()).toBe(200)
+      const returned=await replay.json() as {message:{id:string},conversationId:string}
+      expect(returned.message.id).toBe(initial.message.id)
+      expect(returned.conversationId).toBe(initial.conversationId)
+
+      const conflict=await p.request.post(endpoint,{headers,data:{text:'different text same idempotency key',clientMessageId}})
+      expect(conflict.status(),await conflict.text()).toBe(409)
+      const newMessage=await p.request.post(endpoint,{headers,data:{text:'genuinely new visitor message',clientMessageId:clientMessageId+'-new'}})
+      expect(newMessage.status(),await newMessage.text()).toBe(403)
+      expect((await newMessage.json()).error).toBe('weekly_limit_reached')
+
+      const after=await globalDb.message.count({where:{tenantId,senderType:'contact'}})
+      expect(after,'Replay and rejected messages must not create any additional visitor Message').toBe(before)
+      expect((await getThread(p,initial.conversationId)).filter(x=>x.id===initial.message.id)).toHaveLength(1)
+      expect(quota(await billing(p))).toEqual({current:0,limit:0})
     }finally{await ctx.close()}
   })
 
