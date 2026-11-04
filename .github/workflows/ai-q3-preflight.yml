@@ -74,7 +74,9 @@ jobs:
           const full=ci.split('name: Run Full regression tests - main and other PRs')[1]?.split('name: Print Full container logs on failure')[0] ?? ''
           const lite=ci.split('name: Run Lite regression tests - main and other PRs')[1]?.split('name: Print Lite container logs on failure')[0] ?? ''
           for(const [label,s] of [['Full',full],['Lite',lite]]) {
-            if(!s.includes('tests/ai-q3-faq.spec.ts')) throw Error(label+' CI missing reviewer AI-Q3 browser suite')
-            console.log(label+' includes reviewer AI-Q3 browser suite')
+            for(const path of ['tests/ai-q1-config.spec.ts','tests/ai-q2-usage.spec.ts','tests/ai-q3-faq.spec.ts']) {
+              if(!s.includes(path)) throw Error(label+' CI missing reviewer acceptance suite: '+path)
+              console.log(label+' includes '+path)
+            }
           }
           NODE
