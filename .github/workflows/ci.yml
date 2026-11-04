@@ -35,7 +35,7 @@ jobs:
       # AI-Q2 runs only AI-Q2 reviewer + developer tests. Keep complete regression on main and other PRs.
       - name: Unit tests - AI-Q2 Atomic AI Reply Accounting (reviewer + developer)
         if: github.event_name == 'pull_request' && github.head_ref == 'feat/ai-q2-atomic-usage'
-        run: bun test tests/unit/ai-q2-policy.test.ts tests/unit/ai-q2-implementation.test.ts
+        run: bun test tests/unit/ai-q2-policy.test.ts tests/unit/ai-q2-implementation.test.ts tests/unit/ai-q1-contract.test.ts tests/unit/ai-q1-implementation.test.ts
       - name: Unit tests - full regression (main and other PRs)
         if: github.event_name != 'pull_request' || github.head_ref != 'feat/ai-q2-atomic-usage'
         run: bun test tests/unit/
