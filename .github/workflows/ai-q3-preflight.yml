@@ -1,0 +1,61 @@
+name: AI-Q3 — independent reviewer FAQ acceptance preflight
+on:
+  push:
+    branches:
+      - feat/ai-q3-faq-confidence
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  reviewer-ai-q3-preflight:
+    if: github.event_name == 'push' || github.head_ref == 'feat/ai-q3-faq-confidence'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Install immutable dependencies
+        run: bun install --frozen-lockfile
+      - name: Generate Prisma client BEFORE importing Playwright test helpers
+        run: bunx prisma generate
+        env:
+          DATABASE_URL: postgresql://user:password@localhost:5432/dummy
+          DIRECT_URL: postgresql://user:password@localhost:5432/dummy
+      - name: Syntax-check all three reviewer-owned AI-Q3 suites
+        run: |
+          node --input-type=module <<'NODE'
+          import ts from 'typescript'
+          import { readFileSync } from 'node:fs'
+          for(const file of [
+            'tests/unit/ai-q3-faq-contract.test.ts',
+            'tests/db-boundary/ai-q3-faq.test.ts',
+            'tests/ai-q3-faq.spec.ts'
+          ]) {
+            const text=readFileSync(file,'utf8')
+            const source=ts.createSourceFile(file,text,ts.ScriptTarget.Latest,true,ts.ScriptKind.TS)
+            if(source.parseDiagnostics.length) {
+              for(const d of source.parseDiagnostics) {
+                console.error(file+': '+ts.flattenDiagnosticMessageText(d.messageText,'\n'))
+              }
+              process.exitCode=1
+            } else console.log('Syntax OK: '+file)
+          }
+          NODE
+      - name: Enumerate real Playwright acceptance without launching app
+        run: bunx playwright test tests/ai-q3-faq.spec.ts --list
+      - name: Verify full Full/Lite CI includes new reviewer browser suite
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs'
+          const ci=readFileSync('.github/workflows/ci.yml','utf8')
+          const full=ci.split('name: Run Full regression tests - main and other PRs')[1]?.split('name: Print Full container logs on failure')[0] ?? ''
+          const lite=ci.split('name: Run Lite regression tests - main and other PRs')[1]?.split('name: Print Lite container logs on failure')[0] ?? ''
+          for(const [label,s] of [['Full',full],['Lite',lite]]) {
+            if(!s.includes('tests/ai-q3-faq.spec.ts')) throw Error(label+' CI missing reviewer AI-Q3 browser suite')
+            console.log(label+' includes reviewer AI-Q3 browser suite')
+          }
+          NODE
