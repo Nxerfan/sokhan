@@ -12,7 +12,7 @@
  * and AiReplyReservation (tenantId,visitorMessageId,conversationId,status).
  */
 import {beforeAll,afterAll,describe,test,expect} from 'bun:test'
-import {globalDb} from '@/lib/db'
+import {db,globalDb,withTenant} from '@/lib/db'
 import {ensurePlansSeeded} from '@/lib/payments/plans'
 import {getTenantUsage,checkPlanLimit} from '@/lib/payments/gating'
 import {resolveAiUsageWindow} from '@/lib/ai/usage-policy'
@@ -342,6 +342,32 @@ describe('Reviewer AI-Q2 — real database and atomic billable replies',()=>{
     expect(await globalDb.message.count({where:{tenantId:b,senderType:'ai'}})).toBe(0)
     expect((await getAiUsageState(a)).used).toBe(0)
     await releaseAiReply({tenantId:a,reservationId:r.reservationId})
+  })
+
+
+  test('tenant-scoped interactive transaction rejects foreign Message reads and tenantId override on create',async()=>{
+    const a=await tenant('pro'),b=await tenant('pro')
+    const convA=await conversation(a),convB=await conversation(b)
+    const foreignMessageId=await inbound(b,convB,'Foreign tenant visitor data')
+    const outcome=await withTenant(a,()=>db.$transaction(async(tx)=>{
+      const foreign=await tx.message.findUnique({where:{id:foreignMessageId},select:{id:true}})
+      const local=await tx.message.create({
+        data:{
+          tenantId:b,
+          conversationId:convA,
+          senderType:'contact',
+          contentType:'text',
+          content:{text:'Explicit foreign tenant override must not succeed'},
+          status:'sent',
+        },
+        select:{id:true,tenantId:true},
+      })
+      return {foreign,local}
+    }))
+    expect(outcome.foreign,'The interactive tx must not read a Message owned by another tenant').toBeNull()
+    expect(outcome.local.tenantId,'The interactive tx must override foreign tenantId writes with the active tenant').toBe(a)
+    const persisted=await globalDb.message.findUnique({where:{id:outcome.local.id},select:{tenantId:true}})
+    expect(persisted?.tenantId).toBe(a)
   })
 
 })
