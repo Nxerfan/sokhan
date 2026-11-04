@@ -347,66 +347,84 @@ export async function POST(
       }
     }
 
-    // Find or create the conversation. tenantId is auto-injected by the
-    // fail-closed extension; passing it explicitly is defense-in-depth.
-    let conversation = await db.conversation.findFirst({
-      where: { contactId, status: 'open' },
-      orderBy: { createdAt: 'desc' },
-    })
+    // Find or create the conversation. The visitor Message, idempotency
+    // claim, AND conversation creation must be inside ONE database
+    // transaction so a losing concurrent request cannot leave orphan
+    // Messages, Conversations or routing side effects.
+    const { globalDb } = await import('@/lib/db')
+    let conversation: { id: string } | null = null
+    let message: { id: string; content: unknown; senderType: string; conversationId: string; createdAt: Date; status: string } | null = null
+    let isNew = false
 
-    const isNew = !conversation
-    if (!conversation) {
-      conversation = await db.conversation.create({
-        data: {
-          tenantId,
-          contactId,
-          status: 'open',
-          channel: 'widget',
-          tags: [],
-        },
-      })
-      // Evaluate routing rules for the new conversation.
-      await evaluateRoutingRules(conversation.id, tenantId, text)
-    }
-
-    // Persist the visitor message AND the idempotency record atomically.
-    // If a concurrent request already created the idempotency record, the
-    // unique constraint throws — we catch it and return the original.
-    let message
     try {
-      message = await db.message.create({
-        data: {
-          conversationId: conversation.id,
-          tenantId,
-          senderType: 'contact',
-          senderUserId: null,
-          contentType: 'text',
-          content: pageContext
-            ? { text, pageContext: { pathname: pageContext.pathname, title: pageContext.title } }
-            : { text },
-          status: 'sent',
-        },
+      const txResult = await globalDb.$transaction(async (tx) => {
+        // Find an existing open conversation for this contact.
+        let conv = await tx.conversation.findFirst({
+          where: { contactId, tenantId, status: 'open' },
+          orderBy: { createdAt: 'desc' },
+          select: { id: true },
+        })
+
+        const createdNew = !conv
+        if (!conv) {
+          conv = await tx.conversation.create({
+            data: {
+              tenantId,
+              contactId,
+              status: 'open',
+              channel: 'widget',
+              tags: [],
+            },
+            select: { id: true },
+          })
+        }
+
+        // Create the visitor Message inside the transaction.
+        const msg = await tx.message.create({
+          data: {
+            conversationId: conv.id,
+            tenantId,
+            senderType: 'contact',
+            senderUserId: null,
+            contentType: 'text',
+            content: pageContext
+              ? { text, pageContext: { pathname: pageContext.pathname, title: pageContext.title } }
+              : { text },
+            status: 'sent',
+          },
+          select: { id: true, content: true, senderType: true, conversationId: true, createdAt: true, status: true },
+        })
+
+        // Create the idempotency claim inside the SAME transaction.
+        // If a concurrent request already created the record, the unique
+        // constraint throws — the ENTIRE transaction rolls back (no orphan
+        // Message, no orphan Conversation).
+        if (clientMessageId) {
+          await tx.visitorMessageIdempotency.create({
+            data: {
+              tenantId,
+              contactId,
+              clientMessageId,
+              messageId: msg.id,
+              conversationId: conv.id,
+              messageText: text,
+            },
+          })
+        }
+
+        return { conv, msg, createdNew }
       })
 
-      // Persist the idempotency claim (if clientMessageId is provided).
-      // This is in the same withTenant block — tenantId is auto-injected.
-      if (clientMessageId) {
-        await db.visitorMessageIdempotency.create({
-          data: {
-            tenantId,
-            contactId,
-            clientMessageId,
-            messageId: message.id,
-            conversationId: conversation.id,
-            messageText: text,
-          },
-        })
-      }
-    } catch {
+      conversation = txResult.conv
+      message = txResult.msg
+      isNew = txResult.createdNew
+    } catch (e) {
       // Concurrent idempotency create — unique constraint violation.
-      // Re-query and return the original.
+      // The ENTIRE transaction was rolled back (no orphan Message or
+      // Conversation). Re-query and return the original — with text
+      // comparison for conflict detection (Defect B).
       if (clientMessageId) {
-        const concurrent = await db.visitorMessageIdempotency.findUnique({
+        const concurrent = await globalDb.visitorMessageIdempotency.findUnique({
           where: {
             tenantId_contactId_clientMessageId: {
               tenantId,
@@ -414,22 +432,22 @@ export async function POST(
               clientMessageId,
             },
           },
-          select: { messageId: true, conversationId: true },
+          select: { messageId: true, conversationId: true, messageText: true },
         })
         if (concurrent) {
-          const origMessage = await db.message.findUnique({
+          // Compare text — different content with the same key is a conflict.
+          if (concurrent.messageText !== text) {
+            return { kind: 'idempotency_conflict' as const }
+          }
+          const origMessage = await globalDb.message.findUnique({
             where: { id: concurrent.messageId },
+            select: { id: true, content: true, senderType: true, conversationId: true, createdAt: true, status: true },
           })
-          const origConversation = await db.conversation.findUnique({
+          const origConversation = await globalDb.conversation.findUnique({
             where: { id: concurrent.conversationId },
+            select: { id: true },
           })
           if (origMessage && origConversation) {
-            // The message we just created is a duplicate (if the create
-            // succeeded before the idempotency create failed). It's in a
-            // separate transaction so it's already committed — but the
-            // idempotency record points to the ORIGINAL, and the caller
-            // uses the original's ID. The duplicate message is orphaned
-            // but harmless (no AI reservation, no charge).
             return {
               kind: 'ok' as const,
               message: origMessage,
@@ -441,6 +459,13 @@ export async function POST(
         }
       }
       throw new Error('Failed to persist visitor message')
+    }
+
+    // Evaluate routing rules for a new conversation — ONLY after the
+    // winning transaction has committed. Losing transactions rolled back
+    // their conversation creation, so this fires exactly once.
+    if (isNew) {
+      await evaluateRoutingRules(conversation!.id, tenantId, text)
     }
 
     // Update conversation metadata. tenantId auto-injected in where.
