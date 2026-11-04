@@ -129,3 +129,30 @@ describe('Reviewer AI-Q2 — reservation-aware capacity calculation', () => {
     expect(getAiRemaining(1399,0,1400)).toBe(1)
   })
 })
+
+
+describe('Reviewer AI-Q2 — durable HTTP idempotency transaction contract',()=>{
+  test('visitor Message and idempotency claim must be created inside ONE database transaction',async()=>{
+    // Separate durable writes leave orphan visitor Messages when a concurrent
+    // idempotency claim loses its unique-key race or claim persistence fails.
+    const code=await Bun.file(new URL('../../src/app/api/widget/[slug]/messages/route.ts',import.meta.url)).text()
+    const start=code.indexOf('// Find or create the conversation.')
+    const end=code.indexOf('// Update conversation metadata.',start)
+    expect(start).toBeGreaterThan(0)
+    expect(end).toBeGreaterThan(start)
+    const insertPath=code.slice(start,end)
+    expect(insertPath,'Visitor Message + claim creation must have one transactional boundary').toContain('$transaction(')
+    expect(insertPath,'Direct auto-committed Message create is not atomic with claim').not.toMatch(/\bdb\.message\.create\s*\(/)
+    expect(insertPath,'Direct auto-committed claim create is not atomic with Message').not.toMatch(/\bdb\.visitorMessageIdempotency\.create\s*\(/)
+  })
+  test('unique-key collision must compare original text before returning an idempotent retry',async()=>{
+    const code=await Bun.file(new URL('../../src/app/api/widget/[slug]/messages/route.ts',import.meta.url)).text()
+    const start=code.indexOf('// Concurrent idempotency create')
+    expect(start).toBeGreaterThan(0)
+    const end=code.indexOf("throw new Error('Failed to persist visitor message')",start)
+    expect(end).toBeGreaterThan(start)
+    const collisionPath=code.slice(start,end)
+    expect(collisionPath,'Concurrent key collisions with different text must return HTTP 409, never original Message').toContain('messageText')
+    expect(collisionPath).toContain('idempotency_conflict')
+  })
+})

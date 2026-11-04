@@ -257,4 +257,64 @@ test.describe('Reviewer AI-Q2 — real successful-reply quota in Full and Lite',
     }finally{await ctx.close()}
   })
 
+  test('FIRST simultaneous POSTs with the same key persist exactly one visitor Message and one AI charge',async({browser})=>{
+    const ctx=await browser.newContext()
+    try{
+      const p=await ctx.newPage(),slug=await signup(p,'first-race')
+      await setPlan(p,'pro')
+      await enableFaq(p)
+      const question='آیا پیام هم‌زمان فقط یک بار باید ثبت شود؟'
+      const answer='بله، فقط یک پاسخ موفق AI در سهمیه ثبت می‌شود.'
+      await addFaq(p,question,answer)
+      const token=await visitor(p,slug)
+      const clientMessageId='cmsg_q2_first_race_'+Date.now()
+      const posts=await Promise.all(Array.from({length:8},()=>p.request.post(BASE+'/api/widget/'+slug+'/messages',{
+        headers:{...HEADERS,Authorization:'Bearer '+token},
+        data:{text:question,clientMessageId},
+      })))
+      for(const r of posts)expect(r.status(),await r.text()).toBe(200)
+      const results=await Promise.all(posts.map(r=>r.json())) as Array<{message:{id:string},conversationId:string}>
+      expect(new Set(results.map(r=>r.message.id)).size,'All concurrent retries must return the same persisted visitor Message ID').toBe(1)
+      expect(new Set(results.map(r=>r.conversationId)).size).toBe(1)
+      const list=await p.request.get(APP+'/api/conversations?status=all')
+      expect(list.ok(),await list.text()).toBe(true)
+      const conversations=(await list.json()).conversations as Array<{id:string}>
+      expect(conversations,'Losing retries must not create orphan conversations or duplicate routing side effects').toHaveLength(1)
+      const messages=await getThread(p,results[0].conversationId)
+      expect(messages.filter(x=>x.senderType==='contact'&&x.content.text===question)).toHaveLength(1)
+      const ai=messages.filter(x=>x.senderType==='ai')
+      expect(ai).toHaveLength(1)
+      expect(ai[0].content).toMatchObject({text:answer,source:'faq'})
+      expect(quota(await billing(p))).toEqual({current:1,limit:1400})
+    }finally{await ctx.close()}
+  })
+  test('two concurrent DIFFERENT texts with the same idempotency key yield one 200 and one 409',async({browser})=>{
+    const ctx=await browser.newContext()
+    try{
+      const p=await ctx.newPage(),slug=await signup(p,'conflicting-race')
+      await setPlan(p,'pro')
+      await enableFaq(p)
+      const textA='آیا پیام اول باید پاسخ داشته باشد؟'
+      const textB='آیا پیام دوم با همین شناسه مجاز است؟'
+      await addFaq(p,textA,'پاسخ اختصاصی اول')
+      await addFaq(p,textB,'پاسخ اختصاصی دوم')
+      const token=await visitor(p,slug)
+      const clientMessageId='cmsg_q2_conflict_'+Date.now()
+      const responses=await Promise.all([textA,textB].map(text=>p.request.post(BASE+'/api/widget/'+slug+'/messages',{
+        headers:{...HEADERS,Authorization:'Bearer '+token},
+        data:{text,clientMessageId},
+      })))
+      const statuses=responses.map(r=>r.status()).sort((a,b)=>a-b)
+      expect(statuses,'Different payloads cannot be acknowledged under one idempotency key').toEqual([200,409])
+      const winner=responses.find(r=>r.status()===200)!
+      const committed=await winner.json() as {conversationId:string,message:{id:string}}
+      const messages=await getThread(p,committed.conversationId)
+      const visitorMessages=messages.filter(x=>x.senderType==='contact')
+      expect(visitorMessages).toHaveLength(1)
+      expect([textA,textB]).toContain(visitorMessages[0].content.text)
+      expect(messages.filter(x=>x.senderType==='ai')).toHaveLength(1)
+      expect(quota(await billing(p))).toEqual({current:1,limit:1400})
+    }finally{await ctx.close()}
+  })
+
 })
