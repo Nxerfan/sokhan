@@ -219,4 +219,42 @@ test.describe('Reviewer AI-Q2 — real successful-reply quota in Full and Lite',
       await expect(p.getByTestId('billing-ai-usage-limit')).toHaveText(/1[,.٬]?400|۱[٬,]?۴۰۰/)
     }finally{await ctx.close()}
   })
+  test('retrying the SAME clientMessageId cannot create another visitor message or bill a duplicate AI answer',async({browser})=>{
+    const ctx=await browser.newContext()
+    try{
+      const p=await ctx.newPage(),slug=await signup(p,'idempotent-http')
+      await setPlan(p,'pro')
+      await enableFaq(p)
+      const question='آیا درخواست تکراری باید دوبار از سهمیه کم کند؟'
+      const answer='خیر، پاسخ تکراری فقط یک بار ثبت و محاسبه می‌شود.'
+      await addFaq(p,question,answer)
+      const token=await visitor(p,slug)
+      const clientMessageId='cmsg_q2_http_retry_'+Date.now()
+      const sendRetry=()=>p.request.post(BASE+'/api/widget/'+slug+'/messages',{
+        headers:{...HEADERS,Authorization:'Bearer '+token},
+        data:{text:question,clientMessageId},
+      })
+      const first=await sendRetry()
+      expect(first.status(),await first.text()).toBe(200)
+      const initial=await first.json() as {conversationId:string,message:{id:string}}
+      expect(initial.message.id).toBeTruthy()
+      const retry=await sendRetry()
+      expect(retry.status(),await retry.text()).toBe(200)
+      const again=await retry.json() as {conversationId:string,message:{id:string}}
+      expect(again.message.id,'Same clientMessageId must resolve to the original persisted visitor message').toBe(initial.message.id)
+      const concurrent=await Promise.all(Array.from({length:3},()=>sendRetry()))
+      for(const response of concurrent)expect(response.status(),await response.text()).toBe(200)
+      for(const response of concurrent){
+        const body=await response.json() as {message:{id:string}}
+        expect(body.message.id).toBe(initial.message.id)
+      }
+      const messages=await getThread(p,initial.conversationId)
+      expect(messages.filter(x=>x.senderType==='contact'&&x.content.text===question)).toHaveLength(1)
+      const replies=messages.filter(x=>x.senderType==='ai')
+      expect(replies).toHaveLength(1)
+      expect(replies[0].content).toMatchObject({text:answer,source:'faq'})
+      expect(quota(await billing(p))).toEqual({current:1,limit:1400})
+    }finally{await ctx.close()}
+  })
+
 })
