@@ -156,3 +156,17 @@ describe('Reviewer AI-Q2 — durable HTTP idempotency transaction contract',()=>
     expect(collisionPath).toContain('idempotency_conflict')
   })
 })
+
+
+describe('Reviewer AI-Q2 — real built-in widget retry uses the original idempotency key',()=>{
+  test('retrying the same failed optimistic send must NOT invent a new clientMessageId',async()=>{
+    const source=await Bun.file(new URL('../../src/app/api/widget/[slug]/script/route.ts',import.meta.url)).text()
+    const start=source.indexOf('function retrySendMessage(optimisticId, text)')
+    expect(start).toBeGreaterThan(0)
+    const end=source.indexOf('fetch(MESSAGES_URL',start)
+    expect(end).toBeGreaterThan(start)
+    const retry=source.slice(start,end)
+    expect(retry,'Retries must derive the idempotency key from the original failed optimistic message').toContain('_clientMessageId')
+    expect(retry,'A new cmsg_retry_ token defeats server-side idempotency when the original response was lost').not.toContain("'cmsg_retry_'")
+  })
+})
