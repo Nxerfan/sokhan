@@ -82,6 +82,7 @@ export const TENANT_SCOPED_MODEL_NAMES: readonly string[] = Object.freeze([
   'AiConfig',
   'AiUsagePeriod',
   'AiReplyReservation',
+  'VisitorMessageIdempotency',
   'ConnectorConfig',
   'WidgetDomain',
   'Invitation',

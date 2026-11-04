@@ -73,6 +73,7 @@ model Tenant {
   widgetOtpRequests WidgetOtpRequest[]
   aiUsagePeriods    AiUsagePeriod[]
   aiReplyReservations AiReplyReservation[]
+  visitorMessageIdempotencies VisitorMessageIdempotency[]
 }
 
 /// Global identity. A user may belong to multiple tenants via Membership.
@@ -434,6 +435,26 @@ model AiReplyReservation {
   @@unique([tenantId, visitorMessageId])
   @@index([tenantId, status])
   @@index([tenantId, conversationId])
+}
+
+/// AI-Q2: Durable HTTP idempotency for visitor message POSTs.
+/// Enforces that a retry with the same (tenantId, contactId, clientMessageId)
+/// resolves to the original persisted visitor Message — no duplicate
+/// message, no duplicate AI charge.
+model VisitorMessageIdempotency {
+  id              String   @id @default(cuid())
+  tenantId        String
+  contactId       String
+  clientMessageId String
+  messageId       String
+  conversationId  String
+  messageText     String
+  createdAt       DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, contactId, clientMessageId])
+  @@index([tenantId, contactId])
 }
 
 model FaqPair {

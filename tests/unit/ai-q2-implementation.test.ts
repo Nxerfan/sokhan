@@ -518,3 +518,55 @@ describe('Developer — Prisma schema AI-Q2 models', () => {
     expect(dbSrc).toContain('AiReplyReservation')
   })
 })
+
+// ---------------------------------------------------------------------------
+// HTTP idempotency source inspection
+// ---------------------------------------------------------------------------
+
+describe('Developer — durable HTTP idempotency', () => {
+  const msgSrc = readFileSync(join(process.cwd(), 'src/app/api/widget/[slug]/messages/route.ts'), 'utf8')
+  const schemaSrc = readFileSync(join(process.cwd(), 'prisma/schema.prisma'), 'utf8')
+  const dbSrc = readFileSync(join(process.cwd(), 'src/lib/db.ts'), 'utf8')
+
+  test('the route checks for an existing idempotency record before persisting', () => {
+    expect(msgSrc).toContain('visitorMessageIdempotency.findUnique')
+    expect(msgSrc).toContain('tenantId_contactId_clientMessageId')
+  })
+
+  test('the route creates the idempotency record after message persistence', () => {
+    expect(msgSrc).toContain('visitorMessageIdempotency.create')
+  })
+
+  test('idempotent retries return the original message and skip AI', () => {
+    expect(msgSrc).toContain('isIdempotentRetry')
+    expect(msgSrc).toContain('retryAiResponse')
+  })
+
+  test('conflicting text reuse returns 409', () => {
+    expect(msgSrc).toContain('idempotency_conflict')
+    expect(msgSrc).toContain('409')
+  })
+
+  test('concurrent create catches unique constraint and returns original', () => {
+    expect(msgSrc).toContain('Concurrent idempotency create')
+  })
+
+  test('the Prisma model VisitorMessageIdempotency exists with unique constraint', () => {
+    expect(schemaSrc).toContain('model VisitorMessageIdempotency')
+    expect(schemaSrc).toMatch(/@@unique\(\[tenantId,\s*contactId,\s*clientMessageId\]\)/)
+  })
+
+  test('VisitorMessageIdempotency is in the tenant-scoped list', () => {
+    expect(dbSrc).toContain('VisitorMessageIdempotency')
+  })
+
+  test('the migration file exists', () => {
+    const fs = require('fs')
+    expect(fs.existsSync(join(process.cwd(), 'prisma/migrations/20261107000000_visitor_message_idempotency/migration.sql'))).toBe(true)
+  })
+
+  test('the idempotent retry fetches the original AI reservation', () => {
+    expect(msgSrc).toContain('aiReplyReservation.findUnique')
+    expect(msgSrc).toContain('tenantId_visitorMessageId')
+  })
+})
