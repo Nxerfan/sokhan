@@ -46,6 +46,12 @@
 
 import ZAI from 'z-ai-web-dev-sdk'
 import { selectUnambiguousFaqs, validateSemanticMatch } from '@/lib/ai/faq-policy'
+import {
+  retrieveProductCandidates,
+  detectAmbiguousCandidates,
+  renderGroundedAnswer,
+  type ProductCandidate,
+} from '@/lib/ai/product-policy'
 
 let zaiInstance: Awaited<ReturnType<typeof ZAI.create>> | null = null
 
@@ -212,84 +218,105 @@ export interface ProductQaResult {
 }
 
 /**
- * Answer a product question using RAG (Retrieval-Augmented Generation).
+ * Answer a product question using GROUNDED retrieval (AI-Q4).
  *
- * Approach: retrieve relevant products from the catalog (by keyword match
- * in the product name/description), then generate a grounded answer using
- * the LLM. The LLM is instructed to only use the provided product data —
- * no hallucination.
+ * Flow:
+ *   1. Retrieve eligible product candidates via `retrieveProductCandidates`
+ *      (word-boundary token matching, generic-term filtering, deterministic
+ *      ranking, max 10). Zero candidates → return negative, NO provider call.
+ *   2. Detect ambiguity (same name, conflicting price/availability) →
+ *      fail closed.
+ *   3. If `provider` is supplied (AI-Q1 test seam) or the real ZAI SDK is
+ *      available, call the provider ONCE. The provider's output is a
+ *      go/no-go signal ONLY — a nonblank response means "proceed to render."
+ *      The provider's text is NEVER used as the answer.
+ *   4. If the provider output is blank or the provider throws → safe negative.
+ *   5. Render the deterministic grounded answer from persisted product facts
+ *      (name, price, currency, availability) via `renderGroundedAnswer`.
+ *      The answer NEVER includes model-generated prices, stock claims,
+ *      discounts, URLs, or injection text.
  *
- * If `provider` is supplied (server-side test seam), it is used instead of
- * the real SDK. Only the products retrieved by the deterministic keyword
- * gate are eligible — the provider cannot introduce products that were not
- * retrieved from the supplied list. An empty / blank / failed completion is
- * a safe negative (no positive answer, no throw).
+ * AI-Q1 compatibility: the injected provider is called once on a positive
+ * match. The provider's nonblank output drives the deterministic grounded
+ * render. The provider's text itself never overrides persisted product
+ * facts. Zero candidates → zero provider calls.
+ *
+ * Currency grounding: IRT prices render in Toman. Non-IRT currencies
+ * (USD, etc.) render in their original unit. Unsupported currencies fail
+ * closed. No currency conversions or exchange rates are invented.
  */
 export async function answerProductQuestion(
   visitorMessage: string,
-  products: Array<{ id: string; name: string; description: string; price: number; availability: string }>,
+  products: Array<{ id: string; name: string; description: string; price: number; availability: string; currency?: string }>,
   provider?: AiProvider,
 ): Promise<ProductQaResult> {
   if (products.length === 0) {
     return { answered: false, answer: null, productIds: [] }
   }
 
-  // Deterministic keyword retrieval gate — runs BEFORE any model call.
-  // If no product matches, the model is NOT called (no hallucination path).
-  const messageWords = visitorMessage.toLowerCase().split(/\s+/).filter(w => w.length > 2)
-  const relevant = products.filter(p => {
-    const text = (p.name + ' ' + p.description).toLowerCase()
-    return messageWords.some(word => text.includes(word))
-  }).slice(0, 10)
-
-  if (relevant.length === 0) {
+  // 1. Deterministic retrieval — word-boundary token matching.
+  // No provider call if zero candidates.
+  const candidates = retrieveProductCandidates(visitorMessage, products as ReadonlyArray<ProductCandidate>)
+  if (candidates.length === 0) {
     return { answered: false, answer: null, productIds: [] }
   }
 
-  const productContext = relevant.map(p =>
-    `- ${p.name}: ${p.description} | Price: ${p.price} Toman | Availability: ${p.availability}`
+  // 2. Ambiguity detection — same name, conflicting price/availability.
+  const ambiguous = detectAmbiguousCandidates(candidates)
+  if (ambiguous.size > 0) {
+    // The query does not distinguish between conflicting products.
+    // Fail closed rather than guess a single price.
+    return { answered: false, answer: null, productIds: [] }
+  }
+
+  // 3. Call the provider ONCE — the output is a go/no-go signal.
+  // The provider's text is NEVER used as the answer.
+  const productContext = candidates.map(p =>
+    `- ${p.name}: ${p.description} | Price: ${p.price} ${(p.currency ?? 'IRT').toUpperCase()} | Availability: ${p.availability}`
   ).join('\n')
 
-  const prompt = `You are a product assistant for a store. A visitor asked a question. Answer using ONLY the product data below. Do not make up prices or availability.
+  const prompt = `You are a product assistant. A visitor asked about a product. Confirm you understand the question.
 
 Visitor question: "${visitorMessage}"
 
 Available products:
 ${productContext}
 
-Rules:
-- Answer in the same language as the visitor's question
-- Only mention products from the list above
-- If no product matches the question, say you don't have that product
-- Be concise and helpful
-- Include the price in Toman if relevant`
+Respond with a brief acknowledgment.`
 
-  // Both provider initialization AND generation failures are caught here.
   try {
-    let answer: string
+    let providerOutput: string
     if (provider) {
-      answer = ((await provider.complete(prompt)) ?? '').trim()
+      providerOutput = ((await provider.complete(prompt)) ?? '').trim()
     } else {
       const zai = await getZAI()
       const response = await zai.chat.completions.create({
         messages: [
-          { role: 'system', content: 'You are a helpful product assistant. Answer using only the provided product data.' },
+          { role: 'system', content: 'You are a product assistant. Acknowledge the question briefly.' },
           { role: 'user', content: prompt },
         ],
-        temperature: 0.3,
+        temperature: 0.1,
       })
-      answer = response.choices[0]?.message?.content?.trim() ?? ''
+      providerOutput = response.choices[0]?.message?.content?.trim() ?? ''
     }
 
-    // Blank / whitespace-only answers do not count as a positive response.
-    if (!answer) {
+    // 4. Blank / whitespace-only output → safe negative.
+    if (!providerOutput) {
+      return { answered: false, answer: null, productIds: [] }
+    }
+
+    // 5. Render the deterministic grounded answer from persisted facts.
+    // The provider's text is discarded — it was only a go/no-go signal.
+    const groundedAnswer = renderGroundedAnswer(candidates)
+    if (!groundedAnswer) {
+      // Unsupported currency or render failure — fail closed.
       return { answered: false, answer: null, productIds: [] }
     }
 
     return {
       answered: true,
-      answer,
-      productIds: relevant.map(p => p.id),
+      answer: groundedAnswer,
+      productIds: candidates.map((c) => c.id),
     }
   } catch (e) {
     console.error('[ai:answerProductQuestion] error:', e instanceof Error ? e.message : e)

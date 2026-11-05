@@ -703,7 +703,7 @@ async function tryAiResponse(
     if (!generated && aiConfig.productQaEnabled) {
       const products = await db.product.findMany({
         where: { tenantId },
-        select: { id: true, name: true, description: true, price: true, availability: true },
+        select: { id: true, name: true, description: true, price: true, availability: true, currency: true },
       })
 
       if (products.length > 0) {
