@@ -27,7 +27,7 @@ async function add(tenantId:string,name:string,price:number,availability='in_sto
 }
 async function eligible(tid:string){
   return withTenant(tid,()=>db.product.findMany({
-    select:{id:true,name:true,description:true,price:true,availability:true},
+    select:{id:true,name:true,description:true,price:true,availability:true,currency:true},
   }))
 }
 const ids=(rows:ReadonlyArray<{id:string}>)=>rows.map(x=>x.id)
@@ -131,6 +131,23 @@ describe('Reviewer AI-Q4 — real DB tenant and freshness acceptance',()=>{
     const candidates=retrieveProductCandidates('قیمت قاب گوشی باران',await eligible(a))
     expect(new Set(ids(candidates))).toEqual(new Set([first.id,second.id]))
     expect(candidates).toHaveLength(2)
+  })
+
+  test('foreign-currency persisted row cannot be silently repriced as Toman',async()=>{
+    const a=await newTenant()
+    const item=await globalDb.product.create({data:{
+      tenantId:a,name:'ساعت خارجی نارون',description:'',price:1000,
+      availability:'in_stock',currency:'USD',metadata:{},
+    }})
+    const persisted=await eligible(a)
+    expect(persisted.find(p=>p.id===item.id)?.currency).toBe('USD')
+    const provider={complete:async()=> 'Only 1000 Toman'}
+    const r=await answerProductQuestion('قیمت ساعت خارجی نارون',persisted,provider)
+    if(r.answered){
+      expect(r.productIds).toEqual([item.id])
+      expect(r.answer||'').not.toMatch(/تومان|Toman|IRT/i)
+      expect(r.answer||'').toMatch(/USD|دلار/i)
+    }else expect(r).toEqual({answered:false,answer:null,productIds:[]})
   })
 
   test('stock and pricing from another tenant cannot contaminate a local answer',async()=>{
