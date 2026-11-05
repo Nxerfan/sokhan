@@ -617,8 +617,13 @@ export interface StreamedScanResult {
  *
  * Memory at any point:
  *   - 1 batch of products (discarded after processing)
- *   - Conflict map: distinct matching product names (typically 1–10)
- *   - Candidate list: at most CANDIDATE_BUFFER (15) entries
+ *   - seenIdFacts Map: one entry per distinct product ID (grows with
+ *     catalog size, up to 10,000 entries at the resource budget limit).
+ *     Each entry stores {name, description, price, availability, currency}
+ *     (~5 fields × ~50 bytes ≈ 250 bytes/entry → max ~2.5 MB at 10K).
+ *   - conflictMap: one entry per distinct matching product name (grows
+ *     with catalog size, up to 10,000 entries in worst case).
+ *   - Candidate list: at most CANDIDATE_BUFFER (15) entries.
  *
  * Resource budget: MAX_SCAN_BATCHES (50 batches × 200 = 10,000 products).
  * On exhaustion → `incomplete: true` (fail closed).
@@ -645,9 +650,22 @@ export async function streamProductCandidates(
   }
 
   // 2. Streaming scan
-  const conflictMap = new Map<string, { price: number; availability: string; currency: string }>()
+  // BLOCKER 1: seenIdFacts tracks ALL factual fields per ID, independent
+  // of the candidate buffer. This prevents pruning from concealing
+  // conflicting duplicates. Memory grows with distinct IDs (up to 10K).
+  interface ProductFacts {
+    name: string
+    description: string
+    price: number
+    availability: string
+    currency: string
+  }
+  const seenIdFacts = new Map<string, ProductFacts>()
+  // conflictMap tracks same-name conflicts across batches. Memory grows
+  // with distinct matching product names (typically 1-10, but bounded
+  // by the total number of distinct names in the catalog, up to 10K).
+  const conflictMap = new Map<string, ProductFacts>()
   let ambiguous = false
-  const seenIds = new Set<string>()
   let candidates: Array<{ product: ProductCandidate; matchCount: number; matchedTerms: string[] }> = []
 
   let cursor: string | undefined = undefined
@@ -659,20 +677,30 @@ export async function streamProductCandidates(
     for (const p of batch.products) {
       if (!isEligibleProduct(p)) continue
 
-      // Deduplicate by ID (BLOCKER 4).
-      if (seenIds.has(p.id)) {
-        // Check for conflicting duplicate data.
-        const existing = candidates.find((c) => c.product.id === p.id)
-        if (existing) {
-          const a = existing.product
-          if (a.price !== p.price || a.availability !== p.availability ||
-              (a.currency ?? 'IRT').toUpperCase() !== (p.currency ?? 'IRT').toUpperCase()) {
-            ambiguous = true
-          }
-        }
-        continue
+      // BLOCKER 1: Track full factual identity per ID, independent of
+      // the candidate buffer. Detect contradictory duplicates even
+      // after the earlier occurrence was pruned from the top-15.
+      const facts: ProductFacts = {
+        name: p.name,
+        description: p.description,
+        price: p.price,
+        availability: p.availability,
+        currency: (p.currency ?? 'IRT').toUpperCase(),
       }
-      seenIds.add(p.id)
+      const existingFacts = seenIdFacts.get(p.id)
+      if (existingFacts) {
+        // Compare ALL factual fields (name, description, price,
+        // availability, currency). Any difference → ambiguous.
+        if (existingFacts.name !== facts.name ||
+            existingFacts.description !== facts.description ||
+            existingFacts.price !== facts.price ||
+            existingFacts.availability !== facts.availability ||
+            existingFacts.currency !== facts.currency) {
+          ambiguous = true
+        }
+        continue // Don't process duplicate
+      }
+      seenIdFacts.set(p.id, facts)
 
       const tokens = productTokenSet(p)
       let totalMatches = 0
@@ -693,20 +721,24 @@ export async function streamProductCandidates(
 
       // Conflict detection (streaming across batches).
       const nameKey = normalizeProductQuery(p.name)
-      const cur = (p.currency ?? 'IRT').toUpperCase()
-      const existing = conflictMap.get(nameKey)
-      if (existing) {
-        if (existing.price !== p.price || existing.availability !== p.availability || existing.currency !== cur) {
+      const existingConflict = conflictMap.get(nameKey)
+      if (existingConflict) {
+        if (existingConflict.price !== facts.price ||
+            existingConflict.availability !== facts.availability ||
+            existingConflict.currency !== facts.currency) {
           ambiguous = true
         }
       } else {
-        conflictMap.set(nameKey, { price: p.price, availability: p.availability, currency: cur })
+        conflictMap.set(nameKey, facts)
       }
 
       candidates.push({ product: p, matchCount: totalMatches, matchedTerms })
     }
 
     // Prune candidate list to top CANDIDATE_BUFFER (bounded memory).
+    // Note: seenIdFacts and conflictMap are NOT pruned — they retain
+    // full identity information for all scanned products to detect
+    // conflicts after candidate pruning.
     if (candidates.length > CANDIDATE_BUFFER) {
       candidates.sort((a, b) => {
         if (b.matchCount !== a.matchCount) return b.matchCount - a.matchCount

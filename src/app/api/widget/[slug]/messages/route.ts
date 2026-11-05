@@ -655,7 +655,6 @@ async function tryAiResponse(
     isQueryEligibleForCatalogScan,
     streamProductCandidates,
     renderGroundedAnswer,
-    normalizeProductQuery: normalizeProductQueryLocal,
   } = await import('@/lib/ai/product-policy')
 
   // Load AI config
@@ -710,83 +709,68 @@ async function tryAiResponse(
     if (!generated && aiConfig.productQaEnabled) {
       // BLOCKER 2: Pre-scan query eligibility gate. Reject blank,
       // stopword-only, or provably ineligible queries BEFORE any catalog
-      // database read. This prevents unnecessary full-catalog scans for
-      // irrelevant visitor messages.
+      // database read.
       if (isQueryEligibleForCatalogScan(visitorMessage)) {
-        // BLOCKER 1: Bounded-memory streaming catalog scan. Products are
-        // scanned in batches of 200 via keyset pagination WITHOUT
-        // materializing the full catalog in memory. Each batch is
-        // discarded after processing. Memory is bounded by:
-        //   - 1 batch (200 products, discarded after processing)
-        //   - Conflict map (distinct matching names, typically 1–10)
-        //   - Candidate list (max 15, pruned between batches)
+        // BLOCKER 3: Use a PostgreSQL REPEATABLE READ transaction to
+        // guarantee a consistent point-in-time snapshot across all batch
+        // reads. This prevents concurrent product modifications from
+        // producing mixed-version or contradictory answers.
+        //
+        // The transaction is bounded by a 10-second timeout. If the scan
+        // exceeds the budget (e.g. extremely large catalog), the
+        // transaction aborts and we fail closed (reservation released,
+        // no answer, no charge).
+        //
+        // All reads inside the transaction (scan batches + candidate
+        // verification) see the SAME snapshot. No separate post-scan
+        // re-fetch is needed — the scan data IS the consistent data.
+        // BLOCKER 2: Description is part of the matching logic, so it's
+        // included in the select and verified by the consistent snapshot.
         const BATCH_SIZE = 200
-        const fetchBatch = async (cursor?: string) => {
-          const batch = await db.product.findMany({
-            where: { tenantId },
-            select: { id: true, name: true, description: true, price: true, availability: true, currency: true },
-            orderBy: { id: 'asc' },
-            take: BATCH_SIZE,
-            ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
-          })
-          return {
-            products: batch as ReadonlyArray<ProductCandidate>,
-            hasMore: batch.length === BATCH_SIZE,
-            nextCursor: batch.length > 0 ? batch[batch.length - 1].id : undefined,
-          }
-        }
-
-        const scanResult = await streamProductCandidates(visitorMessage, fetchBatch)
-
-        // BLOCKER 1+3: Fail closed on ambiguity or resource exhaustion.
-        // Release the reservation without persisting or charging.
-        if (!scanResult.ambiguous && !scanResult.incomplete && scanResult.candidates.length > 0) {
-          // BLOCKER 3: Post-scan consistency check. Re-fetch each
-          // candidate's CURRENT data from the database. If any
-          // candidate's price, availability, currency, or name changed
-          // since the scan (concurrent catalog modification), fail
-          // closed — the answer would be based on stale data.
-          // This is lightweight (at most 10 findUnique queries) and
-          // does NOT hold any database locks or transactions.
-          const candidateIds = scanResult.candidates.map((c) => c.id)
-          const currentProducts = await db.product.findMany({
-            where: { id: { in: candidateIds }, tenantId },
-            select: { id: true, name: true, description: true, price: true, availability: true, currency: true },
-          })
-
-          // Verify every candidate still exists with unchanged facts.
-          let consistent = currentProducts.length === scanResult.candidates.length
-          if (consistent) {
-            for (const current of currentProducts) {
-              const scanned = scanResult.candidates.find((c) => c.id === current.id)
-              if (!scanned) { consistent = false; break }
-              const cur = (c: { currency?: string }) => (c.currency ?? 'IRT').toUpperCase()
-              if (scanned.price !== current.price ||
-                  scanned.availability !== current.availability ||
-                  cur(scanned) !== cur(current) ||
-                  normalizeProductQueryLocal(scanned.name) !== normalizeProductQueryLocal(current.name)) {
-                consistent = false
-                break
+        try {
+          const txResult = await db.$transaction(async (tx) => {
+            const fetchBatch = async (cursor?: string) => {
+              const batch = await tx.product.findMany({
+                where: { tenantId },
+                select: { id: true, name: true, description: true, price: true, availability: true, currency: true },
+                orderBy: { id: 'asc' },
+                take: BATCH_SIZE,
+                ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
+              })
+              return {
+                products: batch as ReadonlyArray<ProductCandidate>,
+                hasMore: batch.length === BATCH_SIZE,
+                nextCursor: batch.length > 0 ? batch[batch.length - 1].id : undefined,
               }
             }
-          }
 
-          if (consistent) {
-            // Render the grounded answer from the verified current data.
-            const groundedAnswer = renderGroundedAnswer(
-              scanResult.candidates.map((c) => {
-                const current = currentProducts.find((p) => p.id === c.id)!
-                return { ...current, matchedTerms: c.matchedTerms }
-              }),
-            )
-            if (groundedAnswer) {
-              generated = { text: groundedAnswer, source: 'product' }
+            const scanResult = await streamProductCandidates(visitorMessage, fetchBatch)
+
+            // Fail closed on ambiguity or resource exhaustion.
+            if (scanResult.ambiguous || scanResult.incomplete || scanResult.candidates.length === 0) {
+              return null
             }
+
+            // Render the grounded answer from the scan candidates.
+            // The REPEATABLE READ snapshot guarantees this data is
+            // consistent — no concurrent modification could have
+            // changed any product's facts between batch reads.
+            const groundedAnswer = renderGroundedAnswer(scanResult.candidates)
+            if (!groundedAnswer) return null
+            return { text: groundedAnswer, source: 'product' as const }
+          }, {
+            isolationLevel: 'RepeatableRead' as const,
+            timeout: 10000, // 10-second bounded transaction
+          })
+
+          if (txResult) {
+            generated = txResult
           }
-          // If inconsistent → generated stays null → reservation released.
+        } catch (e) {
+          // Transaction timeout or failure → fail closed.
+          // generated stays null → reservation released without charge.
+          console.error('[widget:messages] product scan transaction error:', e instanceof Error ? e.message : e)
         }
-        // If ambiguous/incomplete/no candidates → generated stays null →
-        // reservation released without charge (AI-Q2 atomic billing).
       }
       // If query not eligible → generated stays null → reservation released.
     }
