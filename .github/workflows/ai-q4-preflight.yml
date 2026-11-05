@@ -43,6 +43,7 @@ jobs:
             'tests/unit/ai-q4-adversarial-review.test.ts':'0915c1f18a0e3fb52efbc3356f8801906d3565d8',
             'tests/unit/ai-q4-streaming-adversarial-review.test.ts':'deb132de5322cffde6fde3cf3ecbda1d9492c3d0',
             'tests/db-boundary/ai-q4-products.test.ts':'2b4d03c379910676488e8a796e67a69cd1e0e1ec',
+            'tests/db-boundary/ai-q4-snapshot-review.test.ts':'22fe6be77853c13f3a2fa007075cb6eec583be18',
             'tests/ai-q4-products.spec.ts':'6dbc072903fd00fcacea1f4644a0cd0c4e7fd61f',
             'tests/ai-q4-large-catalog-review.spec.ts':'42d8f364fa3f4df656afb9e61eb52563a34efc9f',
           }
@@ -52,7 +53,7 @@ jobs:
             console.log('Reviewer integrity OK: '+file)
           }
           NODE
-      - name: Syntax-check six reviewer-owned AI-Q4 test suites
+      - name: Syntax-check seven reviewer-owned AI-Q4 test suites
         run: |
           node --input-type=module <<'NODE'
           import ts from 'typescript'
@@ -62,6 +63,7 @@ jobs:
             'tests/unit/ai-q4-adversarial-review.test.ts',
             'tests/unit/ai-q4-streaming-adversarial-review.test.ts',
             'tests/db-boundary/ai-q4-products.test.ts',
+            'tests/db-boundary/ai-q4-snapshot-review.test.ts',
             'tests/ai-q4-products.spec.ts',
             'tests/ai-q4-large-catalog-review.spec.ts',
           ]){
@@ -121,11 +123,15 @@ jobs:
             ]],
             ['Run Full DB boundary tests - AI-Q4 product, Q2 usage and Q3 FAQ',[
               'tests/db-boundary/ai-q4-products.test.ts',
+              'tests/db-boundary/ai-q4-concurrent-catalog.test.ts',
+              'tests/db-boundary/ai-q4-snapshot-review.test.ts',
               'tests/db-boundary/ai-q2-usage.test.ts',
               'tests/db-boundary/ai-q3-faq.test.ts',
             ]],
             ['Run Lite DB boundary tests - AI-Q4 product, Q2 usage and Q3 FAQ',[
               'tests/db-boundary/ai-q4-products.test.ts',
+              'tests/db-boundary/ai-q4-concurrent-catalog.test.ts',
+              'tests/db-boundary/ai-q4-snapshot-review.test.ts',
               'tests/db-boundary/ai-q2-usage.test.ts',
               'tests/db-boundary/ai-q3-faq.test.ts',
             ]],
