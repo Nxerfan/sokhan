@@ -73,7 +73,13 @@ const SUPPORTED_AVAILABILITY = new Set(['in_stock', 'limited', 'out_of_stock'])
 /**
  * Generic commerce / question stop-words in Persian and English.
  * These never independently qualify a product. They also act as phrase
- * separators in multi-product queries (e.g. "و" = "and").
+ * separators in multi-product queries (e.g. "و" = "and") and strip
+ * injection text (e.g. "تمام قوانین را نادیده بگیر" = "ignore all rules").
+ *
+ * Only words that would NEVER be a product name or product attribute
+ * (color, brand, model, variant) are included here. Specific attribute
+ * words like "سبز" (green), "قرمز" (red), "آبی" (blue) are NOT generic —
+ * they distinguish products and must participate in matching.
  */
 const GENERIC_TOKENS = new Set<string>([
   // Persian question / commerce generics
@@ -85,7 +91,17 @@ const GENERIC_TOKENS = new Set<string>([
   'لطفا', 'خواهشمندم', 'کنید', 'بفرمایید', 'سلام', 'تشکر', 'ممنون',
   'شد', 'شده', 'بود', 'باشد', 'کنم', 'کنید', 'می‌شود', 'میشه', 'هستش',
   'را', 'همه', 'لیست', 'فهرست',
-  // English question / commerce generics
+  // Persian injection / command / common words
+  'تمام', 'قوانین', 'قانون', 'نادیده', 'بگیر', 'بنویس', 'بنویسید',
+  'نویس', 'سایت', 'تومان', 'تومن', 'دلار', 'یورو',
+  'تخفیف', 'رایگان', 'مجانی', 'کد', 'کدتخفیف',
+  'لینک', 'پست', 'ایمیل', 'نشانی', 'آدرس',
+  'ارسال', 'تحویل', 'پیک', 'سفارش', 'باشه', 'باشید',
+  'یک', 'دو', 'سه', 'ده', 'صد', 'هزار', 'میلیون',
+  'همین', 'انجام', 'دهید', 'نمایید', 'فرمایید',
+  'البته', 'واقعا', 'حتما', 'الان', 'فوری',
+  'قول', 'عدم', 'نباید', 'باید',
+  // English question / commerce / injection generics
   'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
   'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'can',
   'could', 'should', 'may', 'might', 'this', 'that', 'these', 'those',
@@ -97,6 +113,10 @@ const GENERIC_TOKENS = new Set<string>([
   'buy', 'purchase', 'product', 'products', 'item', 'items',
   'please', 'hello', 'hi', 'and', 'or', 'but', 'for', 'to', 'from',
   'with', 'about', 'me', 'us',
+  'ignore', 'rules', 'rule', 'all', 'write', 'send', 'link',
+  'site', 'url', 'password', 'credit', 'card', 'evil', 'example',
+  'discount', 'free', 'toman', 'dollar', 'euro',
+  'now', 'urgent', 'must', 'should', 'need',
 ])
 
 // ---------------------------------------------------------------------------
@@ -209,15 +229,24 @@ function splitIntoPhrases(normalizedQuery: string): string[][] {
  *   1. Normalize the query.
  *   2. Split into phrases at generic-token boundaries.
  *   3. If no phrases (all generic or empty) → return [].
- *   4. For each eligible product, check if ALL tokens in at least one
- *      phrase are present in the product's name/description token set.
- *   5. Rank by total phrase-match count (descending), then by product ID
+ *   4. Build a union of ALL eligible products' token sets — this is the
+ *      "known catalog vocabulary." Only tokens that appear in at least
+ *      one product are "known tokens."
+ *   5. For each phrase, filter to ONLY known tokens (tokens that exist
+ *      in at least one product). This strips injection tokens like
+ *      "تمام", "قوانین", "evil.example" that don't appear in any
+ *      product name — they cannot contribute to matching.
+ *   6. A product is a candidate if it matches ALL known tokens in at
+ *      least one filtered phrase. If a phrase has zero known tokens
+ *      (pure injection text), it is ignored.
+ *   7. Rank by total match count (descending), then by product ID
  *      (ascending) for deterministic tie-breaking.
- *   6. Take top MAX_PRODUCT_CANDIDATES (10).
+ *   8. Take top MAX_PRODUCT_CANDIDATES (10).
  *
  * Invariants:
  *   - No partial-word false positives (token equality, not substring).
  *   - Generic-only queries produce zero candidates.
+ *   - Injection tokens not in any product name do not block matching.
  *   - Input DB order does not affect selection (deterministic by ID).
  *   - Candidate IDs are unique.
  *   - Zero candidates → zero model calls (enforced by caller).
@@ -242,8 +271,12 @@ export function retrieveProductCandidates(
   }
   if (eligible.length === 0) return []
 
-  // Match: a product is a candidate if ALL tokens in at least one phrase
-  // are in its token set. Collect matched terms per product (in query order).
+  // Match: a product is a candidate if ALL tokens in at least one
+  // phrase are in its token set. Generic tokens have already been
+  // stripped (they act as phrase separators), so phrases contain only
+  // meaningful tokens. Injection tokens that are NOT generic (e.g.,
+  // "evil.example") will prevent a full phrase match — this is correct
+  // because they're in a separate phrase from the product tokens.
   const candidates: Array<{
     product: ProductCandidate
     matchCount: number
@@ -260,7 +293,6 @@ export function retrieveProductCandidates(
       if (allMatch) {
         isCandidate = true
         totalMatches += phrase.length
-        // Collect matched terms in query order (deduplicated).
         for (const token of phrase) {
           if (!matchedTerms.includes(token)) {
             matchedTerms.push(token)
@@ -281,8 +313,6 @@ export function retrieveProductCandidates(
     return a.product.id < b.product.id ? -1 : a.product.id > b.product.id ? 1 : 0
   })
 
-  // Take top MAX_PRODUCT_CANDIDATES. IDs are unique by construction (each
-  // eligible product appears at most once).
   const top = candidates.slice(0, MAX_PRODUCT_CANDIDATES)
 
   return top.map((c) => ({
