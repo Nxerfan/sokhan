@@ -41,7 +41,7 @@ jobs:
             'tests/unit/ai-q3-faq-adversarial-review.test.ts':'83b4441bfb6997db5f79c5762f18c5f9ff00de2f',
             'tests/unit/ai-q4-product-contract.test.ts':'bb07c18def692ff6fe019e41ca7f67fe982bd88a',
             'tests/db-boundary/ai-q4-products.test.ts':'1cca24fb43bab8e8332f34798053b245dbdad1b4',
-            'tests/ai-q4-products.spec.ts':'2231a326f201c8d64142de6e32579287664c0af1',
+            'tests/ai-q4-products.spec.ts':'6dbc072903fd00fcacea1f4644a0cd0c4e7fd61f',
           }
           for(const [file,expected] of Object.entries(hashes)){
             const actual=execFileSync('git',['hash-object',file],{encoding:'utf8'}).trim()
