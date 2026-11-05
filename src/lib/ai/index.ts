@@ -269,13 +269,31 @@ export async function answerProductQuestion(
     return { answered: false, answer: null, productIds: [] }
   }
 
-  // 3. Call the provider ONCE — the output is a go/no-go signal.
-  // The provider's text is NEVER used as the answer.
-  const productContext = candidates.map(p =>
-    `- ${p.name}: ${p.description} | Price: ${p.price} ${(p.currency ?? 'IRT').toUpperCase()} | Availability: ${p.availability}`
-  ).join('\n')
+  // 3. Render the deterministic grounded answer from persisted facts.
+  // This is the PRIMARY path — it works without any external LLM call.
+  // The renderer uses only persisted product data (name, price, currency,
+  // availability) — never model-generated text.
+  const groundedAnswer = renderGroundedAnswer(candidates)
+  if (!groundedAnswer) {
+    // Unsupported currency or render failure — fail closed.
+    return { answered: false, answer: null, productIds: [] }
+  }
 
-  const prompt = `You are a product assistant. A visitor asked about a product. Confirm you understand the question.
+  // 4. If an injected provider IS supplied (AI-Q1 test seam), call it
+  // ONCE as a go/no-go signal. The provider's text is NEVER used as the
+  // answer — it only confirms the model acknowledged the request. A blank
+  // or throwing provider produces a safe negative (AI-Q1 compatibility).
+  //
+  // In PRODUCTION (no provider injected), the deterministic path is
+  // sufficient for simple product-name, price and availability questions.
+  // The external LLM is NOT called — the grounded answer is delivered
+  // directly from persisted facts.
+  if (provider) {
+    const productContext = candidates.map(p =>
+      `- ${p.name}: ${p.description} | Price: ${p.price} ${(p.currency ?? 'IRT').toUpperCase()} | Availability: ${p.availability}`
+    ).join('\n')
+
+    const prompt = `You are a product assistant. A visitor asked about a product. Confirm you understand the question.
 
 Visitor question: "${visitorMessage}"
 
@@ -284,42 +302,22 @@ ${productContext}
 
 Respond with a brief acknowledgment.`
 
-  try {
-    let providerOutput: string
-    if (provider) {
-      providerOutput = ((await provider.complete(prompt)) ?? '').trim()
-    } else {
-      const zai = await getZAI()
-      const response = await zai.chat.completions.create({
-        messages: [
-          { role: 'system', content: 'You are a product assistant. Acknowledge the question briefly.' },
-          { role: 'user', content: prompt },
-        ],
-        temperature: 0.1,
-      })
-      providerOutput = response.choices[0]?.message?.content?.trim() ?? ''
-    }
-
-    // 4. Blank / whitespace-only output → safe negative.
-    if (!providerOutput) {
+    try {
+      const providerOutput = ((await provider.complete(prompt)) ?? '').trim()
+      // Blank / whitespace-only output → safe negative (AI-Q1 compatibility).
+      if (!providerOutput) {
+        return { answered: false, answer: null, productIds: [] }
+      }
+    } catch (e) {
+      console.error('[ai:answerProductQuestion] provider error:', e instanceof Error ? e.message : e)
       return { answered: false, answer: null, productIds: [] }
     }
+  }
 
-    // 5. Render the deterministic grounded answer from persisted facts.
-    // The provider's text is discarded — it was only a go/no-go signal.
-    const groundedAnswer = renderGroundedAnswer(candidates)
-    if (!groundedAnswer) {
-      // Unsupported currency or render failure — fail closed.
-      return { answered: false, answer: null, productIds: [] }
-    }
-
-    return {
-      answered: true,
-      answer: groundedAnswer,
-      productIds: candidates.map((c) => c.id),
-    }
-  } catch (e) {
-    console.error('[ai:answerProductQuestion] error:', e instanceof Error ? e.message : e)
-    return { answered: false, answer: null, productIds: [] }
+  // 5. Return the deterministic grounded answer.
+  return {
+    answered: true,
+    answer: groundedAnswer,
+    productIds: candidates.map((c) => c.id),
   }
 }
