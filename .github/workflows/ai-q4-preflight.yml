@@ -1,0 +1,94 @@
+name: AI-Q4 — independent reviewer grounded product acceptance preflight
+on:
+  push:
+    branches:
+      - feat/ai-q4-grounded-products
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  reviewer-ai-q4-preflight:
+    if: github.event_name == 'push' || github.head_ref == 'feat/ai-q4-grounded-products'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Install immutable dependencies
+        run: bun install --frozen-lockfile
+      - name: Generate Prisma client before Playwright import
+        run: bunx prisma generate
+        env:
+          DATABASE_URL: postgresql://user:password@localhost:5432/dummy
+          DIRECT_URL: postgresql://user:password@localhost:5432/dummy
+      - name: Enforce ALL reviewer Q1/Q2/Q3/Q4 acceptance Git blob hashes
+        run: |
+          node --input-type=module <<'NODE'
+          import {execFileSync} from 'node:child_process'
+          const hashes={
+            'tests/unit/ai-q1-contract.test.ts':'c4ebfd333c3a87b9b8568306e7136b5f63ab9ffe',
+            'tests/ai-q1-config.spec.ts':'da4085c92f5db1f9c447c2d96a065ab25fbf2cd0',
+            'tests/unit/ai-q2-policy.test.ts':'4ea2e9b52dc6e3e657ccc090dc5c14a092d7fa5a',
+            'tests/db-boundary/ai-q2-usage.test.ts':'aa8959f7337fcf66e0c04decb0af9f765e92733b',
+            'tests/ai-q2-usage.spec.ts':'9769f4ca8d2779e829e783b0d9c03401935c22ff',
+            'tests/unit/ai-q3-faq-contract.test.ts':'5038fb8036b8699bb9c048c58a82007ddf6938ba',
+            'tests/db-boundary/ai-q3-faq.test.ts':'fbe9032979f62d3546438725c446aabd2d28f28f',
+            'tests/ai-q3-faq.spec.ts':'4b73548ba4dab02b551993ae46e3c3d5f8bf2355',
+            'tests/unit/ai-q3-faq-adversarial-review.test.ts':'83b4441bfb6997db5f79c5762f18c5f9ff00de2f',
+            'tests/unit/ai-q4-product-contract.test.ts':'bb07c18def692ff6fe019e41ca7f67fe982bd88a',
+            'tests/db-boundary/ai-q4-products.test.ts':'1cca24fb43bab8e8332f34798053b245dbdad1b4',
+            'tests/ai-q4-products.spec.ts':'2231a326f201c8d64142de6e32579287664c0af1',
+          }
+          for(const [file,expected] of Object.entries(hashes)){
+            const actual=execFileSync('git',['hash-object',file],{encoding:'utf8'}).trim()
+            if(actual!==expected)throw Error('Reviewer-owned acceptance content modified: '+file)
+            console.log('Reviewer integrity OK: '+file)
+          }
+          NODE
+      - name: Syntax-check three reviewer-owned AI-Q4 test suites
+        run: |
+          node --input-type=module <<'NODE'
+          import ts from 'typescript'
+          import {readFileSync} from 'node:fs'
+          for(const file of [
+            'tests/unit/ai-q4-product-contract.test.ts',
+            'tests/db-boundary/ai-q4-products.test.ts',
+            'tests/ai-q4-products.spec.ts',
+          ]){
+            const source=ts.createSourceFile(file,readFileSync(file,'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TS)
+            if(source.parseDiagnostics.length){
+              for(const diagnostic of source.parseDiagnostics)
+                console.error(file+': '+ts.flattenDiagnosticMessageText(diagnostic.messageText,'\n'))
+              process.exitCode=1
+            }else console.log('Syntax OK: '+file)
+          }
+          NODE
+      - name: Verify Full/Lite browser and full Unit/DB coverage has not been narrowed
+        run: |
+          node --input-type=module <<'NODE'
+          import {readFileSync} from 'node:fs'
+          const ci=readFileSync('.github/workflows/ci.yml','utf8')
+          for(const cmd of ['bun test tests/unit/','bun test tests/db-boundary/']){
+            if(!ci.includes(cmd))throw Error('Full regression removed: '+cmd)
+          }
+          const full=ci.split('name: Run Full regression tests - main and other PRs')[1]?.split('name: Print Full container logs on failure')[0]??''
+          const lite=ci.split('name: Run Lite regression tests - main and other PRs')[1]?.split('name: Print Lite container logs on failure')[0]??''
+          for(const [label,part] of [['Full',full],['Lite',lite]]){
+            for(const suite of [
+              'tests/ai-q1-config.spec.ts','tests/ai-q2-usage.spec.ts',
+              'tests/ai-q3-faq.spec.ts','tests/ai-q4-products.spec.ts',
+              'tests/auth-session-stress.spec.ts',
+            ]){
+              if(!part.includes(suite))throw Error(label+' missing mandatory browser suite: '+suite)
+              console.log(label+' includes '+suite)
+            }
+          }
+          NODE
+      - name: Enumerate reviewer AI-Q4 browser cases
+        run: bunx playwright test tests/ai-q4-products.spec.ts --list
+      - name: Run actual reviewer AI-Q4 policy tests
+        run: bun test tests/unit/ai-q4-product-contract.test.ts
