@@ -49,7 +49,7 @@ jobs:
             'tests/unit/ai-q5-human-takeover-contract.test.ts':'0c907672b31dc896488a3fcab62e0b0c50789634',
             'tests/db-boundary/ai-q5-human-takeover.test.ts':'69fe3c6b8aaee6dea744e1d9f6e258848a5405a7',
             'tests/db-boundary/ai-q5-commit-race-review.test.ts':'14deb3e698f460a3a4d19392d71cbfff0c3290d4',
-            'tests/db-boundary/ai-q5-concurrent-settlement-review.test.ts':'fd2761d8055c4e98e87b9ba1cbea2b43c501322b',
+            'tests/db-boundary/ai-q5-concurrent-settlement-review.test.ts':'c9ad1d2c0ddfc006bd1dd15067c478cd6987f2d2',
             'tests/ai-q5-human-takeover.spec.ts':'ecd0271c38abe39a9ccbaf51ca09a2d1f2620f41',
           }
           for(const [file,sha] of Object.entries(expected)){
