@@ -701,9 +701,16 @@ async function tryAiResponse(
 
     // Feature 2: Product Q&A (if enabled)
     if (!generated && aiConfig.productQaEnabled) {
+      // Bounded catalog retrieval: read up to 500 products per tenant to
+      // prevent unbounded memory consumption on very large catalogs. The
+      // ambiguity check in retrieveProductCandidates runs across ALL
+      // retrieved records before top-10 truncation — this limit does NOT
+      // silently hide conflicts within the retrieved set. 500 covers any
+      // realistic tenant catalog while bounding memory/latency.
       const products = await db.product.findMany({
         where: { tenantId },
         select: { id: true, name: true, description: true, price: true, availability: true, currency: true },
+        take: 500,
       })
 
       if (products.length > 0) {

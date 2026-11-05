@@ -71,6 +71,21 @@ export const MAX_PRODUCT_CANDIDATES = 10
 const SUPPORTED_AVAILABILITY = new Set(['in_stock', 'limited', 'out_of_stock'])
 
 /**
+ * Explicitly supported currency codes. Only these may be rendered as
+ * legitimate price units. Any other value (including merchant-controlled
+ * injection text like "USD FREE SHIPPING") is rejected — the product
+ * fails closed.
+ *
+ * - IRT: Iranian Toman — rendered with Persian digits + "تومان" label.
+ * - USD: United States Dollar — rendered with ASCII digits + "USD" label.
+ * - IRR: Iranian Rial — rendered with ASCII digits + "IRR" label (NOT
+ *   silently converted to Toman).
+ *
+ * No currency conversion rates are ever invented.
+ */
+const SUPPORTED_CURRENCIES = new Set(['IRT', 'USD', 'IRR'])
+
+/**
  * Generic commerce / question stop-words in Persian and English.
  * These never independently qualify a product. They also act as phrase
  * separators in multi-product queries (e.g. "و" = "and") and strip
@@ -165,7 +180,10 @@ export function normalizeProductQuery(input: string): string {
  *   - name: non-empty string
  *   - price: finite, nonnegative integer
  *   - availability: one of the supported states
- *   - currency (if present): non-empty string
+ *   - currency (if present): must be one of SUPPORTED_CURRENCIES (IRT, USD, IRR).
+ *     Undefined currency defaults to IRT. Arbitrary strings like "FAKE",
+ *     "ZZZ", or "USD FREE SHIPPING" are rejected — they can never produce a
+ *     billable product answer.
  */
 export function isEligibleProduct(p: unknown): p is ProductCandidate {
   if (p === null || typeof p !== 'object') return false
@@ -175,7 +193,11 @@ export function isEligibleProduct(p: unknown): p is ProductCandidate {
   if (typeof obj.price !== 'number' || !Number.isFinite(obj.price)) return false
   if (!Number.isInteger(obj.price) || obj.price < 0) return false
   if (typeof obj.availability !== 'string' || !SUPPORTED_AVAILABILITY.has(obj.availability)) return false
-  if (obj.currency !== undefined && (typeof obj.currency !== 'string' || !obj.currency.trim())) return false
+  if (obj.currency !== undefined) {
+    if (typeof obj.currency !== 'string') return false
+    const cur = obj.currency.trim().toUpperCase()
+    if (!cur || !SUPPORTED_CURRENCIES.has(cur)) return false
+  }
   return true
 }
 
@@ -226,29 +248,26 @@ function splitIntoPhrases(normalizedQuery: string): string[][] {
  * Retrieve eligible product candidates for a visitor query.
  *
  * Algorithm:
- *   1. Normalize the query.
- *   2. Split into phrases at generic-token boundaries.
- *   3. If no phrases (all generic or empty) → return [].
- *   4. Build a union of ALL eligible products' token sets — this is the
- *      "known catalog vocabulary." Only tokens that appear in at least
- *      one product are "known tokens."
- *   5. For each phrase, filter to ONLY known tokens (tokens that exist
- *      in at least one product). This strips injection tokens like
- *      "تمام", "قوانین", "evil.example" that don't appear in any
- *      product name — they cannot contribute to matching.
- *   6. A product is a candidate if it matches ALL known tokens in at
- *      least one filtered phrase. If a phrase has zero known tokens
- *      (pure injection text), it is ignored.
- *   7. Rank by total match count (descending), then by product ID
- *      (ascending) for deterministic tie-breaking.
- *   8. Take top MAX_PRODUCT_CANDIDATES (10).
+ *   1. Normalize the query → split into phrases at generic-token boundaries.
+ *   2. Filter eligible products (valid metadata + supported currency).
+ *   3. Deduplicate by product ID. If the same ID has conflicting factual
+ *      data (price, availability, currency), treat as ambiguous → return [].
+ *   4. Match: a product is a candidate if ALL tokens in at least one
+ *      phrase match its name/description token set exactly.
+ *   5. Detect ambiguity across ALL matching candidates (same normalized
+ *      name + conflicting price, availability, OR currency). This runs
+ *      BEFORE top-K truncation so a conflicting 11th product cannot be
+ *      hidden. If ambiguous → return [].
+ *   6. Rank by match count (descending), then product ID (ascending).
+ *   7. Take top MAX_PRODUCT_CANDIDATES (10).
  *
  * Invariants:
  *   - No partial-word false positives (token equality, not substring).
  *   - Generic-only queries produce zero candidates.
  *   - Injection tokens not in any product name do not block matching.
+ *   - Ambiguity is detected on the FULL matching set BEFORE truncation.
+ *   - Candidate IDs are unique (deduplicated).
  *   - Input DB order does not affect selection (deterministic by ID).
- *   - Candidate IDs are unique.
  *   - Zero candidates → zero model calls (enforced by caller).
  *   - Never mutates input records.
  */
@@ -262,22 +281,32 @@ export function retrieveProductCandidates(
   const phrases = splitIntoPhrases(normalizedQuery)
   if (phrases.length === 0) return []
 
-  // Filter eligible products and build their token sets.
-  const eligible: Array<{ product: ProductCandidate; tokens: Set<string> }> = []
+  // Filter eligible products, deduplicate by ID (BLOCKER 4).
+  const seenIds = new Map<string, { product: ProductCandidate; tokens: Set<string> }>()
+  let duplicateConflict = false
   for (const p of products) {
-    if (isEligibleProduct(p)) {
-      eligible.push({ product: p, tokens: productTokenSet(p) })
+    if (!isEligibleProduct(p)) continue
+    const existing = seenIds.get(p.id)
+    if (existing) {
+      // Duplicate ID — check for conflicting factual data.
+      const a = existing.product
+      const b = p
+      if (a.price !== b.price || a.availability !== b.availability ||
+          (a.currency ?? 'IRT').toUpperCase() !== (b.currency ?? 'IRT').toUpperCase()) {
+        duplicateConflict = true
+      }
+      // Keep the first occurrence (deterministic). Do not mutate caller data.
+      continue
     }
+    seenIds.set(p.id, { product: p, tokens: productTokenSet(p) })
   }
+  if (duplicateConflict) return []
+  const eligible = Array.from(seenIds.values())
   if (eligible.length === 0) return []
 
   // Match: a product is a candidate if ALL tokens in at least one
-  // phrase are in its token set. Generic tokens have already been
-  // stripped (they act as phrase separators), so phrases contain only
-  // meaningful tokens. Injection tokens that are NOT generic (e.g.,
-  // "evil.example") will prevent a full phrase match — this is correct
-  // because they're in a separate phrase from the product tokens.
-  const candidates: Array<{
+  // phrase match its token set.
+  const allCandidates: Array<{
     product: ProductCandidate
     matchCount: number
     matchedTerms: string[]
@@ -302,18 +331,27 @@ export function retrieveProductCandidates(
     }
 
     if (isCandidate) {
-      candidates.push({ product, matchCount: totalMatches, matchedTerms })
+      allCandidates.push({ product, matchCount: totalMatches, matchedTerms })
     }
   }
 
-  // Rank: higher match count first, then by product ID (ascending) for
-  // deterministic tie-breaking independent of input DB order.
-  candidates.sort((a, b) => {
+  if (allCandidates.length === 0) return []
+
+  // BLOCKER 1+3: Detect ambiguity on the FULL matching set BEFORE
+  // top-K truncation. Same normalized name + conflicting price,
+  // availability, OR currency → fail closed.
+  const ambiguous = detectAmbiguousCandidates(
+    allCandidates.map((c) => ({ ...c.product, matchedTerms: c.matchedTerms })),
+  )
+  if (ambiguous.size > 0) return []
+
+  // Rank: higher match count first, then product ID (ascending).
+  allCandidates.sort((a, b) => {
     if (b.matchCount !== a.matchCount) return b.matchCount - a.matchCount
     return a.product.id < b.product.id ? -1 : a.product.id > b.product.id ? 1 : 0
   })
 
-  const top = candidates.slice(0, MAX_PRODUCT_CANDIDATES)
+  const top = allCandidates.slice(0, MAX_PRODUCT_CANDIDATES)
 
   return top.map((c) => ({
     ...c.product,
@@ -327,18 +365,20 @@ export function retrieveProductCandidates(
 
 /**
  * Detect ambiguous candidates: products with identical normalized names
- * but conflicting prices or availability. If the query does not
- * distinguish them (same matched terms), the caller should fail closed.
+ * but conflicting prices, availability, OR currencies. If the query does
+ * not distinguish them (same matched terms), the caller should fail closed.
+ *
+ * Currency is a monetary fact: the same numeric price in IRT vs USD is a
+ * different amount. Conflicting currencies are always ambiguous.
  *
  * Returns the set of ambiguous product IDs (products that share a
  * normalized name with at least one other candidate that has a different
- * price or availability).
+ * price, availability, or currency).
  */
 export function detectAmbiguousCandidates(
   candidates: ReadonlyArray<RetrievedProduct>,
 ): Set<string> {
   const ambiguous = new Set<string>()
-  // Group by normalized name + matchedTerms signature.
   const groups = new Map<string, RetrievedProduct[]>()
   for (const c of candidates) {
     const key = normalizeProductQuery(c.name)
@@ -351,11 +391,14 @@ export function detectAmbiguousCandidates(
   }
   for (const group of groups.values()) {
     if (group.length < 2) continue
-    // Check for conflicting price or availability.
     const firstPrice = group[0].price
     const firstAvail = group[0].availability
+    const firstCur = (group[0].currency ?? 'IRT').toUpperCase()
     const hasConflict = group.some(
-      (p) => p.price !== firstPrice || p.availability !== firstAvail,
+      (p) =>
+        p.price !== firstPrice ||
+        p.availability !== firstAvail ||
+        (p.currency ?? 'IRT').toUpperCase() !== firstCur,
     )
     if (hasConflict) {
       for (const p of group) {
@@ -379,14 +422,21 @@ const AVAILABILITY_LABELS: Record<string, string> = {
 
 /**
  * Render a price in the product's currency.
- * - IRT: render in Toman (تومان).
- * - USD: render as USD.
- * - Other: render the raw currency code.
- * - Unsupported/missing: return null (caller fails closed).
+ *
+ * Only explicitly supported currencies (IRT, USD, IRR) are rendered.
+ * Unsupported or malformed currency values return null → fail closed.
+ *
+ * - IRT: render in Toman (تومان) with Persian digits.
+ * - USD: render as "USD" with ASCII digits.
+ * - IRR: render as "IRR" with ASCII digits (NOT silently converted to Toman).
+ *
+ * No currency conversion rates are ever invented. Merchant-controlled
+ * currency text (e.g. "USD FREE SHIPPING") is rejected by isEligibleProduct
+ * and never reaches this function.
  */
 function formatPrice(price: number, currency?: string): { value: string; label: string } | null {
   const cur = (currency ?? 'IRT').trim().toUpperCase()
-  // Render the numeric value with Persian digits for IRT, ASCII otherwise.
+  if (!SUPPORTED_CURRENCIES.has(cur)) return null
   const toPersianDigits = (s: string): string =>
     s.replace(/[0-9]/g, (d) => String.fromCharCode(0x06F0 + Number(d)))
   if (cur === 'IRT') {
@@ -395,9 +445,8 @@ function formatPrice(price: number, currency?: string): { value: string; label: 
   if (cur === 'USD') {
     return { value: String(price), label: 'USD' }
   }
-  // Other currencies: render the code as-is. Do NOT convert or guess.
-  if (cur && cur !== 'IRT') {
-    return { value: String(price), label: cur }
+  if (cur === 'IRR') {
+    return { value: String(price), label: 'IRR' }
   }
   return null
 }
