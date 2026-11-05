@@ -13,6 +13,7 @@ import { resolveEffectivePreChatForm } from '@/lib/widget/effective-pre-chat-for
 import { shouldRequirePreChat, isPreChatComplete } from '@/lib/widget/pre-chat-form-policy'
 import { resolveEffectiveContextChat } from '@/lib/widget/effective-context-chat'
 import { acceptPageContext, type PageContext } from '@/lib/widget/context-chat-types'
+import type { ProductCandidate } from '@/lib/ai/product-policy'
 
 const MAX_MESSAGE_LENGTH = 5000
 const MAX_MESSAGES_PER_CONVERSATION = 200
@@ -650,6 +651,11 @@ async function tryAiResponse(
   const { matchFaq, answerProductQuestion } = await import('@/lib/ai')
   const { resolveExactFaq } = await import('@/lib/ai/faq-policy')
   const { reserveAiReply, commitAiReply, releaseAiReply } = await import('@/lib/ai/usage-service')
+  const {
+    isQueryEligibleForCatalogScan,
+    streamProductCandidates,
+    renderGroundedAnswer,
+  } = await import('@/lib/ai/product-policy')
 
   // Load AI config
   const aiConfig = await db.aiConfig.findUnique({ where: { tenantId } })
@@ -701,17 +707,72 @@ async function tryAiResponse(
 
     // Feature 2: Product Q&A (if enabled)
     if (!generated && aiConfig.productQaEnabled) {
-      const products = await db.product.findMany({
-        where: { tenantId },
-        select: { id: true, name: true, description: true, price: true, availability: true },
-      })
+      // BLOCKER 2: Pre-scan query eligibility gate. Reject blank,
+      // stopword-only, or provably ineligible queries BEFORE any catalog
+      // database read.
+      if (isQueryEligibleForCatalogScan(visitorMessage)) {
+        // BLOCKER 3: Use a PostgreSQL REPEATABLE READ transaction to
+        // guarantee a consistent point-in-time snapshot across all batch
+        // reads. This prevents concurrent product modifications from
+        // producing mixed-version or contradictory answers.
+        //
+        // The transaction is bounded by a 10-second timeout. If the scan
+        // exceeds the budget (e.g. extremely large catalog), the
+        // transaction aborts and we fail closed (reservation released,
+        // no answer, no charge).
+        //
+        // All reads inside the transaction (scan batches + candidate
+        // verification) see the SAME snapshot. No separate post-scan
+        // re-fetch is needed — the scan data IS the consistent data.
+        // BLOCKER 2: Description is part of the matching logic, so it's
+        // included in the select and verified by the consistent snapshot.
+        const BATCH_SIZE = 200
+        try {
+          const txResult = await db.$transaction(async (tx) => {
+            const fetchBatch = async (cursor?: string) => {
+              const batch = await tx.product.findMany({
+                where: { tenantId },
+                select: { id: true, name: true, description: true, price: true, availability: true, currency: true },
+                orderBy: { id: 'asc' },
+                take: BATCH_SIZE,
+                ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
+              })
+              return {
+                products: batch as ReadonlyArray<ProductCandidate>,
+                hasMore: batch.length === BATCH_SIZE,
+                nextCursor: batch.length > 0 ? batch[batch.length - 1].id : undefined,
+              }
+            }
 
-      if (products.length > 0) {
-        const result = await answerProductQuestion(visitorMessage, products)
-        if (result.answered && result.answer) {
-          generated = { text: result.answer, source: 'product' }
+            const scanResult = await streamProductCandidates(visitorMessage, fetchBatch)
+
+            // Fail closed on ambiguity or resource exhaustion.
+            if (scanResult.ambiguous || scanResult.incomplete || scanResult.candidates.length === 0) {
+              return null
+            }
+
+            // Render the grounded answer from the scan candidates.
+            // The REPEATABLE READ snapshot guarantees this data is
+            // consistent — no concurrent modification could have
+            // changed any product's facts between batch reads.
+            const groundedAnswer = renderGroundedAnswer(scanResult.candidates)
+            if (!groundedAnswer) return null
+            return { text: groundedAnswer, source: 'product' as const }
+          }, {
+            isolationLevel: 'RepeatableRead' as const,
+            timeout: 10000, // 10-second bounded transaction
+          })
+
+          if (txResult) {
+            generated = txResult
+          }
+        } catch (e) {
+          // Transaction timeout or failure → fail closed.
+          // generated stays null → reservation released without charge.
+          console.error('[widget:messages] product scan transaction error:', e instanceof Error ? e.message : e)
         }
       }
+      // If query not eligible → generated stays null → reservation released.
     }
   } catch (e) {
     console.error('[widget:messages] AI generation error:', e instanceof Error ? e.message : e)

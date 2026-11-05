@@ -30,8 +30,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'email_already_registered' }, { status: 409 })
   }
 
-  // Check slug availability
-  const slug = workspaceSlug || workspaceName.trim().toLowerCase().replace(/[^a-z0-9\u0600-\u06FF]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24)
+  // Check slug availability. Slug is derived from the workspace name:
+  // lowercase, non-alphanumeric (except Persian) → dashes, trimmed.
+  // Limited to 60 characters to preserve URL-friendliness while
+  // accommodating unique markers (timestamps, random suffixes) that
+  // distinguish workspaces with shared prefixes. The previous 24-char
+  // limit caused collisions for workspaces with long common prefixes.
+  const slug = workspaceSlug || workspaceName.trim().toLowerCase().replace(/[^a-z0-9\u0600-\u06FF]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60)
   const slugTaken = await db.tenant.findUnique({ where: { slug } })
   if (slugTaken) {
     return NextResponse.json({ error: 'slug_taken' }, { status: 409 })
