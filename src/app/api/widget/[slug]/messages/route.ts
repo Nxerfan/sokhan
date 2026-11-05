@@ -701,20 +701,31 @@ async function tryAiResponse(
 
     // Feature 2: Product Q&A (if enabled)
     if (!generated && aiConfig.productQaEnabled) {
-      // Bounded catalog retrieval: read up to 500 products per tenant to
-      // prevent unbounded memory consumption on very large catalogs. The
-      // ambiguity check in retrieveProductCandidates runs across ALL
-      // retrieved records before top-10 truncation — this limit does NOT
-      // silently hide conflicts within the retrieved set. 500 covers any
-      // realistic tenant catalog while bounding memory/latency.
-      const products = await db.product.findMany({
-        where: { tenantId },
-        select: { id: true, name: true, description: true, price: true, availability: true, currency: true },
-        take: 500,
-      })
+      // Bounded-memory keyset pagination: retrieve ALL tenant products in
+      // batches of 200 using cursor pagination with stable ordering by id.
+      // This ensures detectAmbiguityInFullSet receives the COMPLETE relevant
+      // catalog — no silent truncation that could hide conflicting records
+      // (e.g. a 501st same-name product with a different price). Each
+      // database read is bounded (200 rows); the accumulated array holds
+      // all products for the ambiguity scan.
+      const BATCH_SIZE = 200
+      const allProducts: Array<{ id: string; name: string; description: string; price: number; availability: string; currency: string }> = []
+      let cursor: string | undefined = undefined
+      while (true) {
+        const batch = await db.product.findMany({
+          where: { tenantId },
+          select: { id: true, name: true, description: true, price: true, availability: true, currency: true },
+          orderBy: { id: 'asc' },
+          take: BATCH_SIZE,
+          ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
+        })
+        allProducts.push(...batch)
+        if (batch.length < BATCH_SIZE) break
+        cursor = batch[batch.length - 1].id
+      }
 
-      if (products.length > 0) {
-        const result = await answerProductQuestion(visitorMessage, products)
+      if (allProducts.length > 0) {
+        const result = await answerProductQuestion(visitorMessage, allProducts)
         if (result.answered && result.answer) {
           generated = { text: result.answer, source: 'product' }
         }
