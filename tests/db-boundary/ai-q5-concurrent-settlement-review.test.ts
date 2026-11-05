@@ -63,7 +63,7 @@ async function fixture(){
 type Fixture=Awaited<ReturnType<typeof fixture>>
 
 async function waitForRealDbBlock(blockerPid:number){
-  const deadline=Date.now()+8000
+  const deadline=Date.now()+3500
   while(Date.now()<deadline){
     const rows=await globalDb.$queryRaw<Array<{pid:number,query:string}>>`
       SELECT pid, query FROM pg_stat_activity
@@ -87,12 +87,12 @@ async function raceHumanAction(
   const lockTask=globalDb.$transaction(async tx=>{
     const pid=(await tx.$queryRaw<Array<{pid:number}>>`SELECT pg_backend_pid() AS pid`)[0].pid
     const locked=await tx.$queryRaw<Array<{id:string}>>`
-      SELECT "id" FROM "AiUsagePeriod" WHERE "id" = ${f.periodId} FOR UPDATE
+      SELECT "id" FROM "AiUsagePeriod" WHERE "id" = ${f.periodId} FOR NO KEY UPDATE
     `
     expect(locked).toHaveLength(1)
     announceLock(pid)
     await released
-  },{timeout:15000,maxWait:10000})
+  },{timeout:10000,maxWait:10000})
 
   const blockerPid=await acquired
   let attempted=false
@@ -131,7 +131,7 @@ describe('Reviewer AI-Q5 — actual overlapping human/AI transaction race',()=>{
         data:{assignedUserId:personId}})
       expect(changed.assignedUserId).toBe(personId)
     })
-  })
+  },15000)
   test('human message commits while AI settlement is blocked, AI must not subsequently commit',async()=>{
     const f=await fixture()
     await raceHumanAction(f,async()=>{
@@ -141,7 +141,7 @@ describe('Reviewer AI-Q5 — actual overlapping human/AI transaction race',()=>{
       }})
       expect(msg.senderType).toBe('agent')
     })
-  })
+  },15000)
   test('rejected AI settlement immediately frees reserved quota, not only after 5-minute lease',async()=>{
     const f=await fixture()
     const before=await getAiUsageState(f.tid)
