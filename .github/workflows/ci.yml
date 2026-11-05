@@ -40,7 +40,7 @@ jobs:
       # Run exactly the relevant immutable unit contracts, not unrelated product/dashboard suites.
       - name: Unit tests - AI-Q4 scoped Q1/Q2/Q3 compatibility and Product Q&A
         if: github.event_name == 'pull_request' && github.head_ref == 'feat/ai-q4-grounded-products'
-        run: bun test tests/unit/ai-q4-product-contract.test.ts tests/unit/ai-q4-adversarial-review.test.ts tests/unit/ai-q1-contract.test.ts tests/unit/ai-q2-policy.test.ts tests/unit/ai-q3-faq-contract.test.ts tests/unit/ai-q3-faq-adversarial-review.test.ts
+        run: bun test tests/unit/ai-q4-product-contract.test.ts tests/unit/ai-q4-adversarial-review.test.ts tests/unit/ai-q4-streaming-adversarial-review.test.ts tests/unit/ai-q4-catalog-resource.test.ts tests/unit/ai-q1-contract.test.ts tests/unit/ai-q2-policy.test.ts tests/unit/ai-q3-faq-contract.test.ts tests/unit/ai-q3-faq-adversarial-review.test.ts
       - name: Unit tests - full regression (main and other PRs)
         if: github.event_name != 'pull_request' || (github.head_ref != 'feat/ai-q2-atomic-usage' && github.head_ref != 'feat/ai-q4-grounded-products')
         run: bun test tests/unit/
