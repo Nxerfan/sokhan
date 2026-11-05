@@ -13,6 +13,7 @@ import { resolveEffectivePreChatForm } from '@/lib/widget/effective-pre-chat-for
 import { shouldRequirePreChat, isPreChatComplete } from '@/lib/widget/pre-chat-form-policy'
 import { resolveEffectiveContextChat } from '@/lib/widget/effective-context-chat'
 import { acceptPageContext, type PageContext } from '@/lib/widget/context-chat-types'
+import type { ProductCandidate } from '@/lib/ai/product-policy'
 
 const MAX_MESSAGE_LENGTH = 5000
 const MAX_MESSAGES_PER_CONVERSATION = 200
@@ -650,6 +651,12 @@ async function tryAiResponse(
   const { matchFaq, answerProductQuestion } = await import('@/lib/ai')
   const { resolveExactFaq } = await import('@/lib/ai/faq-policy')
   const { reserveAiReply, commitAiReply, releaseAiReply } = await import('@/lib/ai/usage-service')
+  const {
+    isQueryEligibleForCatalogScan,
+    streamProductCandidates,
+    renderGroundedAnswer,
+    normalizeProductQuery: normalizeProductQueryLocal,
+  } = await import('@/lib/ai/product-policy')
 
   // Load AI config
   const aiConfig = await db.aiConfig.findUnique({ where: { tenantId } })
@@ -701,35 +708,87 @@ async function tryAiResponse(
 
     // Feature 2: Product Q&A (if enabled)
     if (!generated && aiConfig.productQaEnabled) {
-      // Bounded-memory keyset pagination: retrieve ALL tenant products in
-      // batches of 200 using cursor pagination with stable ordering by id.
-      // This ensures detectAmbiguityInFullSet receives the COMPLETE relevant
-      // catalog — no silent truncation that could hide conflicting records
-      // (e.g. a 501st same-name product with a different price). Each
-      // database read is bounded (200 rows); the accumulated array holds
-      // all products for the ambiguity scan.
-      const BATCH_SIZE = 200
-      const allProducts: Array<{ id: string; name: string; description: string; price: number; availability: string; currency: string }> = []
-      let cursor: string | undefined = undefined
-      while (true) {
-        const batch = await db.product.findMany({
-          where: { tenantId },
-          select: { id: true, name: true, description: true, price: true, availability: true, currency: true },
-          orderBy: { id: 'asc' },
-          take: BATCH_SIZE,
-          ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
-        })
-        allProducts.push(...batch)
-        if (batch.length < BATCH_SIZE) break
-        cursor = batch[batch.length - 1].id
-      }
-
-      if (allProducts.length > 0) {
-        const result = await answerProductQuestion(visitorMessage, allProducts)
-        if (result.answered && result.answer) {
-          generated = { text: result.answer, source: 'product' }
+      // BLOCKER 2: Pre-scan query eligibility gate. Reject blank,
+      // stopword-only, or provably ineligible queries BEFORE any catalog
+      // database read. This prevents unnecessary full-catalog scans for
+      // irrelevant visitor messages.
+      if (isQueryEligibleForCatalogScan(visitorMessage)) {
+        // BLOCKER 1: Bounded-memory streaming catalog scan. Products are
+        // scanned in batches of 200 via keyset pagination WITHOUT
+        // materializing the full catalog in memory. Each batch is
+        // discarded after processing. Memory is bounded by:
+        //   - 1 batch (200 products, discarded after processing)
+        //   - Conflict map (distinct matching names, typically 1–10)
+        //   - Candidate list (max 15, pruned between batches)
+        const BATCH_SIZE = 200
+        const fetchBatch = async (cursor?: string) => {
+          const batch = await db.product.findMany({
+            where: { tenantId },
+            select: { id: true, name: true, description: true, price: true, availability: true, currency: true },
+            orderBy: { id: 'asc' },
+            take: BATCH_SIZE,
+            ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
+          })
+          return {
+            products: batch as ReadonlyArray<ProductCandidate>,
+            hasMore: batch.length === BATCH_SIZE,
+            nextCursor: batch.length > 0 ? batch[batch.length - 1].id : undefined,
+          }
         }
+
+        const scanResult = await streamProductCandidates(visitorMessage, fetchBatch)
+
+        // BLOCKER 1+3: Fail closed on ambiguity or resource exhaustion.
+        // Release the reservation without persisting or charging.
+        if (!scanResult.ambiguous && !scanResult.incomplete && scanResult.candidates.length > 0) {
+          // BLOCKER 3: Post-scan consistency check. Re-fetch each
+          // candidate's CURRENT data from the database. If any
+          // candidate's price, availability, currency, or name changed
+          // since the scan (concurrent catalog modification), fail
+          // closed — the answer would be based on stale data.
+          // This is lightweight (at most 10 findUnique queries) and
+          // does NOT hold any database locks or transactions.
+          const candidateIds = scanResult.candidates.map((c) => c.id)
+          const currentProducts = await db.product.findMany({
+            where: { id: { in: candidateIds }, tenantId },
+            select: { id: true, name: true, description: true, price: true, availability: true, currency: true },
+          })
+
+          // Verify every candidate still exists with unchanged facts.
+          let consistent = currentProducts.length === scanResult.candidates.length
+          if (consistent) {
+            for (const current of currentProducts) {
+              const scanned = scanResult.candidates.find((c) => c.id === current.id)
+              if (!scanned) { consistent = false; break }
+              const cur = (c: { currency?: string }) => (c.currency ?? 'IRT').toUpperCase()
+              if (scanned.price !== current.price ||
+                  scanned.availability !== current.availability ||
+                  cur(scanned) !== cur(current) ||
+                  normalizeProductQueryLocal(scanned.name) !== normalizeProductQueryLocal(current.name)) {
+                consistent = false
+                break
+              }
+            }
+          }
+
+          if (consistent) {
+            // Render the grounded answer from the verified current data.
+            const groundedAnswer = renderGroundedAnswer(
+              scanResult.candidates.map((c) => {
+                const current = currentProducts.find((p) => p.id === c.id)!
+                return { ...current, matchedTerms: c.matchedTerms }
+              }),
+            )
+            if (groundedAnswer) {
+              generated = { text: groundedAnswer, source: 'product' }
+            }
+          }
+          // If inconsistent → generated stays null → reservation released.
+        }
+        // If ambiguous/incomplete/no candidates → generated stays null →
+        // reservation released without charge (AI-Q2 atomic billing).
       }
+      // If query not eligible → generated stays null → reservation released.
     }
   } catch (e) {
     console.error('[widget:messages] AI generation error:', e instanceof Error ? e.message : e)

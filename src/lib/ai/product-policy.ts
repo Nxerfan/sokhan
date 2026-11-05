@@ -556,6 +556,194 @@ export interface GroundedProductResult {
   productIds: string[]
 }
 
+// ---------------------------------------------------------------------------
+// Bounded-memory streaming catalog scan (BLOCKER 1+2+3)
+// ---------------------------------------------------------------------------
+
+/** A batch of products returned by a ProductBatchReader. */
+export interface ProductBatch {
+  products: ReadonlyArray<ProductCandidate>
+  hasMore: boolean
+  nextCursor?: string
+}
+
+/** Callback that fetches one bounded batch of tenant products. */
+export type ProductBatchReader = (cursor?: string) => Promise<ProductBatch>
+
+/** Maximum number of batches scanned before failing closed (resource budget). */
+const MAX_SCAN_BATCHES = 50 // 50 × 200 = 10,000 products max
+
+/** Candidates kept between batches for ranking (slightly > MAX for tie safety). */
+const CANDIDATE_BUFFER = 15
+
+/**
+ * Check if a visitor query is eligible for a catalog scan WITHOUT reading
+ * the database. Returns false for blank, stopword-only, or otherwise
+ * provably ineligible queries. This prevents unnecessary catalog scans
+ * for irrelevant messages (BLOCKER 2).
+ *
+ * Does NOT reject legitimate product names, colors, brands, or model numbers.
+ */
+export function isQueryEligibleForCatalogScan(query: string): boolean {
+  const normalized = normalizeProductQuery(query)
+  if (!normalized) return false
+  const phrases = splitIntoPhrases(normalized)
+  return phrases.length > 0
+}
+
+/**
+ * Result of a streaming catalog scan.
+ * - `candidates`: the top-10 matching products (empty if none or ambiguous).
+ * - `ambiguous`: true if same-name products with conflicting data were found.
+ * - `incomplete`: true if the resource budget was exhausted (fail closed).
+ */
+export interface StreamedScanResult {
+  candidates: RetrievedProduct[]
+  ambiguous: boolean
+  incomplete: boolean
+}
+
+/**
+ * Stream-product candidates via bounded-memory keyset pagination.
+ *
+ * This function scans the entire tenant catalog in bounded batches WITHOUT
+ * materializing the full catalog in memory. For each batch:
+ *   - Products are matched against the query (same token logic as
+ *     retrieveProductCandidates).
+ *   - Matching products are checked for same-name conflicts (price,
+ *     availability, currency) across ALL batches via a running conflict map.
+ *   - Candidates are ranked and pruned to top ~15 (CANDIDATE_BUFFER) to
+ *     bound the candidate list size.
+ *
+ * Memory at any point:
+ *   - 1 batch of products (discarded after processing)
+ *   - Conflict map: distinct matching product names (typically 1–10)
+ *   - Candidate list: at most CANDIDATE_BUFFER (15) entries
+ *
+ * Resource budget: MAX_SCAN_BATCHES (50 batches × 200 = 10,000 products).
+ * On exhaustion → `incomplete: true` (fail closed).
+ *
+ * Duplicate IDs: tracked via a Set. If the same ID appears with conflicting
+ * data → ambiguous. Non-conflicting duplicates are ignored (first wins).
+ *
+ * This is a SINGLE-PASS scan — no cross-pass consistency issue (BLOCKER 3).
+ * The caller should perform a post-scan candidate re-fetch to verify that
+ * the candidates' data hasn't changed since the scan.
+ */
+export async function streamProductCandidates(
+  query: string,
+  fetchBatch: ProductBatchReader,
+): Promise<StreamedScanResult> {
+  // 1. Pre-scan gate (BLOCKER 2): reject ineligible queries before any DB read.
+  const normalizedQuery = normalizeProductQuery(query)
+  if (!normalizedQuery) {
+    return { candidates: [], ambiguous: false, incomplete: false }
+  }
+  const phrases = splitIntoPhrases(normalizedQuery)
+  if (phrases.length === 0) {
+    return { candidates: [], ambiguous: false, incomplete: false }
+  }
+
+  // 2. Streaming scan
+  const conflictMap = new Map<string, { price: number; availability: string; currency: string }>()
+  let ambiguous = false
+  const seenIds = new Set<string>()
+  let candidates: Array<{ product: ProductCandidate; matchCount: number; matchedTerms: string[] }> = []
+
+  let cursor: string | undefined = undefined
+  let batchCount = 0
+
+  while (batchCount < MAX_SCAN_BATCHES) {
+    const batch = await fetchBatch(cursor)
+
+    for (const p of batch.products) {
+      if (!isEligibleProduct(p)) continue
+
+      // Deduplicate by ID (BLOCKER 4).
+      if (seenIds.has(p.id)) {
+        // Check for conflicting duplicate data.
+        const existing = candidates.find((c) => c.product.id === p.id)
+        if (existing) {
+          const a = existing.product
+          if (a.price !== p.price || a.availability !== p.availability ||
+              (a.currency ?? 'IRT').toUpperCase() !== (p.currency ?? 'IRT').toUpperCase()) {
+            ambiguous = true
+          }
+        }
+        continue
+      }
+      seenIds.add(p.id)
+
+      const tokens = productTokenSet(p)
+      let totalMatches = 0
+      const matchedTerms: string[] = []
+      let isCandidate = false
+
+      for (const phrase of phrases) {
+        if (phrase.every((t) => tokens.has(t))) {
+          isCandidate = true
+          totalMatches += phrase.length
+          for (const t of phrase) {
+            if (!matchedTerms.includes(t)) matchedTerms.push(t)
+          }
+        }
+      }
+
+      if (!isCandidate) continue
+
+      // Conflict detection (streaming across batches).
+      const nameKey = normalizeProductQuery(p.name)
+      const cur = (p.currency ?? 'IRT').toUpperCase()
+      const existing = conflictMap.get(nameKey)
+      if (existing) {
+        if (existing.price !== p.price || existing.availability !== p.availability || existing.currency !== cur) {
+          ambiguous = true
+        }
+      } else {
+        conflictMap.set(nameKey, { price: p.price, availability: p.availability, currency: cur })
+      }
+
+      candidates.push({ product: p, matchCount: totalMatches, matchedTerms })
+    }
+
+    // Prune candidate list to top CANDIDATE_BUFFER (bounded memory).
+    if (candidates.length > CANDIDATE_BUFFER) {
+      candidates.sort((a, b) => {
+        if (b.matchCount !== a.matchCount) return b.matchCount - a.matchCount
+        return a.product.id < b.product.id ? -1 : a.product.id > b.product.id ? 1 : 0
+      })
+      candidates = candidates.slice(0, CANDIDATE_BUFFER)
+    }
+
+    if (!batch.hasMore) break
+    cursor = batch.nextCursor
+    batchCount++
+  }
+
+  // Resource budget exhausted → fail closed.
+  if (batchCount >= MAX_SCAN_BATCHES) {
+    return { candidates: [], ambiguous: false, incomplete: true }
+  }
+
+  // Ambiguity detected during scan → fail closed.
+  if (ambiguous) {
+    return { candidates: [], ambiguous: true, incomplete: false }
+  }
+
+  // Final ranking + top 10.
+  candidates.sort((a, b) => {
+    if (b.matchCount !== a.matchCount) return b.matchCount - a.matchCount
+    return a.product.id < b.product.id ? -1 : a.product.id > b.product.id ? 1 : 0
+  })
+
+  const top = candidates.slice(0, MAX_PRODUCT_CANDIDATES)
+  return {
+    candidates: top.map((c) => ({ ...c.product, matchedTerms: c.matchedTerms })),
+    ambiguous: false,
+    incomplete: false,
+  }
+}
+
 /**
  * Validate that a provider's output is a nonblank string (the "go" signal).
  * The provider's text is NEVER used as the answer — it only signals that
