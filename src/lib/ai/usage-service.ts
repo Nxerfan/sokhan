@@ -463,10 +463,39 @@ export async function commitAiReply(input: {
         throw new Error('RESERVATION_NOT_SETTLABLE')
       }
 
+      // 1a. Acquire a PostgreSQL row-level lock (FOR UPDATE) on the
+      // Conversation row. This serializes AI settlement with human
+      // takeover actions (conversation assignment UPDATE, agent message
+      // INSERT with FK to Conversation). The lock is held until the
+      // transaction commits or rolls back.
+      //
+      // BLOCKER 1+2: Without this lock, a human action can commit
+      // BETWEEN the eligibility check and the final AI message/usage
+      // commit, producing a mixed-version authoritative answer.
+      //
+      // Lock compatibility:
+      //   - FOR UPDATE conflicts with FOR UPDATE, FOR NO KEY UPDATE,
+      //     FOR SHARE, and FOR KEY SHARE.
+      //   - Conversation UPDATE acquires FOR UPDATE → conflicts → waits.
+      //   - Agent message INSERT acquires FOR KEY SHARE (FK) → conflicts
+      //     → waits.
+      // Both human actions are serialized behind AI's lock.
+      //
+      // If human commits first (before AI acquires the lock):
+      //   - AI's eligibility check sees the takeover → HUMAN_TAKEOVER
+      //     → rolls back → releases reservation.
+      // If AI acquires the lock first:
+      //   - Human waits until AI commits → AI reply is legitimate.
+      const lockedRows = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "Conversation"
+        WHERE "id" = ${conversationId} AND "tenantId" = ${tenantId}
+        FOR UPDATE
+      `
+      if (lockedRows.length === 0) {
+        throw new Error('OWNERSHIP_INVALID')
+      }
+
       // 2. Commit-time ownership revalidation (Defect D).
-      // Verify the Conversation belongs to the same tenant AND the visitor
-      // Message belongs to the same tenant and conversation — inside the
-      // transaction, not just a pre-read.
       const owned = await verifyOwnershipInTx(
         tx,
         tenantId,
@@ -478,15 +507,9 @@ export async function commitAiReply(input: {
       }
 
       // 2b. Commit-time human-takeover guard (AI-Q5).
-      // Inside the transaction, check if a human has taken over the
-      // conversation since the reservation was made. This handles the
-      // critical race: visitor message → AI reserves → human takes over
-      // → AI attempts to commit. The commit MUST fail without producing
-      // an AI message or charge.
-      //
-      // Checks: assignedUserId, firstResponseAt, status, agentMessageCount.
-      // All checks use the transaction's `tx` client for a consistent
-      // read within the same atomic operation.
+      // Now holding the FOR UPDATE lock on the Conversation row,
+      // check if a human has taken over. No concurrent human action
+      // can commit between this check and the final commit.
       const convState = await tx.conversation.findUnique({
         where: { id: conversationId },
         select: {
@@ -542,7 +565,17 @@ export async function commitAiReply(input: {
 
     return { status: 'committed', messageId }
   } catch (e) {
-    if (e instanceof Error && (e.message === 'RESERVATION_NOT_SETTLABLE' || e.message === 'OWNERSHIP_INVALID' || e.message === 'HUMAN_TAKEOVER')) {
+    if (e instanceof Error && e.message === 'HUMAN_TAKEOVER') {
+      // BLOCKER 3: Release the rejected reservation promptly and
+      // atomically after the failed settlement transaction has rolled
+      // back. The reservation is still 'reserved' — release it to free
+      // the capacity (transition reserved→released, decrement reserved
+      // counter). This is idempotent — if already released, no-op.
+      // Never refund an already-committed legitimate AI reply.
+      await releaseAiReply({ tenantId, reservationId })
+      return { status: 'not_found' }
+    }
+    if (e instanceof Error && (e.message === 'RESERVATION_NOT_SETTLABLE' || e.message === 'OWNERSHIP_INVALID')) {
       const refetched = await globalDb.aiReplyReservation.findUnique({
         where: { id: reservationId },
         select: { status: true, aiMessageId: true },
