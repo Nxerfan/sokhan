@@ -48,7 +48,7 @@ import ZAI from 'z-ai-web-dev-sdk'
 import { selectUnambiguousFaqs, validateSemanticMatch } from '@/lib/ai/faq-policy'
 import {
   retrieveProductCandidates,
-  detectAmbiguousCandidates,
+  detectAmbiguityInFullSet,
   renderGroundedAnswer,
   type ProductCandidate,
 } from '@/lib/ai/product-policy'
@@ -261,11 +261,14 @@ export async function answerProductQuestion(
     return { answered: false, answer: null, productIds: [] }
   }
 
-  // 2. Ambiguity detection — same name, conflicting price/availability.
-  const ambiguous = detectAmbiguousCandidates(candidates)
-  if (ambiguous.size > 0) {
-    // The query does not distinguish between conflicting products.
-    // Fail closed rather than guess a single price.
+  // 2. Ambiguity detection on the FULL product set (BLOCKER 1+3).
+  // retrieveProductCandidates returns at most 10 candidates, but a
+  // conflicting 11th product with the same name could be hidden beyond
+  // the top-10. Scan ALL eligible products in the input for same-name
+  // conflicts (price, availability, OR currency) to ensure no ambiguity
+  // is hidden by truncation. This runs BEFORE any provider call.
+  const ambiguous = detectAmbiguityInFullSet(candidates, products as ReadonlyArray<ProductCandidate>)
+  if (ambiguous) {
     return { answered: false, answer: null, productIds: [] }
   }
 

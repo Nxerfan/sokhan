@@ -337,14 +337,6 @@ export function retrieveProductCandidates(
 
   if (allCandidates.length === 0) return []
 
-  // BLOCKER 1+3: Detect ambiguity on the FULL matching set BEFORE
-  // top-K truncation. Same normalized name + conflicting price,
-  // availability, OR currency → fail closed.
-  const ambiguous = detectAmbiguousCandidates(
-    allCandidates.map((c) => ({ ...c.product, matchedTerms: c.matchedTerms })),
-  )
-  if (ambiguous.size > 0) return []
-
   // Rank: higher match count first, then product ID (ascending).
   allCandidates.sort((a, b) => {
     if (b.matchCount !== a.matchCount) return b.matchCount - a.matchCount
@@ -362,6 +354,64 @@ export function retrieveProductCandidates(
 // ---------------------------------------------------------------------------
 // Ambiguity detection
 // ---------------------------------------------------------------------------
+
+/**
+ * Check if any candidate has a conflicting same-name product in the FULL
+ * product set (BLOCKER 1). This scans ALL eligible products — not just
+ * the top-10 returned by retrieveProductCandidates — to ensure no
+ * ambiguity is hidden by truncation.
+ *
+ * For each candidate, finds all eligible products in `allProducts` with
+ * the same normalized name. If any have a conflicting price, availability,
+ * OR currency, the set is ambiguous.
+ *
+ * Also checks for conflicting duplicate IDs (BLOCKER 4).
+ *
+ * Returns true if ambiguous (caller should fail closed).
+ */
+export function detectAmbiguityInFullSet(
+  candidates: ReadonlyArray<RetrievedProduct>,
+  allProducts: ReadonlyArray<ProductCandidate>,
+): boolean {
+  // Collect the normalized names of all candidates.
+  const candidateNames = new Set<string>()
+  for (const c of candidates) {
+    candidateNames.add(normalizeProductQuery(c.name))
+  }
+
+  // Group ALL eligible products by normalized name (only for names that
+  // appear in the candidates — other products are irrelevant).
+  const groups = new Map<string, ProductCandidate[]>()
+  for (const p of allProducts) {
+    if (!isEligibleProduct(p)) continue
+    const nameKey = normalizeProductQuery(p.name)
+    if (!candidateNames.has(nameKey)) continue
+    let group = groups.get(nameKey)
+    if (!group) {
+      group = []
+      groups.set(nameKey, group)
+    }
+    group.push(p)
+  }
+
+  // Check each group for conflicts.
+  for (const group of groups.values()) {
+    if (group.length < 2) continue
+    const first = group[0]
+    const firstPrice = first.price
+    const firstAvail = first.availability
+    const firstCur = (first.currency ?? 'IRT').toUpperCase()
+    const hasConflict = group.some(
+      (p) =>
+        p.price !== firstPrice ||
+        p.availability !== firstAvail ||
+        (p.currency ?? 'IRT').toUpperCase() !== firstCur,
+    )
+    if (hasConflict) return true
+  }
+
+  return false
+}
 
 /**
  * Detect ambiguous candidates: products with identical normalized names
