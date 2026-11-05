@@ -41,6 +41,7 @@ jobs:
             'tests/unit/ai-q3-faq-adversarial-review.test.ts':'83b4441bfb6997db5f79c5762f18c5f9ff00de2f',
             'tests/unit/ai-q4-product-contract.test.ts':'219096d2d1dea3535bf33af72859cd3258fcefce',
             'tests/unit/ai-q4-adversarial-review.test.ts':'0915c1f18a0e3fb52efbc3356f8801906d3565d8',
+            'tests/unit/ai-q4-streaming-adversarial-review.test.ts':'deb132de5322cffde6fde3cf3ecbda1d9492c3d0',
             'tests/db-boundary/ai-q4-products.test.ts':'2b4d03c379910676488e8a796e67a69cd1e0e1ec',
             'tests/ai-q4-products.spec.ts':'6dbc072903fd00fcacea1f4644a0cd0c4e7fd61f',
             'tests/ai-q4-large-catalog-review.spec.ts':'42d8f364fa3f4df656afb9e61eb52563a34efc9f',
@@ -51,7 +52,7 @@ jobs:
             console.log('Reviewer integrity OK: '+file)
           }
           NODE
-      - name: Syntax-check five reviewer-owned AI-Q4 test suites
+      - name: Syntax-check six reviewer-owned AI-Q4 test suites
         run: |
           node --input-type=module <<'NODE'
           import ts from 'typescript'
@@ -59,6 +60,7 @@ jobs:
           for(const file of [
             'tests/unit/ai-q4-product-contract.test.ts',
             'tests/unit/ai-q4-adversarial-review.test.ts',
+            'tests/unit/ai-q4-streaming-adversarial-review.test.ts',
             'tests/db-boundary/ai-q4-products.test.ts',
             'tests/ai-q4-products.spec.ts',
             'tests/ai-q4-large-catalog-review.spec.ts',
@@ -110,6 +112,8 @@ jobs:
             ['Unit tests - AI-Q4 scoped Q1/Q2/Q3 compatibility and Product Q&A',[
               'tests/unit/ai-q4-product-contract.test.ts',
               'tests/unit/ai-q4-adversarial-review.test.ts',
+              'tests/unit/ai-q4-streaming-adversarial-review.test.ts',
+              'tests/unit/ai-q4-catalog-resource.test.ts',
               'tests/unit/ai-q1-contract.test.ts',
               'tests/unit/ai-q2-policy.test.ts',
               'tests/unit/ai-q3-faq-contract.test.ts',
@@ -148,4 +152,4 @@ jobs:
       - name: Enumerate reviewer AI-Q4 browser cases
         run: bunx playwright test tests/ai-q4-products.spec.ts tests/ai-q4-large-catalog-review.spec.ts --list
       - name: Run actual reviewer AI-Q4 policy tests
-        run: bun test tests/unit/ai-q4-product-contract.test.ts tests/unit/ai-q4-adversarial-review.test.ts
+        run: bun test tests/unit/ai-q4-product-contract.test.ts tests/unit/ai-q4-adversarial-review.test.ts tests/unit/ai-q4-streaming-adversarial-review.test.ts tests/unit/ai-q4-catalog-resource.test.ts
