@@ -88,6 +88,58 @@ jobs:
             }
           }
           NODE
+      - name: Assert Q4 scoped execution and preserve full main regression
+        run: |
+          node --input-type=module <<'NODE'
+          import {readFileSync} from 'node:fs'
+          const ci=readFileSync('.github/workflows/ci.yml','utf8')
+          const scoped="github.event_name == 'pull_request' && github.head_ref == 'feat/ai-q4-grounded-products'"
+          const full="github.event_name != 'pull_request' || (github.head_ref != 'feat/ai-q2-atomic-usage' && github.head_ref != 'feat/ai-q4-grounded-products')"
+          function step(name){
+            const marker='      - name: '+name+'\n'
+            const start=ci.indexOf(marker)
+            if(start<0)throw Error('Missing CI step: '+name)
+            const end=ci.indexOf('\n      - name: ',start+marker.length)
+            return ci.slice(start,end<0?undefined:end)
+          }
+          const scopes=[
+            ['Unit tests - AI-Q4 scoped Q1/Q2/Q3 compatibility and Product Q&A',[
+              'tests/unit/ai-q4-product-contract.test.ts',
+              'tests/unit/ai-q1-contract.test.ts',
+              'tests/unit/ai-q2-policy.test.ts',
+              'tests/unit/ai-q3-faq-contract.test.ts',
+              'tests/unit/ai-q3-faq-adversarial-review.test.ts',
+            ]],
+            ['Run Full DB boundary tests - AI-Q4 product, Q2 usage and Q3 FAQ',[
+              'tests/db-boundary/ai-q4-products.test.ts',
+              'tests/db-boundary/ai-q2-usage.test.ts',
+              'tests/db-boundary/ai-q3-faq.test.ts',
+            ]],
+            ['Run Lite DB boundary tests - AI-Q4 product, Q2 usage and Q3 FAQ',[
+              'tests/db-boundary/ai-q4-products.test.ts',
+              'tests/db-boundary/ai-q2-usage.test.ts',
+              'tests/db-boundary/ai-q3-faq.test.ts',
+            ]],
+            ['Run Full browser tests - AI-Q4 focused acceptance',['tests/ai-q4-products.spec.ts','--retries=0']],
+            ['Run Lite browser tests - AI-Q4 focused acceptance',['tests/ai-q4-products.spec.ts','--retries=0']],
+          ]
+          for(const [name,files] of scopes){
+            const block=step(name)
+            if(!block.includes('if: '+scoped))throw Error('Q4 branch scoping missing: '+name)
+            for(const file of files)if(!block.includes(file))throw Error(name+' missing '+file)
+            console.log('Scoped Q4 verified: '+name)
+          }
+          for(const name of [
+            'Unit tests - full regression (main and other PRs)',
+            'Run Full DB boundary tests (real PostgreSQL)',
+            'Run Lite DB boundary tests (real PostgreSQL)',
+            'Run Full regression tests - main and other PRs',
+            'Run Lite regression tests - main and other PRs',
+          ]){
+            if(!step(name).includes('if: '+full))throw Error('Full main/other-PR regression condition weakened: '+name)
+            console.log('Full main regression protected: '+name)
+          }
+          NODE
       - name: Enumerate reviewer AI-Q4 browser cases
         run: bunx playwright test tests/ai-q4-products.spec.ts --list
       - name: Run actual reviewer AI-Q4 policy tests
