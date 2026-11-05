@@ -88,16 +88,14 @@ jobs:
             return ci.slice(start,end<0?undefined:end)
           }
           const checks=[
-            ['Unit tests - AI-Q5 scoped takeover and atomic billing',[
+            ['Unit tests - AI-Q5 focused takeover only',[
               'tests/unit/ai-q5-human-takeover-contract.test.ts',
-              'tests/unit/ai-q2-policy.test.ts',
-              'tests/unit/ai-q4-product-contract.test.ts',
             ]],
-            ['Run Full DB boundary tests - AI-Q5 takeover and Q2 usage',[
-              'tests/db-boundary/ai-q5-human-takeover.test.ts','tests/db-boundary/ai-q2-usage.test.ts',
+            ['Run Full DB boundary tests - AI-Q5 takeover only',[
+              'tests/db-boundary/ai-q5-human-takeover.test.ts',
             ]],
-            ['Run Lite DB boundary tests - AI-Q5 takeover and Q2 usage',[
-              'tests/db-boundary/ai-q5-human-takeover.test.ts','tests/db-boundary/ai-q2-usage.test.ts',
+            ['Run Lite DB boundary tests - AI-Q5 takeover only',[
+              'tests/db-boundary/ai-q5-human-takeover.test.ts',
             ]],
             ['Run Full browser tests - AI-Q5 human takeover',['tests/ai-q5-human-takeover.spec.ts','--retries=0']],
             ['Run Lite browser tests - AI-Q5 human takeover',['tests/ai-q5-human-takeover.spec.ts','--retries=0']],
@@ -107,6 +105,28 @@ jobs:
             if(!step.includes('if: '+scoped))throw Error('Not scoped to Q5: '+name)
             for(const text of required)if(!step.includes(text))throw Error(name+' missing '+text)
             console.log('Q5 scope OK: '+name)
+          }
+          // Exact commands: only new Q5 suites run on the Q5 PR.
+          // The Q5 browser suite itself verifies Q2 billing/retries and
+          // Q4 positive grounded Product Q&A, so legacy suites are redundant.
+          const exactRuns=[
+            ['Unit tests - AI-Q5 focused takeover only',
+              'run: bun test tests/unit/ai-q5-human-takeover-contract.test.ts'],
+            ['Run Full DB boundary tests - AI-Q5 takeover only',
+              'run: bun test tests/db-boundary/ai-q5-human-takeover.test.ts'],
+            ['Run Lite DB boundary tests - AI-Q5 takeover only',
+              'run: bun test tests/db-boundary/ai-q5-human-takeover.test.ts'],
+            ['Run Full browser tests - AI-Q5 human takeover',
+              'run: bunx playwright test tests/ai-q5-human-takeover.spec.ts --workers=1 --retries=0'],
+            ['Run Lite browser tests - AI-Q5 human takeover',
+              'run: bunx playwright test tests/ai-q5-human-takeover.spec.ts --workers=1 --retries=0'],
+          ]
+          for(const [name,required] of exactRuns){
+            const step=block(name)
+            const actual=step.split('\n').map(x=>x.trim()).filter(x=>x.startsWith('run: '))
+            if(actual.length!==1 || actual[0]!==required)
+              throw Error('Duplicate or unexpected Q1-Q4 suite in scoped Q5 step: '+name)
+            console.log('No duplicate legacy tests in scoped Q5 step: '+name)
           }
           for(const name of [
             'Unit tests - full regression (main and other PRs)',
@@ -119,11 +139,16 @@ jobs:
             console.log('Main full regression retained: '+name)
           }
           for(const group of ['tests/ai-q1-config.spec.ts','tests/ai-q2-usage.spec.ts',
-            'tests/ai-q3-faq.spec.ts','tests/ai-q4-products.spec.ts','tests/ai-q4-large-catalog-review.spec.ts',
-            'tests/ai-q5-human-takeover.spec.ts']){
-            if(group.includes('ai-q5'))continue
-            if(!ci.includes(group))throw Error('Legacy regression removed: '+group)
+            'tests/ai-q3-faq.spec.ts','tests/ai-q4-products.spec.ts',
+            'tests/ai-q4-large-catalog-review.spec.ts','tests/ai-q5-human-takeover.spec.ts']){
+            for(const name of [
+              'Run Full regression tests - main and other PRs',
+              'Run Lite regression tests - main and other PRs',
+            ]){
+              if(!block(name).includes(group))throw Error('Main '+name+' missing '+group)
+            }
           }
+          console.log('Main and other PRs retain full Q1–Q5 regression.')
           NODE
       - name: Enumerate Q5 real-browser cases
         run: bunx playwright test tests/ai-q5-human-takeover.spec.ts --list
