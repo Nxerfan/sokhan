@@ -41,10 +41,12 @@ jobs:
       - name: Unit tests - AI-Q4 scoped Q1/Q2/Q3 compatibility and Product Q&A
         if: github.event_name == 'pull_request' && github.head_ref == 'feat/ai-q4-grounded-products'
         run: bun test tests/unit/ai-q4-product-contract.test.ts tests/unit/ai-q4-adversarial-review.test.ts tests/unit/ai-q4-streaming-adversarial-review.test.ts tests/unit/ai-q4-catalog-resource.test.ts tests/unit/ai-q1-contract.test.ts tests/unit/ai-q2-policy.test.ts tests/unit/ai-q3-faq-contract.test.ts tests/unit/ai-q3-faq-adversarial-review.test.ts
-      # Q5 touches human takeover, AI settlement and existing widget Product Q&A.
-      - name: Unit tests - AI-Q5 scoped takeover and atomic billing
+      # AI-Q5 contract tests are self-contained; the browser suite also checks
+      # Q4 grounded answers and Q2 charge/retry behavior. No duplicate legacy
+      # Q1-Q4 Unit suites on this PR; main retains the full regression.
+      - name: Unit tests - AI-Q5 focused takeover only
         if: github.event_name == 'pull_request' && github.head_ref == 'feat/ai-q5-human-takeover'
-        run: bun test tests/unit/ai-q5-human-takeover-contract.test.ts tests/unit/ai-q2-policy.test.ts tests/unit/ai-q4-product-contract.test.ts
+        run: bun test tests/unit/ai-q5-human-takeover-contract.test.ts
       - name: Unit tests - full regression (main and other PRs)
         if: github.event_name != 'pull_request' || (github.head_ref != 'feat/ai-q2-atomic-usage' && github.head_ref != 'feat/ai-q4-grounded-products' && github.head_ref != 'feat/ai-q5-human-takeover')
         run: bun test tests/unit/
@@ -165,9 +167,9 @@ jobs:
       - name: Run Full DB boundary tests - AI-Q4 product, Q2 usage and Q3 FAQ
         if: github.event_name == 'pull_request' && github.head_ref == 'feat/ai-q4-grounded-products'
         run: bun test tests/db-boundary/ai-q4-products.test.ts tests/db-boundary/ai-q4-concurrent-catalog.test.ts tests/db-boundary/ai-q4-snapshot-review.test.ts tests/db-boundary/ai-q2-usage.test.ts tests/db-boundary/ai-q3-faq.test.ts
-      - name: Run Full DB boundary tests - AI-Q5 takeover and Q2 usage
+      - name: Run Full DB boundary tests - AI-Q5 takeover only
         if: github.event_name == 'pull_request' && github.head_ref == 'feat/ai-q5-human-takeover'
-        run: bun test tests/db-boundary/ai-q5-human-takeover.test.ts tests/db-boundary/ai-q2-usage.test.ts
+        run: bun test tests/db-boundary/ai-q5-human-takeover.test.ts
       - name: Run Full DB boundary tests (real PostgreSQL)
         if: github.event_name != 'pull_request' || (github.head_ref != 'feat/ai-q2-atomic-usage' && github.head_ref != 'feat/ai-q4-grounded-products' && github.head_ref != 'feat/ai-q5-human-takeover')
         run: bun test tests/db-boundary/
@@ -223,9 +225,9 @@ jobs:
       - name: Run Lite DB boundary tests - AI-Q4 product, Q2 usage and Q3 FAQ
         if: github.event_name == 'pull_request' && github.head_ref == 'feat/ai-q4-grounded-products'
         run: bun test tests/db-boundary/ai-q4-products.test.ts tests/db-boundary/ai-q4-concurrent-catalog.test.ts tests/db-boundary/ai-q4-snapshot-review.test.ts tests/db-boundary/ai-q2-usage.test.ts tests/db-boundary/ai-q3-faq.test.ts
-      - name: Run Lite DB boundary tests - AI-Q5 takeover and Q2 usage
+      - name: Run Lite DB boundary tests - AI-Q5 takeover only
         if: github.event_name == 'pull_request' && github.head_ref == 'feat/ai-q5-human-takeover'
-        run: bun test tests/db-boundary/ai-q5-human-takeover.test.ts tests/db-boundary/ai-q2-usage.test.ts
+        run: bun test tests/db-boundary/ai-q5-human-takeover.test.ts
       - name: Run Lite DB boundary tests (real PostgreSQL)
         if: github.event_name != 'pull_request' || (github.head_ref != 'feat/ai-q2-atomic-usage' && github.head_ref != 'feat/ai-q4-grounded-products' && github.head_ref != 'feat/ai-q5-human-takeover')
         run: bun test tests/db-boundary/
