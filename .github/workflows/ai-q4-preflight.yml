@@ -39,8 +39,8 @@ jobs:
             'tests/db-boundary/ai-q3-faq.test.ts':'fbe9032979f62d3546438725c446aabd2d28f28f',
             'tests/ai-q3-faq.spec.ts':'4b73548ba4dab02b551993ae46e3c3d5f8bf2355',
             'tests/unit/ai-q3-faq-adversarial-review.test.ts':'83b4441bfb6997db5f79c5762f18c5f9ff00de2f',
-            'tests/unit/ai-q4-product-contract.test.ts':'372298a25e56dc1bb6eccc56e3a9d93393a35102',
-            'tests/db-boundary/ai-q4-products.test.ts':'1cca24fb43bab8e8332f34798053b245dbdad1b4',
+            'tests/unit/ai-q4-product-contract.test.ts':'219096d2d1dea3535bf33af72859cd3258fcefce',
+            'tests/db-boundary/ai-q4-products.test.ts':'2b4d03c379910676488e8a796e67a69cd1e0e1ec',
             'tests/ai-q4-products.spec.ts':'6dbc072903fd00fcacea1f4644a0cd0c4e7fd61f',
           }
           for(const [file,expected] of Object.entries(hashes)){
