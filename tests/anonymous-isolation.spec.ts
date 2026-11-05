@@ -74,15 +74,58 @@ async function setupTenantA(browser: import('@playwright/test').Browser): Promis
   }
   const tenantId = signupRes.tenantId
 
-  // Sign in via NextAuth credentials callback.
+  // Sign in via NextAuth credentials callback. The callback POST sets the
+  // session cookie via Set-Cookie, but Playwright's APIRequestContext may
+  // not have processed the cookie before the next request fires. A bounded
+  // poll on /api/auth/session verifies the session is durably established
+  // before any protected API call (same pattern as signInExisting in
+  // invite-workspace-switching.spec.ts). Without this, a race between
+  // Set-Cookie processing and the immediate /api/tenants/me GET produces
+  // an intermittent 401 in the Lite stack (no Redis — slightly different
+  // cookie propagation timing).
   const csrfRes = await page.request.get(`${BASE}/api/auth/csrf`)
   const csrfData = (await csrfRes.json()) as { csrfToken: string }
-  await page.request.post(`${BASE}/api/auth/callback/credentials`, {
+  const callbackRes = await page.request.post(`${BASE}/api/auth/callback/credentials`, {
     form: { email, password: PASSWORD, csrfToken: csrfData.csrfToken, json: 'true' },
     maxRedirects: 0,
   })
+  if (callbackRes.status() >= 400) {
+    throw new Error(
+      `Tenant A credentials callback failed: status=${callbackRes.status()}`,
+    )
+  }
 
-  // Confirm the session works + resolve the slug.
+  // Bounded poll: verify the session cookie is established before reading
+  // protected APIs. 15s deadline, 250ms intervals.
+  let sessionEstablished = false
+  let lastSessionStatus = 0
+  const deadline = Date.now() + 15000
+  while (Date.now() < deadline) {
+    const sRes = await page.request.get(`${BASE}/api/auth/session`)
+    lastSessionStatus = sRes.status()
+    if (sRes.ok()) {
+      const sBody = (await sRes.json().catch(() => ({}))) as { user?: { id?: string } }
+      if (sBody.user?.id) {
+        sessionEstablished = true
+        break
+      }
+    }
+    await page.waitForTimeout(250)
+  }
+  if (!sessionEstablished) {
+    const hasSessionCookie = (await page.context().cookies()).some(
+      (c) => c.name.includes('session-token') || c.name.includes('authjs.session-token'),
+    )
+    throw new Error(
+      `Tenant A session not established after credentials callback ` +
+        `(last_session_status=${lastSessionStatus} ` +
+        `session_cookie_present=${hasSessionCookie})`,
+    )
+  }
+
+  // Confirm the session works + resolve the slug. The bounded poll above
+  // guarantees the session cookie is established, so this GET always sends
+  // the authenticated cookie.
   const meRes = await page.request.get(`${BASE}/api/tenants/me`)
   const meData = (await meRes.json()) as { tenant?: { id: string; slug: string } }
   if (!meData.tenant) {

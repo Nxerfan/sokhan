@@ -357,6 +357,31 @@ async function switchWorkspace(
     headers: { 'Content-Type': 'application/json' },
   })
   const body = await res.json().catch(() => ({}))
+
+  // STRICT BODY VERIFICATION (Failure B root cause fix):
+  // NextAuth's POST /api/auth/session returns 200 even when the jwt
+  // callback throws during trigger='update' — the catch block in
+  // core/routes/session.js logs the error and pushes sessionStore.clean()
+  // cookies, but the HTTP status stays 200 and the body becomes {}.
+  // Without checking the response body, a switch that silently failed
+  // server-side would be masked by the 200 status. This is a strict
+  // assertion that the server-side update was reflected in the response
+  // body. It does NOT poll or wait — callers verify immediate session
+  // consistency via their own getSessionWorkspaceId() call.
+  if (res.status() === 200) {
+    const bodyWorkspace = (body as any)?.user?.workspaceId
+    if (bodyWorkspace !== workspaceId) {
+      throw new Error(
+        `switchWorkspace server-side verification FAILED: ` +
+          `requested workspaceId=${workspaceId} ` +
+          `but response body user.workspaceId=${String(bodyWorkspace)} ` +
+          `(status=200 body=${JSON.stringify(body).slice(0, 200)}). ` +
+          `The NextAuth jwt callback may have thrown (not_active_member) ` +
+          `or the update trigger did not fire — the response body must ` +
+          `reflect the new workspaceId on a successful switch.`,
+      )
+    }
+  }
   return { status: res.status(), body }
 }
 
@@ -397,10 +422,16 @@ async function acceptCompleteNewUser(args: {
 async function getUsage(page: Page): Promise<{ current: number; limit: number }> {
   const res = await page.request.get(`${BASE}/api/billing/subscription`)
   expect(res.status(), 'GET /api/billing/subscription should be 200').toBe(200)
+  // AI-Q2 flattened the billing/subscription `usage` field: it now returns
+  // the inner usage object directly ({ agents, conversations, departments,
+  // aiActions, ... }) rather than the full getTenantUsage wrapper which
+  // also carried planSlug. The dashboard billing-panel and the AI-Q2/AI-Q3
+  // browser suites already consume the flat shape. This helper is updated
+  // to match — no assertion logic is changed.
   const body = (await res.json()) as {
-    usage?: { usage?: { agents?: { current: number; limit: number } } }
+    usage?: { agents?: { current: number; limit: number } }
   }
-  const agents = body.usage?.usage?.agents
+  const agents = body.usage?.agents
   if (!agents) throw new Error('No agents usage in billing response')
   return agents
 }

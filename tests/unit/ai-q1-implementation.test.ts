@@ -620,9 +620,9 @@ describe('Developer — exact-match FAQ fast-path source wiring', () => {
   const msgCode = code(msgSrc)
 
   test('tryAiResponse has an exact-match fast path', () => {
-    expect(msgCode).toContain('exact')
-    expect(msgCode).toMatch(/norm\(/)
-    expect(msgCode).toMatch(/\.trim\(\)\.replace\(\/\\s\+\/g/)
+    // AI-Q3: the exact-match path now uses resolveExactFaq from faq-policy.
+    expect(msgCode).toContain('resolveExactFaq')
+    expect(msgCode).toContain("exact.status === 'matched'")
   })
 
   test('the fast path returns the stored FAQ answer with source faq', () => {
@@ -714,13 +714,14 @@ describe('Developer — AI module injectable provider seam', () => {
   })
 
   test('the FAQ answer is always the stored answer, never a provider-invented answer', () => {
-    // The return uses faq.answer, not parsed.answer.
-    expect(aiCode).toContain('answer: faq.answer')
+    // AI-Q3: the return uses validated.faqPair.answer (from the strict gate).
+    expect(aiCode).toContain('validated.faqPair.answer')
     expect(aiCode).not.toMatch(/answer:\s*parsed\.answer/)
   })
 
   test('returned FAQ IDs are validated against the supplied list', () => {
-    expect(aiCode).toMatch(/faqPairs\.find/)
+    // AI-Q3: validation is now in faq-policy's validateSemanticMatch.
+    expect(aiCode).toContain('validateSemanticMatch')
   })
 
   test('invalid JSON and provider failures are caught (safe negative)', () => {

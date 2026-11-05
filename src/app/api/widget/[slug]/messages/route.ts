@@ -648,6 +648,7 @@ async function tryAiResponse(
 ): Promise<{ messageId: string; text: string; source: 'faq' | 'product' } | null> {
   const { db } = await import('@/lib/db')
   const { matchFaq, answerProductQuestion } = await import('@/lib/ai')
+  const { resolveExactFaq } = await import('@/lib/ai/faq-policy')
   const { reserveAiReply, commitAiReply, releaseAiReply } = await import('@/lib/ai/usage-service')
 
   // Load AI config
@@ -677,18 +678,24 @@ async function tryAiResponse(
       })
 
       if (faqPairs.length > 0) {
-        // Exact-match fast path (deterministic, no LLM)
-        const norm = (s: string) => s.trim().replace(/\s+/g, ' ')
-        const exact = faqPairs.find(f => norm(f.question) === norm(visitorMessage))
-        if (exact) {
+        // AI-Q3: safe deterministic exact matching with ambiguity detection.
+        // - 'matched': exactly one canonical match with a nonblank answer →
+        //   deliver the owner-authored answer deterministically (no LLM).
+        // - 'ambiguous': multiple canonical duplicates → NEVER select an
+        //   arbitrary row, NEVER fall through to semantic classification,
+        //   NEVER produce a charge. Skip FAQ entirely for this message.
+        // - 'none': no canonical match → try semantic classification.
+        const exact = resolveExactFaq(visitorMessage, faqPairs)
+        if (exact.status === 'matched') {
           generated = { text: exact.answer, source: 'faq' }
-        } else {
-          // Semantic classification (LLM-based)
+        } else if (exact.status === 'none') {
+          // Semantic classification (LLM-based) with strict confidence gate.
           const match = await matchFaq(visitorMessage, faqPairs)
           if (match.matched && match.answer) {
             generated = { text: match.answer, source: 'faq' }
           }
         }
+        // 'ambiguous' → skip FAQ (no generation, reservation will be released).
       }
     }
 

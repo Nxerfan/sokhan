@@ -45,6 +45,7 @@
  */
 
 import ZAI from 'z-ai-web-dev-sdk'
+import { selectUnambiguousFaqs, validateSemanticMatch } from '@/lib/ai/faq-policy'
 
 let zaiInstance: Awaited<ReturnType<typeof ZAI.create>> | null = null
 
@@ -113,11 +114,23 @@ export async function matchFaq(
   faqPairs: Array<{ id: string; question: string; answer: string }>,
   provider?: AiProvider,
 ): Promise<FaqMatchResult> {
-  if (faqPairs.length === 0) {
+  // AI-Q3 BLOCKER 3: partition FAQ pairs into UNAMBIGUOUS semantic
+  // candidates BEFORE any provider call. Groups of 2+ FAQs that
+  // canonicalize to the same question are contradictory/duplicate — ALL
+  // their IDs are excluded from the prompt AND from validation. The model
+  // can never select an ambiguous ID, even with confidence 1. This is
+  // enforced in code (selectUnambiguousFaqs + validateSemanticMatch
+  // membership check), not merely described in the LLM prompt.
+  const eligible = selectUnambiguousFaqs(faqPairs)
+
+  if (eligible.length === 0) {
+    // No unambiguous candidate remains — safe negative WITHOUT calling
+    // the provider (BLOCKER 3, point 5). This covers the zero-candidate
+    // case AND the all-candidates-ambiguous case.
     return { matched: false, faqPairId: null, answer: null, confidence: 0 }
   }
 
-  const faqList = faqPairs.map((p, i) => `${i + 1}. [ID:${p.id}] ${p.question}`).join('\n')
+  const faqList = eligible.map((p, i) => `${i + 1}. [ID:${p.id}] ${p.question}`).join('\n')
 
   const prompt = `You are a FAQ matching assistant. Given a visitor's message and a list of FAQ questions, determine which FAQ question (if any) is semantically equivalent to the visitor's message.
 
@@ -154,26 +167,38 @@ Rules:
     }
 
     const jsonStr = stripFences(text)
-    const parsed = JSON.parse(jsonStr)
+    const parsed: unknown = JSON.parse(jsonStr)
 
-    if (parsed.matched && parsed.id) {
-      // Validate the returned ID actually belongs to the supplied FAQ list.
-      // An invented / cross-tenant ID never produces an answer.
-      const faq = faqPairs.find(f => f.id === parsed.id)
-      if (faq) {
-        return {
-          matched: true,
-          faqPairId: faq.id,
-          // ALWAYS the REAL stored answer — never a provider-invented answer.
-          answer: faq.answer,
-          confidence: clamp01(parsed.confidence ?? 0.7),
-        }
+    // AI-Q3: strict semantic confidence gate against the UNAMBIGUOUS
+    // candidate list. A positive result requires matched===true (strict
+    // boolean), a valid exact-member string ID (must be in `eligible` —
+    // an ambiguous ID can never pass because it was excluded from the
+    // prompt and from this list), a finite numeric confidence in [0.7, 1],
+    // and a nonblank stored answer. No default confidence. No coercion.
+    // No clamping into acceptance.
+    const validated = validateSemanticMatch(parsed, eligible)
+    if (validated) {
+      return {
+        matched: true,
+        faqPairId: validated.faqPair.id,
+        // ALWAYS the REAL stored answer — never a provider-invented answer.
+        answer: validated.faqPair.answer,
+        confidence: validated.confidence,
       }
     }
 
-    // matched was false, or the ID was invented / not found.
-    // Preserve the provider's confidence (clamped) but never produce an answer.
-    return { matched: false, faqPairId: null, answer: null, confidence: clamp01(parsed.confidence) }
+    // Not matched, ID not found, confidence below threshold/invalid, or
+    // the stored answer was blank. Preserve a valid numeric confidence
+    // (clamped to [0,1]) but NEVER produce an answer.
+    let preservedConfidence = 0
+    if (
+      parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) &&
+      typeof (parsed as Record<string, unknown>).confidence === 'number' &&
+      Number.isFinite((parsed as Record<string, unknown>).confidence)
+    ) {
+      preservedConfidence = clamp01((parsed as Record<string, unknown>).confidence as number)
+    }
+    return { matched: false, faqPairId: null, answer: null, confidence: preservedConfidence }
   } catch (e) {
     console.error('[ai:matchFaq] error:', e instanceof Error ? e.message : e)
     return { matched: false, faqPairId: null, answer: null, confidence: 0 }

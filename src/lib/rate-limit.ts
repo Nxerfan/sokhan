@@ -65,8 +65,18 @@ export async function rateLimit(ip: string, tenantSlug?: string): Promise<RateLi
   if (process.env.NODE_ENV !== 'production' && !process.env.REDIS_URL) {
     if (ip === '::1' || ip === '127.0.0.1' || ip === 'localhost' || ip === '::ffff:127.0.0.1') return { allowed: true }
   }
-  const ipResult = await checkRedis(`rate:ip:${ip}`, IP_LIMIT)
-  if (!ipResult.allowed) return ipResult
+  // Test harness (Docker test stacks ONLY — SUKHAN_TEST_HARNESS is set
+  // exclusively by docker-compose.test.yml / docker-compose.lite.test.yml
+  // for dev-only test routes): bypass the shared-IP rate limit so the
+  // COMPLETE browser regression (31 test files from a single Docker
+  // proxy IP) doesn't exhaust the 30/min IP limit before reaching later
+  // suites. Production deployments (Vercel, self-hosted, clean install)
+  // NEVER set SUKHAN_TEST_HARNESS. Per-tenant limits remain enforced.
+  const bypassIpLimit = process.env.SUKHAN_TEST_HARNESS === 'true'
+  if (!bypassIpLimit) {
+    const ipResult = await checkRedis(`rate:ip:${ip}`, IP_LIMIT)
+    if (!ipResult.allowed) return ipResult
+  }
   if (tenantSlug) {
     const tenantResult = await checkRedis(`rate:tenant:${tenantSlug}`, TENANT_LIMIT)
     if (!tenantResult.allowed) return tenantResult
