@@ -31,6 +31,8 @@ async function eligible(tid:string){
   }))
 }
 const ids=(rows:ReadonlyArray<{id:string}>)=>rows.map(x=>x.id)
+function digits(s:string){return s.replace(/[۰-۹]/g,x=>String(x.charCodeAt(0)-0x06f0))
+  .replace(/[٠-٩]/g,x=>String(x.charCodeAt(0)-0x0660)).replace(/[٬،,\\s]/g,'')}
 afterAll(async()=>{
   for(const id of tenants.reverse())await globalDb.tenant.delete({where:{id}}).catch(()=>{})
 })
@@ -92,12 +94,12 @@ describe('Reviewer AI-Q4 — real DB tenant and freshness acceptance',()=>{
     const provider={complete:async()=> 'Any nonblank response'}
     const first=await answerProductQuestion('قیمت کیف دستی البرز',await eligible(a),provider)
     expect(first.productIds).toEqual([p.id])
-    expect(first.answer).toContain('123456')
+    expect(digits(first.answer||'')).toContain('123456')
     await withTenant(a,()=>db.product.updateMany({where:{id:p.id},data:{price:654321}}))
     const second=await answerProductQuestion('قیمت کیف دستی البرز',await eligible(a),provider)
     expect(second.productIds).toEqual([p.id])
-    expect(second.answer).toContain('654321')
-    expect(second.answer).not.toContain('123456')
+    expect(digits(second.answer||'')).toContain('654321')
+    expect(digits(second.answer||'')).not.toContain('123456')
   })
 
   test('updated stock state is never cached or made up',async()=>{
