@@ -160,7 +160,7 @@ jobs:
           '
       - name: Run Full DB boundary tests - AI-Q4 product, Q2 usage and Q3 FAQ
         if: github.event_name == 'pull_request' && github.head_ref == 'feat/ai-q4-grounded-products'
-        run: bun test tests/db-boundary/ai-q4-products.test.ts tests/db-boundary/ai-q4-concurrent-catalog.test.ts tests/db-boundary/ai-q2-usage.test.ts tests/db-boundary/ai-q3-faq.test.ts
+        run: bun test tests/db-boundary/ai-q4-products.test.ts tests/db-boundary/ai-q4-concurrent-catalog.test.ts tests/db-boundary/ai-q4-snapshot-review.test.ts tests/db-boundary/ai-q2-usage.test.ts tests/db-boundary/ai-q3-faq.test.ts
       - name: Run Full DB boundary tests (real PostgreSQL)
         if: github.event_name != 'pull_request' || (github.head_ref != 'feat/ai-q2-atomic-usage' && github.head_ref != 'feat/ai-q4-grounded-products')
         run: bun test tests/db-boundary/
@@ -212,7 +212,7 @@ jobs:
           '
       - name: Run Lite DB boundary tests - AI-Q4 product, Q2 usage and Q3 FAQ
         if: github.event_name == 'pull_request' && github.head_ref == 'feat/ai-q4-grounded-products'
-        run: bun test tests/db-boundary/ai-q4-products.test.ts tests/db-boundary/ai-q4-concurrent-catalog.test.ts tests/db-boundary/ai-q2-usage.test.ts tests/db-boundary/ai-q3-faq.test.ts
+        run: bun test tests/db-boundary/ai-q4-products.test.ts tests/db-boundary/ai-q4-concurrent-catalog.test.ts tests/db-boundary/ai-q4-snapshot-review.test.ts tests/db-boundary/ai-q2-usage.test.ts tests/db-boundary/ai-q3-faq.test.ts
       - name: Run Lite DB boundary tests (real PostgreSQL)
         if: github.event_name != 'pull_request' || (github.head_ref != 'feat/ai-q2-atomic-usage' && github.head_ref != 'feat/ai-q4-grounded-products')
         run: bun test tests/db-boundary/
