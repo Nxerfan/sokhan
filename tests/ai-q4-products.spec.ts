@@ -136,7 +136,7 @@ test.describe('Reviewer AI-Q4 — real grounded Product Q&A, tenant safety and b
       const token=await visitor(p,slug),r=await send(p,slug,token,'موجودی ماوس گیمینگ رایان چطور است؟')
       const text=assertProductReply(r,'ماوس گیمینگ رایان',320000)
       expect(text).toMatch(/ناموجود|اتمام|out.of.stock|موجود نیست/i)
-      expect(text).not.toContain('موجود است')
+      expect(text.replace(/ناموجود(?: است)?/g,''),'must not claim positive availability').not.toMatch(/در انبار موجود است|موجودی کافی|موجود است/)
       expect(await quota(p)).toBe(1)
     }finally{await c.close()}
   })
