@@ -48,6 +48,7 @@ jobs:
             'tests/ai-q4-large-catalog-review.spec.ts':'42d8f364fa3f4df656afb9e61eb52563a34efc9f',
             'tests/unit/ai-q5-human-takeover-contract.test.ts':'0c907672b31dc896488a3fcab62e0b0c50789634',
             'tests/db-boundary/ai-q5-human-takeover.test.ts':'69fe3c6b8aaee6dea744e1d9f6e258848a5405a7',
+            'tests/db-boundary/ai-q5-commit-race-review.test.ts':'14deb3e698f460a3a4d19392d71cbfff0c3290d4',
             'tests/ai-q5-human-takeover.spec.ts':'ecd0271c38abe39a9ccbaf51ca09a2d1f2620f41',
           }
           for(const [file,sha] of Object.entries(expected)){
@@ -56,7 +57,7 @@ jobs:
             console.log('Reviewer integrity OK: '+file)
           }
           NODE
-      - name: Syntax-check reviewer Q5 tests
+      - name: Syntax-check four reviewer Q5 suites
         run: |
           node --input-type=module <<'NODE'
           import ts from 'typescript'
@@ -64,6 +65,7 @@ jobs:
           for(const path of [
             'tests/unit/ai-q5-human-takeover-contract.test.ts',
             'tests/db-boundary/ai-q5-human-takeover.test.ts',
+            'tests/db-boundary/ai-q5-commit-race-review.test.ts',
             'tests/ai-q5-human-takeover.spec.ts',
           ]){
             const file=ts.createSourceFile(path,readFileSync(path,'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TS)
@@ -93,9 +95,11 @@ jobs:
             ]],
             ['Run Full DB boundary tests - AI-Q5 takeover only',[
               'tests/db-boundary/ai-q5-human-takeover.test.ts',
+              'tests/db-boundary/ai-q5-commit-race-review.test.ts',
             ]],
             ['Run Lite DB boundary tests - AI-Q5 takeover only',[
               'tests/db-boundary/ai-q5-human-takeover.test.ts',
+              'tests/db-boundary/ai-q5-commit-race-review.test.ts',
             ]],
             ['Run Full browser tests - AI-Q5 human takeover',['tests/ai-q5-human-takeover.spec.ts','--retries=0']],
             ['Run Lite browser tests - AI-Q5 human takeover',['tests/ai-q5-human-takeover.spec.ts','--retries=0']],
@@ -113,9 +117,9 @@ jobs:
             ['Unit tests - AI-Q5 focused takeover only',
               'run: bun test tests/unit/ai-q5-human-takeover-contract.test.ts'],
             ['Run Full DB boundary tests - AI-Q5 takeover only',
-              'run: bun test tests/db-boundary/ai-q5-human-takeover.test.ts'],
+              'run: bun test tests/db-boundary/ai-q5-human-takeover.test.ts tests/db-boundary/ai-q5-commit-race-review.test.ts'],
             ['Run Lite DB boundary tests - AI-Q5 takeover only',
-              'run: bun test tests/db-boundary/ai-q5-human-takeover.test.ts'],
+              'run: bun test tests/db-boundary/ai-q5-human-takeover.test.ts tests/db-boundary/ai-q5-commit-race-review.test.ts'],
             ['Run Full browser tests - AI-Q5 human takeover',
               'run: bunx playwright test tests/ai-q5-human-takeover.spec.ts --workers=1 --retries=0'],
             ['Run Lite browser tests - AI-Q5 human takeover',
