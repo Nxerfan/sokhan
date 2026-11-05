@@ -43,6 +43,7 @@ jobs:
             'tests/unit/ai-q4-adversarial-review.test.ts':'0915c1f18a0e3fb52efbc3356f8801906d3565d8',
             'tests/db-boundary/ai-q4-products.test.ts':'2b4d03c379910676488e8a796e67a69cd1e0e1ec',
             'tests/ai-q4-products.spec.ts':'6dbc072903fd00fcacea1f4644a0cd0c4e7fd61f',
+            'tests/ai-q4-large-catalog-review.spec.ts':'42d8f364fa3f4df656afb9e61eb52563a34efc9f',
           }
           for(const [file,expected] of Object.entries(hashes)){
             const actual=execFileSync('git',['hash-object',file],{encoding:'utf8'}).trim()
@@ -50,7 +51,7 @@ jobs:
             console.log('Reviewer integrity OK: '+file)
           }
           NODE
-      - name: Syntax-check three reviewer-owned AI-Q4 test suites
+      - name: Syntax-check five reviewer-owned AI-Q4 test suites
         run: |
           node --input-type=module <<'NODE'
           import ts from 'typescript'
@@ -60,6 +61,7 @@ jobs:
             'tests/unit/ai-q4-adversarial-review.test.ts',
             'tests/db-boundary/ai-q4-products.test.ts',
             'tests/ai-q4-products.spec.ts',
+            'tests/ai-q4-large-catalog-review.spec.ts',
           ]){
             const source=ts.createSourceFile(file,readFileSync(file,'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TS)
             if(source.parseDiagnostics.length){
@@ -82,7 +84,7 @@ jobs:
           for(const [label,part] of [['Full',full],['Lite',lite]]){
             for(const suite of [
               'tests/ai-q1-config.spec.ts','tests/ai-q2-usage.spec.ts',
-              'tests/ai-q3-faq.spec.ts','tests/ai-q4-products.spec.ts',
+              'tests/ai-q3-faq.spec.ts','tests/ai-q4-products.spec.ts','tests/ai-q4-large-catalog-review.spec.ts',
               'tests/auth-session-stress.spec.ts',
             ]){
               if(!part.includes(suite))throw Error(label+' missing mandatory browser suite: '+suite)
@@ -123,8 +125,8 @@ jobs:
               'tests/db-boundary/ai-q2-usage.test.ts',
               'tests/db-boundary/ai-q3-faq.test.ts',
             ]],
-            ['Run Full browser tests - AI-Q4 focused acceptance',['tests/ai-q4-products.spec.ts','--retries=0']],
-            ['Run Lite browser tests - AI-Q4 focused acceptance',['tests/ai-q4-products.spec.ts','--retries=0']],
+            ['Run Full browser tests - AI-Q4 focused acceptance',['tests/ai-q4-products.spec.ts','tests/ai-q4-large-catalog-review.spec.ts','--retries=0']],
+            ['Run Lite browser tests - AI-Q4 focused acceptance',['tests/ai-q4-products.spec.ts','tests/ai-q4-large-catalog-review.spec.ts','--retries=0']],
           ]
           for(const [name,files] of scopes){
             const block=step(name)
@@ -144,6 +146,6 @@ jobs:
           }
           NODE
       - name: Enumerate reviewer AI-Q4 browser cases
-        run: bunx playwright test tests/ai-q4-products.spec.ts --list
+        run: bunx playwright test tests/ai-q4-products.spec.ts tests/ai-q4-large-catalog-review.spec.ts --list
       - name: Run actual reviewer AI-Q4 policy tests
         run: bun test tests/unit/ai-q4-product-contract.test.ts tests/unit/ai-q4-adversarial-review.test.ts
