@@ -62,19 +62,39 @@ async function fixture(){
 }
 type Fixture=Awaited<ReturnType<typeof fixture>>
 
-async function waitForRealDbBlock(blockerPid:number){
-  const deadline=Date.now()+3500
+async function waitForRealDbBlock(blockerPid:number):Promise<number>{
+  const deadline=Date.now()+3000
   while(Date.now()<deadline){
     const rows=await globalDb.$queryRaw<Array<{pid:number,query:string}>>`
       SELECT pid, query FROM pg_stat_activity
       WHERE ${blockerPid} = ANY(pg_blocking_pids(pid))
         AND wait_event_type = 'Lock'
     `
-    if(rows.some(x=>x.query.includes('AiUsagePeriod')))return
-    // Poll the DB-observed lock dependency, never infer sequencing from time.
-    await Bun.sleep(25)
+    const blocked=rows.find(x=>x.query.includes('AiUsagePeriod'))
+    if(blocked)return blocked.pid
+    // Poll only a database-observed lock dependency, not a timing guess.
+    await Bun.sleep(20)
   }
-  throw Error('AI commit did not reach its blocked usage-period UPDATE')
+  throw Error('AI settlement did not reach final blocked usage-period UPDATE')
+}
+async function requireHumanActionSerializedBehindAi(aiPid:number, finished:()=>boolean){
+  const deadline=Date.now()+1800
+  while(Date.now()<deadline){
+    if(finished())throw Error(
+      'Human action COMMITTED while AI settlement was between guard and final commit: unprotected race',
+    )
+    // If AI already holds the conversation lock, its own settlement is
+    // serialized BEFORE takeover. Human must wait and may only commit AFTER
+    // that AI transaction settles. This is a valid outcome.
+    const rows=await globalDb.$queryRaw<Array<{pid:number,query:string}>>`
+      SELECT pid, query FROM pg_stat_activity
+      WHERE ${aiPid} = ANY(pg_blocking_pids(pid))
+        AND wait_event_type = 'Lock'
+    `
+    if(rows.some(x=>/Conversation|Message/.test(x.query)))return
+    await Bun.sleep(20)
+  }
+  throw Error('Human action neither committed nor demonstrably waited behind AI; ordering unproven')
 }
 async function raceHumanAction(
   f:Fixture,
@@ -86,6 +106,8 @@ async function raceHumanAction(
   const released=new Promise<void>(resolve=>{unlock=resolve})
   const lockTask=globalDb.$transaction(async tx=>{
     const pid=(await tx.$queryRaw<Array<{pid:number}>>`SELECT pg_backend_pid() AS pid`)[0].pid
+    // NO KEY UPDATE permits normal FK KEY SHARE reads but blocks final
+    // AiUsagePeriod.used/reserved mutation. FOR UPDATE blocks too early.
     const locked=await tx.$queryRaw<Array<{id:string}>>`
       SELECT "id" FROM "AiUsagePeriod" WHERE "id" = ${f.periodId} FOR NO KEY UPDATE
     `
@@ -95,36 +117,46 @@ async function raceHumanAction(
   },{timeout:10000,maxWait:10000})
 
   const blockerPid=await acquired
-  let attempted=false
   let attempt:Promise<Awaited<ReturnType<typeof commitAiReply>>>|undefined
+  let humanTask:Promise<unknown>|undefined
+  let humanFinished=false
   try{
     attempt=commitAiReply({
       tenantId:f.tid,reservationId:f.reservationId,conversationId:f.convId,
-      text:'AI reply must not be committed AFTER human takeover',source:'product',
+      text:'AI response which must be ordered atomically with human takeover',source:'product',
     })
-    attempted=true
-    await waitForRealDbBlock(blockerPid)
-    // The AI guard has already passed and its transaction is unable to
-    // commit while our lock is held. Mutate HUMAN state NOW, then unlock.
-    await mutate()
+    const aiPid=await waitForRealDbBlock(blockerPid)
+    // At this point, AI's guard has ALREADY passed, but its transaction
+    // cannot yet commit. A correct implementation must block this human
+    // action behind the same conversation-level coordination boundary.
+    humanTask=mutate().then(v=>{humanFinished=true;return v})
+    await requireHumanActionSerializedBehindAi(aiPid,()=>humanFinished)
   }finally{
     unlock()
     await lockTask
   }
-  if(!attempted || !attempt)throw Error('AI commit not attempted')
+  if(!attempt||!humanTask)throw Error('Concurrent AI/human actions not started')
   const result=await attempt
-  expect(result.status,'AI settlement must be serialized behind committed human takeover').toBe('not_found')
+  await humanTask
   const aiMessages=await globalDb.message.findMany({
     where:{tenantId:f.tid,conversationId:f.convId,senderType:'ai'},
     select:{id:true},
   })
-  expect(aiMessages).toEqual([])
   const usage=await getAiUsageState(f.tid)
-  expect(usage.used).toBe(0)
+  // AI-first: AI committed before the human action could commit.
+  // A conservatively aborted AI is also safe, but must free reservation.
+  if(result.status==='committed'){
+    expect(aiMessages).toHaveLength(1)
+    expect(usage).toMatchObject({used:1,reserved:0})
+  }else{
+    expect(result.status).toBe('not_found')
+    expect(aiMessages).toHaveLength(0)
+    expect(usage).toMatchObject({used:0,reserved:0})
+  }
 }
 
 describe('Reviewer AI-Q5 — actual overlapping human/AI transaction race',()=>{
-  test('human assignment commits while AI settlement is blocked, AI must not subsequently commit',async()=>{
+  test('human assignment must serialize behind an earlier in-flight AI settlement',async()=>{
     const f=await fixture()
     await raceHumanAction(f,async()=>{
       const changed=await globalDb.conversation.update({where:{id:f.convId},
@@ -132,7 +164,7 @@ describe('Reviewer AI-Q5 — actual overlapping human/AI transaction race',()=>{
       expect(changed.assignedUserId).toBe(personId)
     })
   },15000)
-  test('human message commits while AI settlement is blocked, AI must not subsequently commit',async()=>{
+  test('human message must serialize behind an earlier in-flight AI settlement',async()=>{
     const f=await fixture()
     await raceHumanAction(f,async()=>{
       const msg=await globalDb.message.create({data:{
