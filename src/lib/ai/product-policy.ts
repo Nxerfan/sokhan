@@ -119,6 +119,13 @@ export function normalizeProductQuery(input: string): string {
   s = s.replace(/[\u00A0\t]/g, ' ')
   s = s.replace(/\u064A/g, '\u06CC')
   s = s.replace(/\u0643/g, '\u06A9')
+  // Replace question marks and Persian/Arabic punctuation with spaces
+  // (NOT just trailing) so that internal punctuation like "بلوط؟ تمام"
+  // tokenizes correctly as ["بلوط", "تمام"] rather than ["بلوط؟", "تمام"].
+  // This prevents false non-matches when a question mark appears mid-query.
+  // Decimal points (.), percentages (%), and other meaningful punctuation
+  // are preserved.
+  s = s.replace(/[?؟،٬؛!]+/g, ' ')
   s = s.replace(/\s+/g, ' ')
   s = s.trim()
   s = s.toLowerCase()
