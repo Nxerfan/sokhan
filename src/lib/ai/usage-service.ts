@@ -477,6 +477,41 @@ export async function commitAiReply(input: {
         throw new Error('OWNERSHIP_INVALID')
       }
 
+      // 2b. Commit-time human-takeover guard (AI-Q5).
+      // Inside the transaction, check if a human has taken over the
+      // conversation since the reservation was made. This handles the
+      // critical race: visitor message → AI reserves → human takes over
+      // → AI attempts to commit. The commit MUST fail without producing
+      // an AI message or charge.
+      //
+      // Checks: assignedUserId, firstResponseAt, status, agentMessageCount.
+      // All checks use the transaction's `tx` client for a consistent
+      // read within the same atomic operation.
+      const convState = await tx.conversation.findUnique({
+        where: { id: conversationId },
+        select: {
+          tenantId: true,
+          status: true,
+          assignedUserId: true,
+          firstResponseAt: true,
+        },
+      })
+      if (!convState || convState.tenantId !== tenantId) {
+        throw new Error('OWNERSHIP_INVALID')
+      }
+      if (convState.status !== 'open' ||
+          convState.assignedUserId !== null ||
+          convState.firstResponseAt !== null) {
+        throw new Error('HUMAN_TAKEOVER')
+      }
+      // Check for agent messages in this conversation (persisted human reply).
+      const agentMsgCount = await tx.message.count({
+        where: { conversationId, tenantId, senderType: 'agent' },
+      })
+      if (agentMsgCount > 0) {
+        throw new Error('HUMAN_TAKEOVER')
+      }
+
       // 3. Create the AI Message.
       const msg = await tx.message.create({
         data: {
@@ -507,7 +542,7 @@ export async function commitAiReply(input: {
 
     return { status: 'committed', messageId }
   } catch (e) {
-    if (e instanceof Error && (e.message === 'RESERVATION_NOT_SETTLABLE' || e.message === 'OWNERSHIP_INVALID')) {
+    if (e instanceof Error && (e.message === 'RESERVATION_NOT_SETTLABLE' || e.message === 'OWNERSHIP_INVALID' || e.message === 'HUMAN_TAKEOVER')) {
       const refetched = await globalDb.aiReplyReservation.findUnique({
         where: { id: reservationId },
         select: { status: true, aiMessageId: true },
