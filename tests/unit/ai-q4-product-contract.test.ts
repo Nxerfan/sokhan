@@ -164,6 +164,19 @@ describe('Reviewer AI-Q4 — delivered answer grounded in stored product facts',
         .toEqual({answered:false,answer:null,productIds:[]})
     }
   })
+  test('non-IRT catalog currency cannot be deceptively represented as Toman',async()=>{
+    const otherCurrency=[{
+      id:'usd-item',name:'ساعت خارجی نارون',description:'',price:1000,
+      availability:'in_stock',currency:'USD',
+    }]
+    const provider={complete:async()=> 'ساعت خارجی نارون فقط 1000 تومان است'}
+    const r=await answerProductQuestion('قیمت ساعت خارجی نارون',otherCurrency,provider)
+    if(r.answered){
+      expect(r.productIds).toEqual(['usd-item'])
+      expect(r.answer||'').not.toMatch(/تومان|Toman|IRT/i)
+      expect(r.answer||'').toMatch(/USD|دلار/i)
+    }else expect(r).toEqual({answered:false,answer:null,productIds:[]})
+  })
   test('returned product IDs never reflect provider-invented IDs',async()=>{
     const provider={complete:async()=> '{"productIds":["foreign-tenant","headset"],"price":1}'}
     const r=await answerProductQuestion('قیمت هدفون اسپارک',asProducts(),provider)
