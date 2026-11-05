@@ -14,7 +14,6 @@ const catalog = Object.freeze([
   Object.freeze({ id:'mouse',name:'ماوس گیمینگ',description:'سنسور DPI 16000',price:800000,availability:'out_of_stock' }),
   Object.freeze({ id:'book',name:'کتاب آموزشی',description:'راهنمای طراحی',price:0,availability:'in_stock' }),
 ])
-type Product = (typeof catalog)[number]
 const asProducts=()=>catalog.map(x=>({...x}))
 const ids=(r:ReadonlyArray<{id:string}>)=>r.map(x=>x.id)
 function digits(s:string){
