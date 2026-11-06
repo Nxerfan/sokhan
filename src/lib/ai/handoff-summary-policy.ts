@@ -14,9 +14,10 @@
  * - Agent, system, file, and malformed messages are excluded.
  * - Source text is treated as untrusted — HTML/script tags are stripped.
  * - No hallucinated prices, availability, commitments, or recommendations.
- * - Duplicate message IDs with conflicting content → fail closed (null).
+ * - Duplicate message IDs with ANY conflicting field → fail closed (null).
  * - Maximum 30 source message IDs and 3,000 characters of summary text.
  * - Per-message extract bounded to 200 characters.
+ * - Every source ID in the output has visible evidence in the summary text.
  * - Never mutates source messages or input arrays.
  * - Deterministic chronological ordering with stable ID tie-breaking.
  */
@@ -88,25 +89,14 @@ export function handoffSummaryEligible(
 // Sanitization
 // ---------------------------------------------------------------------------
 
-/**
- * Strip HTML/script tags and dangerous attributes from untrusted text.
- * The output is safe for React text rendering (never dangerouslySetInnerHTML).
- */
 function sanitizeText(raw: string): string {
-  // Remove any HTML tags entirely — keep only text content.
   let s = raw.replace(/<[^>]*>/g, '')
-  // Remove dangerous protocol prefixes that could appear in stripped text.
   s = s.replace(/javascript:/gi, '')
   s = s.replace(/on\w+\s*=/gi, '')
-  // Collapse excessive whitespace.
   s = s.replace(/\s+/g, ' ').trim()
   return s
 }
 
-/**
- * Extract a safe text string from a message's content field.
- * Returns null if the content is not a valid text message.
- */
 function extractText(content: unknown): string | null {
   if (content === null || typeof content !== 'object') return null
   const obj = content as Record<string, unknown>
@@ -117,28 +107,44 @@ function extractText(content: unknown): string | null {
 }
 
 // ---------------------------------------------------------------------------
+// Full identity comparison (BLOCKER 1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Compare ALL factual fields of two messages with the same ID.
+ * Returns true if they are identical (safe to deduplicate).
+ * Returns false if ANY field differs (contradictory duplicate → fail closed).
+ *
+ * Compared fields: senderType, contentType, createdAt, content (via extracted text).
+ */
+function messagesIdentical(a: HandoffSourceMessage, b: HandoffSourceMessage): boolean {
+  if (a.senderType !== b.senderType) return false
+  if (a.contentType !== b.contentType) return false
+  if (a.createdAt.getTime() !== b.createdAt.getTime()) return false
+  const textA = extractText(a.content)
+  const textB = extractText(b.content)
+  return textA === textB
+}
+
+// ---------------------------------------------------------------------------
 // Summary generation
 // ---------------------------------------------------------------------------
 
 /**
  * Generate a deterministic, grounded summary from conversation messages.
  *
- * Only `contact` and `ai` messages with `contentType: 'text'` and valid
- * text content contribute. Messages are sorted chronologically (createdAt
- * asc, then ID asc for stable tie-breaking).
+ * BLOCKER 1: Duplicate IDs compared across ALL factual fields
+ *   (senderType, contentType, createdAt, content). Any conflict → null.
  *
- * Returns null when:
- * - No valid AI message exists in the source
- * - Duplicate IDs have conflicting content
- * - All messages are invalid/malformed
+ * BLOCKER 2: Source IDs and excerpts built together — only IDs whose
+ *   evidence is genuinely in the final text are retained.
  *
- * Bounded output:
- * - Maximum 30 source message IDs (most recent first if truncated)
- * - Maximum 3,000 characters of summary text
- * - Per-message extract: 200 characters
- * - `truncated` flag set when any bound is hit
+ * BLOCKER 3: Bounded subset selected first, then sorted chronologically
+ *   by (createdAt, id) before rendering. Deterministic regardless of
+ *   input order. When an older AI reply is retained from beyond the
+ *   30-message window, it appears in chronological position.
  *
- * Never mutates the input array or its elements.
+ * Returns null when no valid AI message exists, or duplicate IDs conflict.
  */
 export function summarizeHandoffMessages(
   messages: ReadonlyArray<HandoffSourceMessage>,
@@ -147,8 +153,7 @@ export function summarizeHandoffMessages(
     return null
   }
 
-  // Filter to valid contact/ai text messages with valid dates and content.
-  // Track seen IDs for deduplication + conflict detection.
+  // Filter + deduplicate with full identity comparison (BLOCKER 1).
   const seenIds = new Map<string, HandoffSourceMessage>()
   const valid: HandoffSourceMessage[] = []
 
@@ -160,21 +165,16 @@ export function summarizeHandoffMessages(
     if (msg.contentType !== 'text') continue
     if (msg.senderType !== 'contact' && msg.senderType !== 'ai') continue
     if (!(msg.createdAt instanceof Date) || isNaN(msg.createdAt.getTime())) continue
-
     const text = extractText(msg.content)
     if (text === null) continue
 
-    // Deduplicate by ID — detect conflicting content.
     const existing = seenIds.get(msg.id)
     if (existing) {
-      // Same ID already seen — compare content.
-      const existingText = extractText(existing.content)
-      if (existingText !== text) {
-        // Conflicting duplicate — fail closed.
-        return null
+      // BLOCKER 1: Compare ALL factual fields, not just text.
+      if (!messagesIdentical(existing, msg)) {
+        return null // Conflicting duplicate — fail closed.
       }
-      // Identical duplicate — skip (don't add again).
-      continue
+      continue // Identical duplicate — skip.
     }
     seenIds.set(msg.id, msg)
     valid.push(msg)
@@ -186,8 +186,7 @@ export function summarizeHandoffMessages(
     return null
   }
 
-  // Sort chronologically: createdAt asc, then ID asc for stable tie-breaking.
-  // Create a shallow copy to avoid mutating the input.
+  // Sort chronologically FIRST: (createdAt asc, id asc).
   const sorted = [...valid].sort((a, b) => {
     const timeA = a.createdAt.getTime()
     const timeB = b.createdAt.getTime()
@@ -195,54 +194,156 @@ export function summarizeHandoffMessages(
     return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
   })
 
-  // Count AI messages.
   const aiMessageCount = sorted.filter((m) => m.senderType === 'ai').length
 
-  // Build summary text and source IDs with bounds.
+  // BLOCKER 3: Select a bounded subset that includes AI context.
+  // If we have > MAX_SOURCE_IDS messages, select a window that:
+  // 1. Contains at least one AI message.
+  // 2. Is bounded to MAX_SOURCE_IDS entries.
+  // 3. Is then sorted chronologically before rendering.
+  let selected: HandoffSourceMessage[]
   let truncated = false
-  const sourceMessageIds: string[] = []
-  const parts: string[] = []
 
-  // If we have more than MAX_SOURCE_IDS messages, keep the most recent ones
-  // that include at least one AI message. Take the last MAX_SOURCE_IDS from
-  // the sorted array (most recent).
-  let selected = sorted
-  if (sorted.length > MAX_SOURCE_IDS) {
-    selected = sorted.slice(-MAX_SOURCE_IDS)
+  if (sorted.length <= MAX_SOURCE_IDS) {
+    selected = sorted
+  } else {
     truncated = true
-    // Ensure at least one AI message is in the selection.
-    if (!selected.some((m) => m.senderType === 'ai')) {
-      // Find the last AI message and include it.
-      const lastAi = sorted.filter((m) => m.senderType === 'ai').pop()
-      if (lastAi) {
-        selected = [...selected.slice(0, -1), lastAi]
+    // Find the last AI message index.
+    let lastAiIdx = -1
+    for (let i = sorted.length - 1; i >= 0; i--) {
+      if (sorted[i].senderType === 'ai') {
+        lastAiIdx = i
+        break
       }
+    }
+    if (lastAiIdx >= 0) {
+      // Take a window that includes the last AI message and surrounding context.
+      // Center the window around the AI message if possible.
+      const halfWindow = Math.floor(MAX_SOURCE_IDS / 2)
+      let start = Math.max(0, lastAiIdx - halfWindow)
+      const end = Math.min(sorted.length, start + MAX_SOURCE_IDS)
+      // Adjust start if end hit the limit.
+      if (end - start < MAX_SOURCE_IDS) {
+        start = Math.max(0, end - MAX_SOURCE_IDS)
+      }
+      selected = sorted.slice(start, end)
+      // Ensure at least one AI message is in the selection.
+      if (!selected.some((m) => m.senderType === 'ai')) {
+        // Force-include the last AI message.
+        selected = [...selected.slice(0, -1), sorted[lastAiIdx]]
+      }
+    } else {
+      // No AI message found (shouldn't happen since hasAi is true).
+      selected = sorted.slice(0, MAX_SOURCE_IDS)
     }
   }
 
-  for (const msg of selected) {
+  // BLOCKER 2: Build source IDs and excerpts TOGETHER.
+  // Only retain IDs whose evidence is genuinely included in the final text.
+  // We build parts incrementally and stop when we hit the text limit.
+  // Source IDs are only added for parts that make it into the final text.
+  //
+  // IMPORTANT: We must ensure at least one AI message is included in the
+  // text. If visitor messages are very long and fill the text limit before
+  // an AI message is reached, we reserve space for the AI message by
+  // processing AI messages first in the text budget.
+  const sourceMessageIds: string[] = []
+  const parts: string[] = []
+  let currentLength = 0
+
+  // Helper to build a part string for a message.
+  function buildPart(msg: HandoffSourceMessage): string {
     const text = extractText(msg.content)
-    if (text === null) continue
-
-    sourceMessageIds.push(msg.id)
-
-    // Truncate per-message extract.
+    if (text === null) return ''
     let extract = text
     if (extract.length > MAX_PER_MESSAGE_EXTRACT) {
       extract = extract.slice(0, MAX_PER_MESSAGE_EXTRACT) + '…'
-      truncated = true
+      truncated = true // Set truncated when per-message extract is cut.
     }
-
-    // Prefix with sender label.
     const label = msg.senderType === 'ai' ? 'AI' : 'بازدیدکننده'
-    parts.push(`${label}: ${extract}`)
+    return `${label}: ${extract}`
   }
 
-  // Join parts and truncate total text.
+  // Find the first AI message in the selection (chronologically earliest).
+  const firstAiInSelection = selected.find((m) => m.senderType === 'ai')
+
+  // First pass: build parts in chronological order, but ensure the AI
+  // message gets included. If the AI message hasn't been added yet when
+  // we're near the text limit, we force-include it.
+  let aiIncluded = false
+
+  for (const msg of selected) {
+    const part = buildPart(msg)
+    if (!part) continue
+
+    const separator = parts.length > 0 ? 1 : 0
+
+    // Check if this is an AI message.
+    if (msg.senderType === 'ai') {
+      aiIncluded = true
+    }
+
+    // If this is NOT an AI message and we haven't included an AI message yet,
+    // check if adding this part would leave room for an AI message.
+    if (msg.senderType !== 'ai' && !aiIncluded && firstAiInSelection) {
+      const aiPart = buildPart(firstAiInSelection)
+      // Reserve space for the AI message.
+      if (currentLength + separator + part.length + 1 + aiPart.length > MAX_SUMMARY_TEXT) {
+        // Skip this visitor message — we need room for the AI message.
+        truncated = true
+        continue
+      }
+    }
+
+    // Check if adding this part would exceed the text limit.
+    if (currentLength + separator + part.length > MAX_SUMMARY_TEXT) {
+      truncated = true
+      // If this is an AI message and no AI has been included yet, force it.
+      if (msg.senderType === 'ai' && !aiIncluded) {
+        // Remove visitor messages from the end to make room.
+        while (parts.length > 0 && currentLength + 1 + part.length > MAX_SUMMARY_TEXT) {
+          const removed = parts.pop()!
+          const removedId = sourceMessageIds.pop()!
+          currentLength -= removed.length + 1
+          truncated = true
+        }
+        if (currentLength + (parts.length > 0 ? 1 : 0) + part.length <= MAX_SUMMARY_TEXT) {
+          parts.push(part)
+          currentLength += (parts.length > 1 ? 1 : 0) + part.length
+          sourceMessageIds.push(msg.id)
+          aiIncluded = true
+        }
+      }
+      break
+    }
+
+    parts.push(part)
+    currentLength += separator + part.length
+    sourceMessageIds.push(msg.id)
+  }
+
+  // Join parts.
   let text = parts.join('\n')
+
+  // If text is still over the limit (edge case), truncate.
   if (text.length > MAX_SUMMARY_TEXT) {
     text = text.slice(0, MAX_SUMMARY_TEXT - 1) + '…'
     truncated = true
+    // BLOCKER 2: Remove source IDs whose evidence was truncated away.
+    // Re-check which IDs still have visible evidence.
+    const visibleIds: string[] = []
+    for (const id of sourceMessageIds) {
+      const msg = selected.find((m) => m.id === id)
+      if (!msg) continue
+      const msgText = extractText(msg.content)
+      if (msgText && text.includes(sanitizeText(msgText).slice(0, Math.min(msgText.length, 20)))) {
+        visibleIds.push(id)
+      }
+    }
+    // Only keep IDs with visible evidence.
+    while (sourceMessageIds.length > visibleIds.length) {
+      sourceMessageIds.pop()
+    }
   }
 
   return {

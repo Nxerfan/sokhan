@@ -629,8 +629,8 @@ export function InboxView() {
               <div className="space-y-3 p-4">
                 {/* AI-Q6: Handoff summary panel — displayed only when a
                     stored summary exists for this conversation. Safe text
-                    rendering — never dangerouslySetInnerHTML. Cleared on
-                    conversation switch. Not visible to visitors. */}
+                    rendering only. Cleared on conversation switch.
+                    Not visible to visitors. */}
                 <HandoffSummaryPanel conversationId={selected.id} />
                 {messages.filter(m => m.conversationId === selectedId).map(msg => (
                   <MessageBubble key={msg.id} msg={msg} agentId={session?.user?.id} />
@@ -751,7 +751,7 @@ function MessageBubble({ msg, agentId }: { msg: Message; agentId?: string }) {
 /**
  * AI-Q6 HandoffSummaryPanel — displays the stored handoff summary for the
  * currently selected conversation. Fetches from the authenticated dashboard
- * API. Safe React text rendering — never dangerouslySetInnerHTML.
+ * API. Safe React text rendering only (no raw HTML injection).
  *
  * - No panel rendered when no summary exists.
  * - Cleared on conversation switch (different conversationId).

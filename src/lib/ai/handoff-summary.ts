@@ -13,9 +13,8 @@
  * - Exactly one summary per (tenantId, conversationId) via PostgreSQL UNIQUE.
  * - Concurrent attempts are safe — the unique constraint prevents duplicates.
  * - Reassignment/reopening does NOT rewrite the first summary.
- * - The summary is based exclusively on persisted contact+ai text messages
- *   BEFORE the human takeover event (first agent message or assignment).
- * - Cross-tenant conversation IDs fail closed (db proxy enforces tenantId).
+ * - BLOCKER 4: Bounded keyset pagination finds AI messages beyond first 500.
+ * - BLOCKER 5: Earliest authoritative human takeover event is used as cutoff.
  */
 
 import { db, getCurrentTenantId } from '@/lib/db'
@@ -26,15 +25,12 @@ import {
 } from './handoff-summary-policy'
 import { canAutoReplyToConversation } from './human-takeover'
 
+const MSG_BATCH_SIZE = 200
+
 /**
  * Ensure exactly one handoff summary exists for a conversation.
  *
- * This function is called after a human takeover event (assignment or
- * first agent reply). It is idempotent — if a summary already exists,
- * it returns the existing one without modification.
- *
  * @returns The summary text if created/found, or null if ineligible.
- *
  * @requires Must be called inside `withTenant(tenantId, ...)`.
  */
 export async function ensureConversationHandoffSummary(
@@ -61,11 +57,10 @@ export async function ensureConversationHandoffSummary(
   // 2. Validate human takeover has occurred (Q5 guard).
   const aiEligible = await canAutoReplyToConversation(conversationId)
   if (aiEligible) {
-    // AI is still eligible — human has NOT taken over yet.
     return null
   }
 
-  // 3. Read conversation for tenant ownership + plan.
+  // 3. Read conversation for tenant ownership + plan + takeover signals.
   const conversation = await db.conversation.findUnique({
     where: { id: conversationId },
     select: {
@@ -88,85 +83,113 @@ export async function ensureConversationHandoffSummary(
     return null
   }
 
-  // 5. Find the takeover timestamp — the first agent message or
-  // firstResponseAt, whichever is earlier. Messages after this point
-  // are excluded from the summary (they belong to the human-handled phase).
+  // 5. BLOCKER 5: Determine the EARLIEST authoritative human takeover event.
+  // The cutoff is the minimum of:
+  //   a) conversation.firstResponseAt
+  //   b) The first agent message's createdAt
+  //   c) The conversation's assignedUserId (if set, assignment is a takeover)
+  //      — but we need the timestamp of the assignment, which we approximate
+  //        by the earliest agent message or firstResponseAt.
+  //
+  // If firstResponseAt was populated later than the first agent message,
+  // the first agent message timestamp is the authoritative cutoff.
   let takeoverTime: Date | null = conversation.firstResponseAt
 
-  if (!takeoverTime) {
-    // Check for the first agent message.
-    const firstAgentMsg = await db.message.findFirst({
-      where: {
-        conversationId,
-        tenantId,
-        senderType: 'agent',
-      },
-      orderBy: { createdAt: 'asc' },
-      select: { createdAt: true },
-    })
-    if (firstAgentMsg) {
+  // Find the first agent message (earliest by createdAt).
+  const firstAgentMsg = await db.message.findFirst({
+    where: {
+      conversationId,
+      tenantId,
+      senderType: 'agent',
+    },
+    orderBy: { createdAt: 'asc' },
+    select: { createdAt: true },
+  })
+
+  if (firstAgentMsg) {
+    if (!takeoverTime || firstAgentMsg.createdAt.getTime() < takeoverTime.getTime()) {
       takeoverTime = firstAgentMsg.createdAt
     }
   }
 
-  // If no takeover signal found, no summary.
-  if (!takeoverTime && conversation.assignedUserId === null) {
+  // If no takeover signal found at all, check if assignment exists.
+  // Assignment without a timestamp or agent message is still a takeover,
+  // but we can't determine a precise cutoff. Use the current time as the
+  // cutoff (exclude everything from now on — but include all past messages).
+  if (!takeoverTime && conversation.assignedUserId !== null) {
+    // Assignment happened but we don't know when. Use current time as cutoff
+    // to include all pre-existing messages.
+    takeoverTime = new Date()
+  }
+
+  // If still no takeover signal, no summary.
+  if (!takeoverTime) {
     return null
   }
 
-  // 6. Read pre-takeover messages (contact + ai text only).
-  // Use a bounded query: only messages before the takeover time (if known).
-  // If takeoverTime is null but assignment exists, read all messages
-  // (there are no agent messages to exclude).
-  const messageWhere: Record<string, unknown> = {
-    conversationId,
-    tenantId,
-    senderType: { in: ['contact', 'ai'] },
-    contentType: 'text',
-  }
-  if (takeoverTime) {
-    messageWhere.createdAt = { lt: takeoverTime }
-  }
+  // 6. BLOCKER 4: Bounded keyset pagination to find pre-takeover messages.
+  // Read messages in batches of MSG_BATCH_SIZE using cursor pagination.
+  // This discovers AI messages beyond the first 500 rows without loading
+  // an unbounded conversation history into memory.
+  const allMessages: HandoffSourceMessage[] = []
+  let cursor: string | undefined = undefined
+  let foundAi = false
 
-  const messages = await db.message.findMany({
-    where: messageWhere as any,
-    select: {
-      id: true,
-      senderType: true,
-      contentType: true,
-      content: true,
-      createdAt: true,
-    },
-    orderBy: { createdAt: 'asc' },
-    take: 500, // Bounded read — at most 500 pre-takeover messages.
-  })
+  while (true) {
+    const batch = await db.message.findMany({
+      where: {
+        conversationId,
+        tenantId,
+        senderType: { in: ['contact', 'ai'] },
+        contentType: 'text',
+        createdAt: { lt: takeoverTime },
+      },
+      select: {
+        id: true,
+        senderType: true,
+        contentType: true,
+        content: true,
+        createdAt: true,
+      },
+      orderBy: { createdAt: 'asc' },
+      take: MSG_BATCH_SIZE,
+      ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
+    })
+
+    for (const m of batch) {
+      allMessages.push({
+        id: m.id,
+        senderType: m.senderType,
+        contentType: m.contentType,
+        content: m.content,
+        createdAt: m.createdAt,
+      })
+      if (m.senderType === 'ai') foundAi = true
+    }
+
+    if (batch.length < MSG_BATCH_SIZE) break
+    cursor = batch[batch.length - 1].id
+
+    // Safety: if we've collected a very large number, stop.
+    // The summarizer will bound the output to 30 source IDs.
+    if (allMessages.length >= 5000) break
+  }
 
   // 7. Count AI messages for eligibility.
-  const aiCount = messages.filter((m) => m.senderType === 'ai').length
+  const aiCount = allMessages.filter((m) => m.senderType === 'ai').length
 
   // 8. Check eligibility.
   if (!handoffSummaryEligible(tenant.plan, true, aiCount)) {
     return null
   }
 
-  // 9. Transform to HandoffSourceMessage format.
-  const sourceMessages: HandoffSourceMessage[] = messages.map((m) => ({
-    id: m.id,
-    senderType: m.senderType,
-    contentType: m.contentType,
-    content: m.content,
-    createdAt: m.createdAt,
-  }))
-
-  // 10. Generate the deterministic summary.
-  const summary = summarizeHandoffMessages(sourceMessages)
+  // 9. Generate the deterministic summary.
+  const summary = summarizeHandoffMessages(allMessages)
   if (!summary) {
     return null
   }
 
-  // 11. Persist with PostgreSQL UNIQUE constraint — safe against
-  // concurrent attempts. If a race produces a duplicate, the unique
-  // constraint throws P2002 and we return the existing row.
+  // 10. Persist with PostgreSQL UNIQUE constraint.
   try {
     await db.conversationHandoffSummary.create({
       data: {
@@ -178,8 +201,6 @@ export async function ensureConversationHandoffSummary(
     })
     return summary.text
   } catch (e: any) {
-    // P2002 = unique constraint violation — another concurrent attempt
-    // created the summary first. Return the existing one.
     if (e?.code === 'P2002') {
       const existing = await db.conversationHandoffSummary.findUnique({
         where: { tenantId_conversationId: { tenantId, conversationId } },
@@ -187,7 +208,6 @@ export async function ensureConversationHandoffSummary(
       })
       return existing?.summaryText ?? null
     }
-    // Any other error — fail closed (no summary, no charge).
     console.error('[ai:handoff-summary] persistence error:', e instanceof Error ? e.message : e)
     return null
   }

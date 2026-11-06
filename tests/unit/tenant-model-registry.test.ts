@@ -171,6 +171,7 @@ test('All expected tenant-scoped models are present (snapshot of the known set)'
     'ConnectorConfig',
     'Contact',
     'Conversation',
+    'ConversationHandoffSummary',
     'Department',
     'FaqPair',
     'Invitation',
