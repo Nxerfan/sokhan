@@ -61,8 +61,9 @@ jobs:
             'tests/db-boundary/ai-q6-latest-answer-review.test.ts':'a179536129a3c9f168d88bc6d95f085ec3f5480b',
             'tests/db-boundary/ai-q6-same-millisecond-handoff-review.test.ts':'6cf596c9ad75c5b26b38ab76d794518ee15b97aa',
             'tests/db-boundary/ai-q6-commit-order-review.test.ts':'a1e7257399c5cca3e7e78a119c88feb5c0d05f78',
+            'tests/db-boundary/ai-q6-pre-fk-order-review.test.ts':'1914b3a2941e2ba2b22a8527a9759c0dc6b564cb',
           }
-          if(Object.keys(expected).length!==31)throw Error('Expected 21 Q1-Q5 + 10 Q6 reviewer-protected files')
+          if(Object.keys(expected).length!==32)throw Error('Expected 21 Q1-Q5 + 11 Q6 reviewer-protected files')
           for(const [file,sha] of Object.entries(expected)){
             const actual=execFileSync('git',['hash-object',file],{encoding:'utf8'}).trim()
             if(actual!==sha)throw Error('Reviewer-owned test changed: '+file)
@@ -84,6 +85,7 @@ jobs:
             ['tests/db-boundary/ai-q6-latest-answer-review.test.ts',1],
             ['tests/db-boundary/ai-q6-same-millisecond-handoff-review.test.ts',2],
             ['tests/db-boundary/ai-q6-commit-order-review.test.ts',2],
+            ['tests/db-boundary/ai-q6-pre-fk-order-review.test.ts',2],
             ['tests/ai-q6-acceptance.spec.ts',8],
           ]
           for(const [file,count] of checks){
@@ -115,8 +117,8 @@ jobs:
           }
           const scopedSteps=[
             ['Unit tests - AI-Q6 focused acceptance','run: bun test tests/unit/ai-q6-acceptance.test.ts tests/unit/ai-q6-adversarial-review.test.ts tests/unit/ai-q6-full-identity-review.test.ts'],
-            ['Run Full DB boundary tests - AI-Q6 focused acceptance','run: bun test tests/db-boundary/ai-q6-acceptance.test.ts tests/db-boundary/ai-q6-adversarial-review.test.ts tests/db-boundary/ai-q6-handoff-invariants-review.test.ts tests/db-boundary/ai-q6-latest-answer-review.test.ts tests/db-boundary/ai-q6-same-millisecond-handoff-review.test.ts tests/db-boundary/ai-q6-commit-order-review.test.ts'],
-            ['Run Lite DB boundary tests - AI-Q6 focused acceptance','run: bun test tests/db-boundary/ai-q6-acceptance.test.ts tests/db-boundary/ai-q6-adversarial-review.test.ts tests/db-boundary/ai-q6-handoff-invariants-review.test.ts tests/db-boundary/ai-q6-latest-answer-review.test.ts tests/db-boundary/ai-q6-same-millisecond-handoff-review.test.ts tests/db-boundary/ai-q6-commit-order-review.test.ts'],
+            ['Run Full DB boundary tests - AI-Q6 focused acceptance','run: bun test tests/db-boundary/ai-q6-acceptance.test.ts tests/db-boundary/ai-q6-adversarial-review.test.ts tests/db-boundary/ai-q6-handoff-invariants-review.test.ts tests/db-boundary/ai-q6-latest-answer-review.test.ts tests/db-boundary/ai-q6-same-millisecond-handoff-review.test.ts tests/db-boundary/ai-q6-commit-order-review.test.ts tests/db-boundary/ai-q6-pre-fk-order-review.test.ts'],
+            ['Run Lite DB boundary tests - AI-Q6 focused acceptance','run: bun test tests/db-boundary/ai-q6-acceptance.test.ts tests/db-boundary/ai-q6-adversarial-review.test.ts tests/db-boundary/ai-q6-handoff-invariants-review.test.ts tests/db-boundary/ai-q6-latest-answer-review.test.ts tests/db-boundary/ai-q6-same-millisecond-handoff-review.test.ts tests/db-boundary/ai-q6-commit-order-review.test.ts tests/db-boundary/ai-q6-pre-fk-order-review.test.ts'],
             ['Run Full browser tests - AI-Q6 focused acceptance','run: bunx playwright test tests/ai-q6-acceptance.spec.ts --workers=1 --retries=0'],
             ['Run Lite browser tests - AI-Q6 focused acceptance','run: bunx playwright test tests/ai-q6-acceptance.spec.ts --workers=1 --retries=0'],
           ]
@@ -168,6 +170,7 @@ jobs:
             'tests/db-boundary/ai-q6-latest-answer-review.test.ts',
             'tests/db-boundary/ai-q6-same-millisecond-handoff-review.test.ts',
             'tests/db-boundary/ai-q6-commit-order-review.test.ts',
+            'tests/db-boundary/ai-q6-pre-fk-order-review.test.ts',
             'tests/ai-q6-acceptance.spec.ts',
           ]
           for(const file of required){
