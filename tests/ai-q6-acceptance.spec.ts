@@ -172,6 +172,10 @@ test.describe('Reviewer AI-Q6 — no-cost grounded human handoff (real Full and 
       await globalDb.message.create({data:{
         tenantId:o.tenantId,conversationId:first.conversationId,senderType:'ai',
         contentType:'text',status:'sent',content:{text:'HISTORIC_AI_SHOULD_NOT_UNLOCK_FREE'},
+        // Historical Q2 backfill correctly counts sent AI messages inside
+        // the current billing period. This fixture must be historical in
+        // TIME, not just by label; Q6 is still prohibited on Free.
+        createdAt:new Date('2025-01-01T00:00:00.000Z'),
       }})
       await assign(o,first.conversationId)
       expect(await handoff(o,first.conversationId)).toBeNull()
