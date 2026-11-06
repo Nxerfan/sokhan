@@ -15,15 +15,20 @@
  * - Concurrent attempts are safe — the unique constraint prevents duplicates.
  * - Reassignment/reopening does NOT rewrite the first summary.
  *
- * ## BLOCKER 1 — bounded retrieval beyond an arbitrary page limit
+ * ## BLOCKER 1 — bounded retrieval: latest AI answers prioritized
  *
  * The service does NOT accumulate an unbounded array of message rows. It:
  *   1. Counts pre-takeover AI messages (DB-side COUNT — O(1) memory).
  *      If zero, returns null immediately (no AI history to summarize).
- *   2. Fetches the bounded set of AI messages directly (targeted query),
- *      so an AI reply at row 5,001 is found even when 5,000 visitor
- *      messages precede it.
- *   3. Fetches a bounded context window around the AI-handled portion.
+ *   2. Fetches the LATEST N AI messages in DESC (createdAt, id) order
+ *      (take MAX_AI_FETCH). This prioritizes the most recent — potentially
+ *      corrective — AI answers. If the conversation has 101 AI replies and
+ *      substantial intervening visitor history, the final corrective reply
+ *      is retained, not the oldest 100. A lone AI reply at row 5,001 is
+ *      also found (it is the latest — and only — AI reply, selected by
+ *      senderType, not by pagination position).
+ *   3. Fetches a bounded context window ordered DESC (latest first) around
+ *      the retained AI portion — not exclusively from the earliest messages.
  *   Memory is bounded to at most MAX_AI_FETCH + MAX_CONTEXT_WINDOW +
  *   MAX_PRE_AI_CONTEXT rows (= 530). No unbounded history array.
  *
@@ -198,7 +203,7 @@ export async function ensureConversationHandoffSummary(
 }
 
 // ---------------------------------------------------------------------------
-// BLOCKER 1 + 2: Bounded retrieval + earliest cutoff in one snapshot
+// BLOCKER 1: Bounded retrieval — latest AI answers prioritized + one snapshot
 // ---------------------------------------------------------------------------
 
 /**
@@ -208,7 +213,7 @@ export async function ensureConversationHandoffSummary(
  * (first agent message) and every source message read are observed at the
  * SAME database snapshot — one defensible pre-handoff state.
  *
- * Strategy (memory-bounded, finds AI messages beyond row 5,000):
+ * Strategy (memory-bounded, prioritizes the LATEST AI answers):
  *
  *   1. Find the earliest agent message (inside the snapshot transaction).
  *      Compute cutoff = min(firstHandoffAt, firstResponseAt, firstAgentMsg).
@@ -218,21 +223,28 @@ export async function ensureConversationHandoffSummary(
  *      return immediately — no AI history. An exhausted scan budget is
  *      NEVER interpreted as "no AI history exists."
  *
- *   3. Fetch the bounded set of AI messages directly (targeted query,
- *      take MAX_AI_FETCH). This finds an AI reply at row 5,001 even when
- *      5,000 visitor messages precede it — AI rows are selected by
- *      senderType, not by pagination position.
+ *   3. Fetch the LATEST N AI messages in DESC (createdAt, id) order
+ *      (take MAX_AI_FETCH). This prioritizes the most recent — potentially
+ *      corrective — AI answers. If the conversation has 101 AI replies and
+ *      substantial intervening visitor history, the final corrective reply
+ *      is retained, not the oldest 100. A lone AI reply at row 5,001 is
+ *      also found (it is the latest — and only — AI reply).
  *
- *   4. Fetch a bounded context window of ALL pre-takeover messages around
- *      the AI-handled portion (from the earliest AI message to the cutoff).
- *      Bounded to MAX_CONTEXT_WINDOW rows, ordered by (createdAt, id) for
- *      deterministic stable ordering when timestamps collide.
+ *   4. Sort the fetched AI messages chronologically (ASC) to define the
+ *      "retained AI portion": from earliestRetainedAi to latestRetainedAi.
  *
- *   5. Fetch a small visitor context window immediately before the earliest
- *      AI message (MAX_PRE_AI_CONTEXT rows) so the agent sees what triggered
- *      the first AI reply.
+ *   5. Fetch a bounded context window of ALL pre-takeover text messages
+ *      from earliestRetainedAi to the cutoff, ordered DESC (latest first)
+ *      so the context budget is filled from the MOST RECENT context around
+ *      the latest AI answers — not exclusively from the earliest historical
+ *      messages. Bounded to MAX_CONTEXT_WINDOW rows.
  *
- *   6. Merge all fetched rows, deduplicate by id, sort by (createdAt, id).
+ *   6. Fetch a small visitor context window immediately before the earliest
+ *      retained AI message (MAX_PRE_AI_CONTEXT rows, DESC) so the agent sees
+ *      what triggered the earliest retained AI reply.
+ *
+ *   7. Merge all fetched rows, deduplicate by id. The pure policy handles
+ *      full-identity conflict detection and chronological sorting.
  *
  * Memory: at most MAX_AI_FETCH + MAX_CONTEXT_WINDOW + MAX_PRE_AI_CONTEXT
  * rows (= 530) materialized at any time. No unbounded history array.
@@ -245,7 +257,7 @@ async function fetchBoundedSnapshot(
 ): Promise<FetchedSnapshot | null> {
   return db.$transaction(
     async (tx) => {
-      // --- BLOCKER 2: Resolve the earliest authoritative takeover cutoff ---
+      // --- Resolve the earliest authoritative takeover cutoff ---
       // (inside the snapshot transaction for consistency)
       const candidates: Date[] = []
       if (firstHandoffAt) candidates.push(firstHandoffAt)
@@ -277,7 +289,7 @@ async function fetchBoundedSnapshot(
         current.getTime() < earliest.getTime() ? current : earliest,
       )
 
-      // --- BLOCKER 1: Bounded retrieval finds AI messages beyond any page ---
+      // --- BLOCKER 1: Bounded retrieval prioritizing LATEST AI answers ---
 
       // 1. DB-side COUNT of pre-takeover AI messages — O(1) memory.
       const aiCount = await tx.message.count({
@@ -294,12 +306,13 @@ async function fetchBoundedSnapshot(
         return { messages: [], aiCount: 0 }
       }
 
-      // 2. Fetch AI messages directly (targeted, bounded). This is the key
-      //    fix for BLOCKER 1: AI rows are selected by senderType, so an AI
-      //    reply at row 5,001 is found regardless of how many visitor
-      //    messages precede it. Ordered by (createdAt, id) for stable
-      //    deterministic ordering when timestamps collide.
-      const aiMessages = await tx.message.findMany({
+      // 2. Fetch the LATEST N AI messages in DESC (createdAt, id) order.
+      //    This is the key fix for BLOCKER 1 (latest answer lost): AI rows
+      //    are selected by senderType (so row 5,001 is found), and ordered
+      //    DESC so the most recent — potentially corrective — AI reply is
+      //    retained even when there are 101+ AI replies. The oldest surplus
+      //    AI replies are the ones dropped, not the latest.
+      const aiMessagesDesc = await tx.message.findMany({
         where: {
           conversationId,
           tenantId,
@@ -308,19 +321,32 @@ async function fetchBoundedSnapshot(
           createdAt: { lt: cutoff },
         },
         select: selectFields,
-        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: MAX_AI_FETCH,
       })
 
-      if (aiMessages.length === 0) {
+      if (aiMessagesDesc.length === 0) {
         // Count said >0 but fetch returned 0 — concurrent deletion. Fail safe.
         return { messages: [], aiCount: 0 }
       }
 
-      // 3. Bounded context window: all pre-takeover text messages from the
-      //    earliest AI message to the cutoff. Captures visitor messages
-      //    interleaved with AI replies. Bounded to MAX_CONTEXT_WINDOW rows.
-      const earliestAiCreatedAt = aiMessages[0].createdAt
+      // 3. Sort the fetched AI messages chronologically (ASC) to define the
+      //    "retained AI portion." The pure policy also sorts, but we need
+      //    the chronological bounds here to scope the context window.
+      const aiMessages = [...aiMessagesDesc].sort((a, b) => {
+        const ta = a.createdAt.getTime()
+        const tb = b.createdAt.getTime()
+        if (ta !== tb) return ta - tb
+        return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+      })
+
+      const earliestRetainedAiCreatedAt = aiMessages[0].createdAt
+
+      // 4. Bounded context window: all pre-takeover text messages from the
+      //    earliest retained AI to the cutoff. Ordered DESC (latest first)
+      //    so the context budget fills from the MOST RECENT context around
+      //    the latest AI answers — not exclusively from the earliest
+      //    historical messages. Bounded to MAX_CONTEXT_WINDOW rows.
       const contextWindow = await tx.message.findMany({
         where: {
           conversationId,
@@ -328,31 +354,32 @@ async function fetchBoundedSnapshot(
           senderType: { in: ['contact', 'ai'] },
           contentType: 'text',
           createdAt: {
-            gte: earliestAiCreatedAt,
+            gte: earliestRetainedAiCreatedAt,
             lt: cutoff,
           },
         },
         select: selectFields,
-        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: MAX_CONTEXT_WINDOW,
       })
 
-      // 4. Visitor context immediately before the earliest AI message.
-      //    Ordered DESC to get the most-recent-before, then reversed.
+      // 5. Visitor context immediately before the earliest retained AI
+      //    message. Ordered DESC to get the most-recent-before. This
+      //    captures what triggered the earliest retained AI reply.
       const preAiContext = await tx.message.findMany({
         where: {
           conversationId,
           tenantId,
           senderType: 'contact',
           contentType: 'text',
-          createdAt: { lt: earliestAiCreatedAt },
+          createdAt: { lt: earliestRetainedAiCreatedAt },
         },
         select: selectFields,
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: MAX_PRE_AI_CONTEXT,
       })
 
-      // 5. Merge + deduplicate by id. AI messages are always included
+      // 6. Merge + deduplicate by id. AI messages are always included
       //    (they are the essential facts). Context-window and pre-AI rows
       //    supplement them. Dedup is by id (full-identity conflict detection
       //    happens in the pure policy).

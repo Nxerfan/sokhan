@@ -107,23 +107,74 @@ function extractText(content: unknown): string | null {
 }
 
 // ---------------------------------------------------------------------------
-// Full identity comparison (BLOCKER 1)
+// Deterministic JSON structural comparison (BLOCKER 2 — full raw identity)
 // ---------------------------------------------------------------------------
 
 /**
- * Compare ALL factual fields of two messages with the same ID.
- * Returns true if they are identical (safe to deduplicate).
+ * Produce a canonical, deterministic JSON string from an unknown value.
+ *
+ * Object keys are sorted lexicographically at every depth. Arrays preserve
+ * their element order (arrays are ordered sequences, not sets). This makes
+ * the stringification stable regardless of key insertion order, so two
+ * structurally identical objects produce the same string even if their
+ * properties were defined in a different order.
+ *
+ * Used to compare the FULL raw `content` JSON of two messages — not just
+ * their sanitized visible text. This catches conflicts in factual metadata
+ * (source, verification flags, HTML tags) that sanitize to the same visible
+ * string but represent different persisted records.
+ */
+function stableStringify(value: unknown): string {
+  if (value === null) return 'null'
+  if (typeof value === 'string') return JSON.stringify(value)
+  if (typeof value === 'number') {
+    // Distinguish NaN/Infinity from real numbers — they are not valid JSON.
+    if (!Number.isFinite(value)) return 'null'
+    return JSON.stringify(value)
+  }
+  if (typeof value === 'boolean') return JSON.stringify(value)
+  if (Array.isArray(value)) {
+    return '[' + value.map(stableStringify).join(',') + ']'
+  }
+  if (typeof value === 'object') {
+    const keys = Object.keys(value as Record<string, unknown>).sort()
+    const parts = keys.map((k) => JSON.stringify(k) + ':' + stableStringify((value as Record<string, unknown>)[k]))
+    return '{' + parts.join(',') + '}'
+  }
+  // Functions, symbols, undefined → not part of persisted JSON content.
+  return 'null'
+}
+
+// ---------------------------------------------------------------------------
+// Full raw identity comparison (BLOCKER 1 + BLOCKER 2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Compare ALL factual fields of two messages with the same ID, including
+ * the COMPLETE original raw JSON content — not only the rendered/sanitized
+ * text.
+ *
+ * Returns true if they are genuinely identical (safe to deduplicate).
  * Returns false if ANY field differs (contradictory duplicate → fail closed).
  *
- * Compared fields: senderType, contentType, createdAt, content (via extracted text).
+ * Compared fields:
+ *   - senderType
+ *   - contentType
+ *   - createdAt (exact millisecond timestamp)
+ *   - content (full raw JSON, via deterministic stable stringification)
+ *
+ * BLOCKER 2: Comparing only sanitized visible text is insufficient. Two
+ * records with the same ID and same visible text but different raw HTML
+ * tags (e.g. `<b>text</b>` vs `text`) or different factual metadata (e.g.
+ * `source:'product'` vs `source:'faq'`, `verified:true` vs `verified:false`)
+ * represent different persisted records and must fail closed.
  */
 function messagesIdentical(a: HandoffSourceMessage, b: HandoffSourceMessage): boolean {
   if (a.senderType !== b.senderType) return false
   if (a.contentType !== b.contentType) return false
   if (a.createdAt.getTime() !== b.createdAt.getTime()) return false
-  const textA = extractText(a.content)
-  const textB = extractText(b.content)
-  return textA === textB
+  // Full raw JSON structural comparison — not just sanitized text.
+  return stableStringify(a.content) === stableStringify(b.content)
 }
 
 // ---------------------------------------------------------------------------
