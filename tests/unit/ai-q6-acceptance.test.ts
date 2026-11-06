@@ -84,13 +84,12 @@ describe('Reviewer AI-Q6 — deterministic, non-billable, sourced handoff policy
   test('bounded total output and bounded source IDs for very large inputs',()=>{
     const many=Array.from({length:800},(_,i)=>msg('v-'+i,'contact','تکراری'.repeat(700),
       new Date(2026,10,6,9,0,i).toISOString()))
-    const out=summarizeHandoffMessages([...many,ai])
-    if(out){
-      expect(out.text.length).toBeLessThanOrEqual(3000)
-      expect(out.sourceMessageIds.length).toBeLessThanOrEqual(30)
-      expect(out.sourceMessageIds.length).toBeGreaterThan(0)
-      expect(out.truncated).toBe(true)
-    }
+    const out=summarizeHandoffMessages([...many,{...ai,createdAt:new Date('2026-11-06T09:20:00Z')}])
+    expect(out,'A valid recent AI answer must not disappear from the bounded window').not.toBeNull()
+    expect(out!.text.length).toBeLessThanOrEqual(3000)
+    expect(out!.sourceMessageIds.length).toBeLessThanOrEqual(30)
+    expect(out!.sourceMessageIds).toContain('ai-1')
+    expect(out!.truncated).toBe(true)
   })
   test('single huge message never produces unbounded output',()=>{
     const out=summarizeHandoffMessages([visitor,{...ai,content:{text:'الف'.repeat(120000)}}])
