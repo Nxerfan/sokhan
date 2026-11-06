@@ -627,6 +627,11 @@ export function InboxView() {
             {/* Messages */}
             <ScrollArea className="flex-1 scroll-thin">
               <div className="space-y-3 p-4">
+                {/* AI-Q6: Handoff summary panel — displayed only when a
+                    stored summary exists for this conversation. Safe text
+                    rendering only. Cleared on conversation switch.
+                    Not visible to visitors. */}
+                <HandoffSummaryPanel conversationId={selected.id} />
                 {messages.filter(m => m.conversationId === selectedId).map(msg => (
                   <MessageBubble key={msg.id} msg={msg} agentId={session?.user?.id} />
                 ))}
@@ -738,6 +743,60 @@ function MessageBubble({ msg, agentId }: { msg: Message; agentId?: string }) {
         <span className={cn('mt-1 block text-[10px]', isOwn ? 'text-ink-foreground/60' : 'text-muted-foreground')}>
           {new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
         </span>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * AI-Q6 HandoffSummaryPanel — displays the stored handoff summary for the
+ * currently selected conversation. Fetches from the authenticated dashboard
+ * API. Safe React text rendering only (no raw HTML injection).
+ *
+ * - No panel rendered when no summary exists.
+ * - Cleared on conversation switch (different conversationId).
+ * - Protects against stale HTTP responses from a previously selected conversation.
+ * - Not visible to visitors (dashboard-only component).
+ */
+function HandoffSummaryPanel({ conversationId }: { conversationId: string }) {
+  const [summary, setSummary] = useState<{ text: string; convId: string } | null>(null)
+  const reqIdRef = useRef(0)
+
+  useEffect(() => {
+    const reqId = ++reqIdRef.current
+
+    fetch(`/api/conversations/${conversationId}/handoff-summary`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        // Protect against stale responses from a previous conversation.
+        if (reqId !== reqIdRef.current) return
+        if (data?.summary?.text) {
+          setSummary({ text: data.summary.text, convId: conversationId })
+        } else {
+          setSummary(null)
+        }
+      })
+      .catch(() => {
+        if (reqId !== reqIdRef.current) return
+        setSummary(null)
+      })
+  }, [conversationId])
+
+  // Clear stale state when conversation switches — only render if
+  // the summary belongs to the currently selected conversation.
+  if (!summary || summary.convId !== conversationId) return null
+
+  return (
+    <div
+      data-testid="ai-q6-handoff-summary"
+      className="rounded-lg border border-saffron/20 bg-saffron/5 p-3 text-xs"
+      dir="auto"
+    >
+      <div className="mb-1 font-medium text-saffron">
+        خلاصهٔ گفت‌وگوی پیش از تحویل
+      </div>
+      <div className="whitespace-pre-wrap text-muted-foreground">
+        {summary.text}
       </div>
     </div>
   )

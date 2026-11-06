@@ -74,6 +74,7 @@ model Tenant {
   aiUsagePeriods    AiUsagePeriod[]
   aiReplyReservations AiReplyReservation[]
   visitorMessageIdempotencies VisitorMessageIdempotency[]
+  handoffSummaries ConversationHandoffSummary[]
 }
 
 /// Global identity. A user may belong to multiple tenants via Membership.
@@ -253,6 +254,30 @@ model Conversation {
   csatComment        String?
   csatAt             DateTime?
   firstResponseAt    DateTime?
+  /// AI-Q6: Authoritative first human-handoff timestamp. Set atomically by a
+  /// PostgreSQL BEFORE UPDATE trigger when `assignedUserId` transitions from
+  /// NULL to non-NULL and the column is still NULL. First assignment wins —
+  /// reassignment never overwrites the original cutoff. Used as the earliest
+  /// takeover signal for the handoff summary so post-assignment messages are
+  /// excluded even when summary generation runs much later.
+  firstHandoffAt     DateTime?
+  /// AI-Q6: Authoritative monotonic source boundary. Captures the maximum
+  /// Message.seq at the moment of the first human takeover (assignment or
+  /// first agent reply). Set atomically by PostgreSQL triggers in the SAME
+  /// transaction as the takeover event. Messages with seq <= handoffSourceSeq
+  /// are definitively pre-takeover; seq > handoffSourceSeq are post-takeover.
+  /// This distinguishes pre/post messages even when timestamps are equal at
+  /// millisecond precision. First-takeover wins — never overwritten.
+  handoffSourceSeq   Int?
+  /// AI-Q6: PRIMARY commit-order boundary. Stores pg_current_snapshot()::text
+  /// captured atomically during the first human takeover. This snapshot records
+  /// exactly which transactions were committed (visible) at the moment of
+  /// takeover. When filtering messages, pg_visible_in_snapshot(m.xmin, snapshot)
+  /// correctly distinguishes messages committed before vs after the takeover,
+  /// REGARDLESS of SERIAL allocation order. This solves the fundamental problem
+  /// that nextval() allocates before FK lock acquisition and before commit.
+  /// First-takeover wins — never overwritten.
+  handoffSnapshot    String?
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
 
@@ -262,6 +287,7 @@ model Conversation {
   department   Department?   @relation(fields: [departmentId], references: [id], onDelete: SetNull)
   messages     Message[]
   participants Participant[]
+  handoffSummaries ConversationHandoffSummary[]
 
   @@index([tenantId, status])
   @@index([tenantId, assignedUserId])
@@ -278,12 +304,20 @@ model Message {
   content        Json
   status         String   @default("sent")
   createdAt      DateTime @default(now())
+  /// AI-Q6: Monotonic global insertion sequence (SERIAL). Used as a
+  /// secondary boundary for legacy compatibility. The PRIMARY boundary
+  /// is Conversation.handoffSnapshot (a pg_snapshot that captures which
+  /// transactions were committed at takeover time). The snapshot correctly
+  /// distinguishes pre/post-takeover messages even when SERIAL allocation
+  /// order disagrees with commit order.
+  seq             Int      @default(autoincrement())
 
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   senderUser   User?        @relation(fields: [senderUserId], references: [id], onDelete: SetNull)
 
   @@index([conversationId, createdAt])
   @@index([tenantId, createdAt])
+  @@index([conversationId, seq])
 }
 
 model Participant {
@@ -586,4 +620,19 @@ model PendingSignup {
   expiresAt       DateTime
 
   @@index([email])
+}
+
+model ConversationHandoffSummary {
+  id               String   @id @default(cuid())
+  tenantId         String
+  conversationId   String
+  summaryText      String
+  sourceMessageIds Json
+  createdAt        DateTime @default(now())
+
+  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, conversationId])
+  @@index([tenantId])
 }

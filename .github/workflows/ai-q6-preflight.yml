@@ -1,0 +1,188 @@
+name: AI-Q6 — independent reviewer focused acceptance preflight
+on:
+  push:
+    branches:
+      - feat/ai-q6-next
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  reviewer-ai-q6-preflight:
+    if: github.event_name == 'push' || github.head_ref == 'feat/ai-q6-next'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+      - name: Generate Prisma for Playwright imports
+        run: bunx prisma generate
+        env:
+          DATABASE_URL: postgresql://user:password@localhost:5432/dummy
+          DIRECT_URL: postgresql://user:password@localhost:5432/dummy
+      - name: Verify immutable Q1 through Q6 reviewer Git blob hashes
+        run: |
+          node --input-type=module <<'NODE'
+          import {execFileSync} from 'node:child_process'
+          const expected={
+            'tests/unit/ai-q1-contract.test.ts':'c4ebfd333c3a87b9b8568306e7136b5f63ab9ffe',
+            'tests/ai-q1-config.spec.ts':'da4085c92f5db1f9c447c2d96a065ab25fbf2cd0',
+            'tests/unit/ai-q2-policy.test.ts':'4ea2e9b52dc6e3e657ccc090dc5c14a092d7fa5a',
+            'tests/db-boundary/ai-q2-usage.test.ts':'aa8959f7337fcf66e0c04decb0af9f765e92733b',
+            'tests/ai-q2-usage.spec.ts':'9769f4ca8d2779e829e783b0d9c03401935c22ff',
+            'tests/unit/ai-q3-faq-contract.test.ts':'5038fb8036b8699bb9c048c58a82007ddf6938ba',
+            'tests/db-boundary/ai-q3-faq.test.ts':'fbe9032979f62d3546438725c446aabd2d28f28f',
+            'tests/ai-q3-faq.spec.ts':'4b73548ba4dab02b551993ae46e3c3d5f8bf2355',
+            'tests/unit/ai-q3-faq-adversarial-review.test.ts':'83b4441bfb6997db5f79c5762f18c5f9ff00de2f',
+            'tests/unit/ai-q4-product-contract.test.ts':'219096d2d1dea3535bf33af72859cd3258fcefce',
+            'tests/unit/ai-q4-adversarial-review.test.ts':'0915c1f18a0e3fb52efbc3356f8801906d3565d8',
+            'tests/unit/ai-q4-streaming-adversarial-review.test.ts':'deb132de5322cffde6fde3cf3ecbda1d9492c3d0',
+            'tests/db-boundary/ai-q4-products.test.ts':'2b4d03c379910676488e8a796e67a69cd1e0e1ec',
+            'tests/db-boundary/ai-q4-snapshot-review.test.ts':'22fe6be77853c13f3a2fa007075cb6eec583be18',
+            'tests/ai-q4-products.spec.ts':'6dbc072903fd00fcacea1f4644a0cd0c4e7fd61f',
+            'tests/ai-q4-large-catalog-review.spec.ts':'42d8f364fa3f4df656afb9e61eb52563a34efc9f',
+            'tests/unit/ai-q5-human-takeover-contract.test.ts':'0c907672b31dc896488a3fcab62e0b0c50789634',
+            'tests/db-boundary/ai-q5-human-takeover.test.ts':'69fe3c6b8aaee6dea744e1d9f6e258848a5405a7',
+            'tests/db-boundary/ai-q5-commit-race-review.test.ts':'14deb3e698f460a3a4d19392d71cbfff0c3290d4',
+            'tests/db-boundary/ai-q5-concurrent-settlement-review.test.ts':'c9ad1d2c0ddfc006bd1dd15067c478cd6987f2d2',
+            'tests/ai-q5-human-takeover.spec.ts':'ecd0271c38abe39a9ccbaf51ca09a2d1f2620f41',
+            'tests/unit/ai-q6-acceptance.test.ts':'be4b32014b63d39980827519363b0991955bf159',
+            'tests/db-boundary/ai-q6-acceptance.test.ts':'2c0a5483c2192a3f751e7dfac0f2893e0e91653f',
+            'tests/ai-q6-acceptance.spec.ts':'469d6c20b62e31fec56ff5e40571ab9f1a8b4c24',
+            'tests/unit/ai-q6-adversarial-review.test.ts':'0e5afdb751de97d501fcdf38dc8f556f748a3ce3',
+            'tests/db-boundary/ai-q6-adversarial-review.test.ts':'6ea699539d1d0a524bc69951cec7f1c1669618b8',
+            'tests/db-boundary/ai-q6-handoff-invariants-review.test.ts':'163d222dd8118d69f29e8dc6befb8ee8bac04ca9',
+            'tests/unit/ai-q6-full-identity-review.test.ts':'0a979282c301540221086e274a8f32f8e0bfb0bb',
+            'tests/db-boundary/ai-q6-latest-answer-review.test.ts':'a179536129a3c9f168d88bc6d95f085ec3f5480b',
+            'tests/db-boundary/ai-q6-same-millisecond-handoff-review.test.ts':'6cf596c9ad75c5b26b38ab76d794518ee15b97aa',
+            'tests/db-boundary/ai-q6-commit-order-review.test.ts':'a1e7257399c5cca3e7e78a119c88feb5c0d05f78',
+            'tests/db-boundary/ai-q6-pre-fk-order-review.test.ts':'1914b3a2941e2ba2b22a8527a9759c0dc6b564cb',
+          }
+          if(Object.keys(expected).length!==32)throw Error('Expected 21 Q1-Q5 + 11 Q6 reviewer-protected files')
+          for(const [file,sha] of Object.entries(expected)){
+            const actual=execFileSync('git',['hash-object',file],{encoding:'utf8'}).trim()
+            if(actual!==sha)throw Error('Reviewer-owned test changed: '+file)
+            console.log('Reviewer integrity OK: '+file)
+          }
+          NODE
+      - name: Verify Q6 reviewer test syntax and exact test counts
+        run: |
+          node --input-type=module <<'NODE'
+          import {readFileSync} from 'node:fs'
+          import ts from 'typescript'
+          const checks=[
+            ['tests/unit/ai-q6-acceptance.test.ts',14],
+            ['tests/db-boundary/ai-q6-acceptance.test.ts',10],
+            ['tests/unit/ai-q6-adversarial-review.test.ts',4],
+            ['tests/db-boundary/ai-q6-adversarial-review.test.ts',2],
+            ['tests/db-boundary/ai-q6-handoff-invariants-review.test.ts',4],
+            ['tests/unit/ai-q6-full-identity-review.test.ts',2],
+            ['tests/db-boundary/ai-q6-latest-answer-review.test.ts',1],
+            ['tests/db-boundary/ai-q6-same-millisecond-handoff-review.test.ts',2],
+            ['tests/db-boundary/ai-q6-commit-order-review.test.ts',2],
+            ['tests/db-boundary/ai-q6-pre-fk-order-review.test.ts',2],
+            ['tests/ai-q6-acceptance.spec.ts',8],
+          ]
+          for(const [file,count] of checks){
+            const source=readFileSync(file,'utf8')
+            const parsed=ts.createSourceFile(file,source,ts.ScriptTarget.Latest,true,ts.ScriptKind.TS)
+            if(parsed.parseDiagnostics.length){
+              for(const d of parsed.parseDiagnostics)
+                console.error(file+': '+ts.flattenDiagnosticMessageText(d.messageText,'\\n'))
+              throw Error('Reviewer Q6 acceptance syntax invalid: '+file)
+            }
+            const actual=(source.match(/\btest\s*\(/g)||[]).length
+            if(actual!==count)throw Error('Reviewer Q6 acceptance count changed: '+file+' expected '+count+' got '+actual)
+            console.log('Q6 reviewer syntax and count OK: '+file+' '+count)
+          }
+          NODE
+      - name: Enforce no repeated Q1-Q5 tests in scoped Q6 CI
+        run: |
+          node --input-type=module <<'NODE'
+          import {readFileSync} from 'node:fs'
+          const ci=readFileSync('.github/workflows/ci.yml','utf8')
+          const scoped="github.event_name == 'pull_request' && github.head_ref == 'feat/ai-q6-next'"
+          const full="github.event_name != 'pull_request' || (github.head_ref != 'feat/ai-q2-atomic-usage' && github.head_ref != 'feat/ai-q4-grounded-products' && github.head_ref != 'feat/ai-q5-human-takeover' && github.head_ref != 'feat/ai-q6-next')"
+          function step(name){
+            const prefix='      - name: '+name+'\n'
+            const from=ci.indexOf(prefix)
+            if(from<0)throw Error('Missing '+name)
+            const to=ci.indexOf('\n      - name: ',from+prefix.length)
+            return ci.slice(from,to<0?undefined:to)
+          }
+          const scopedSteps=[
+            ['Unit tests - AI-Q6 focused acceptance','run: bun test tests/unit/ai-q6-acceptance.test.ts tests/unit/ai-q6-adversarial-review.test.ts tests/unit/ai-q6-full-identity-review.test.ts'],
+            ['Run Full DB boundary tests - AI-Q6 focused acceptance','run: bun test tests/db-boundary/ai-q6-acceptance.test.ts tests/db-boundary/ai-q6-adversarial-review.test.ts tests/db-boundary/ai-q6-handoff-invariants-review.test.ts tests/db-boundary/ai-q6-latest-answer-review.test.ts tests/db-boundary/ai-q6-same-millisecond-handoff-review.test.ts tests/db-boundary/ai-q6-commit-order-review.test.ts tests/db-boundary/ai-q6-pre-fk-order-review.test.ts'],
+            ['Run Lite DB boundary tests - AI-Q6 focused acceptance','run: bun test tests/db-boundary/ai-q6-acceptance.test.ts tests/db-boundary/ai-q6-adversarial-review.test.ts tests/db-boundary/ai-q6-handoff-invariants-review.test.ts tests/db-boundary/ai-q6-latest-answer-review.test.ts tests/db-boundary/ai-q6-same-millisecond-handoff-review.test.ts tests/db-boundary/ai-q6-commit-order-review.test.ts tests/db-boundary/ai-q6-pre-fk-order-review.test.ts'],
+            ['Run Full browser tests - AI-Q6 focused acceptance','run: bunx playwright test tests/ai-q6-acceptance.spec.ts --workers=1 --retries=0'],
+            ['Run Lite browser tests - AI-Q6 focused acceptance','run: bunx playwright test tests/ai-q6-acceptance.spec.ts --workers=1 --retries=0'],
+          ]
+          for(const [name,expected] of scopedSteps){
+            const body=step(name)
+            if(!body.includes('if: '+scoped))throw Error('Incorrect scope: '+name)
+            const runs=body.split('\n').map(x=>x.trim()).filter(x=>x.startsWith('run: '))
+            if(runs.length!==1||runs[0]!==expected)
+              throw Error('Duplicate or unexpected legacy test in Q6 step: '+name)
+            console.log('Q6 scoped, no redundant suites: '+name)
+          }
+          for(const name of [
+            'Unit tests - full regression (main and other PRs)',
+            'Run Full DB boundary tests (real PostgreSQL)',
+            'Run Lite DB boundary tests (real PostgreSQL)',
+            'Run Full regression tests - main and other PRs',
+            'Run Lite regression tests - main and other PRs',
+          ]){
+            if(!step(name).includes('if: '+full))throw Error('Main/other PR full regression weakened: '+name)
+          }
+          for(const name of ['Run Full regression tests - main and other PRs',
+                             'Run Lite regression tests - main and other PRs']){
+            for(const f of [
+              'tests/ai-q1-config.spec.ts','tests/ai-q2-usage.spec.ts',
+              'tests/ai-q3-faq.spec.ts','tests/ai-q4-products.spec.ts',
+              'tests/ai-q4-large-catalog-review.spec.ts',
+              'tests/ai-q5-human-takeover.spec.ts',
+              'tests/ai-q6-acceptance.spec.ts',
+            ])if(!step(name).includes(f))throw Error('Full main missing '+f+' from '+name)
+          }
+          console.log('Full main Q1-Q6 regression preserved.')
+          NODE
+      # This gate is intentionally RED until the Q6 feature is specified and
+      # a reviewer writes genuine feature-specific acceptance in three layers.
+      # Never manufacture placeholder passing tests or allow a green Q6 PR
+      # without real Q6 acceptance.
+      - name: Require real reviewer-approved Q6 acceptance suites
+        run: |
+          node --input-type=module <<'NODE'
+          import {existsSync,readFileSync} from 'node:fs'
+          import ts from 'typescript'
+          const required=[
+            'tests/unit/ai-q6-acceptance.test.ts',
+            'tests/db-boundary/ai-q6-acceptance.test.ts',
+            'tests/unit/ai-q6-adversarial-review.test.ts',
+            'tests/db-boundary/ai-q6-adversarial-review.test.ts',
+            'tests/db-boundary/ai-q6-handoff-invariants-review.test.ts',
+            'tests/unit/ai-q6-full-identity-review.test.ts',
+            'tests/db-boundary/ai-q6-latest-answer-review.test.ts',
+            'tests/db-boundary/ai-q6-same-millisecond-handoff-review.test.ts',
+            'tests/db-boundary/ai-q6-commit-order-review.test.ts',
+            'tests/db-boundary/ai-q6-pre-fk-order-review.test.ts',
+            'tests/ai-q6-acceptance.spec.ts',
+          ]
+          for(const file of required){
+            if(!existsSync(file))throw Error('Q6 acceptance missing, feature scope not yet approved: '+file)
+            const text=readFileSync(file,'utf8')
+            const parse=ts.createSourceFile(file,text,ts.ScriptTarget.Latest,true,ts.ScriptKind.TS)
+            if(parse.parseDiagnostics.length)throw Error('Syntax error in Q6 acceptance: '+file)
+            if(!/\btest\s*\(/.test(text))throw Error('No executable Q6 acceptance scenarios: '+file)
+            console.log('Q6 acceptance present: '+file)
+          }
+          NODE
+      - name: Enumerate Q6 browser acceptance
+        run: bunx playwright test tests/ai-q6-acceptance.spec.ts --list
+      - name: Run reviewer Q6 unit acceptance
+        run: bun test tests/unit/ai-q6-acceptance.test.ts tests/unit/ai-q6-adversarial-review.test.ts tests/unit/ai-q6-full-identity-review.test.ts

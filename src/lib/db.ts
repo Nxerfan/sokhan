@@ -87,6 +87,7 @@ export const TENANT_SCOPED_MODEL_NAMES: readonly string[] = Object.freeze([
   'WidgetDomain',
   'Invitation',
   'WidgetOtpRequest',
+  'ConversationHandoffSummary',
 ])
 
 /** Models that carry a `tenantId` column and therefore REQUIRE a tenant scope. */
