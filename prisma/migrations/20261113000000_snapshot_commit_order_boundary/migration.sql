@@ -86,7 +86,7 @@ BEGIN
     --    pg_current_snapshot() records which transactions are committed
     --    (visible) at this moment. This is independent of SERIAL allocation
     --    order — it reflects actual commit status.
-    NEW."handoffSnapshot" = pg_current_snapshot()::text;
+    NEW."handoffSnapshot" = txid_current_snapshot()::text;
     -- 4. Also capture MAX(seq) as a secondary/fallback boundary.
     SELECT COALESCE(MAX("seq"), 0) INTO NEW."handoffSourceSeq"
     FROM "Message" WHERE "conversationId" = NEW."id";
@@ -100,7 +100,7 @@ BEGIN
     -- 1. Upgrade the row lock to FOR UPDATE.
     PERFORM 1 FROM "Conversation" WHERE "id" = NEW."id" FOR UPDATE;
     -- 2. Capture the authoritative commit-order boundary.
-    NEW."handoffSnapshot" = pg_current_snapshot()::text;
+    NEW."handoffSnapshot" = txid_current_snapshot()::text;
     -- 3. Also capture MAX(seq) excluding agent messages.
     SELECT COALESCE(MAX("seq"), 0) INTO NEW."handoffSourceSeq"
     FROM "Message" WHERE "conversationId" = NEW."id"

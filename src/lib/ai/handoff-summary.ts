@@ -32,7 +32,7 @@
  * trigger on the FIRST assignment (NULL → non-NULL). Reassignment never
  * overwrites it. We NEVER fall back to `new Date()` (summary-generation time).
  *
- * ## Exact handoff boundary — pg_snapshot (SERIAL ≠ commit order)
+ * ## Exact handoff boundary — txid_snapshot (SERIAL ≠ commit order)
  *
  * PostgreSQL SERIAL defaults allocate nextval BEFORE BEFORE INSERT triggers
  * and before the foreign-key check. A writer can allocate a lower seq but
@@ -40,9 +40,9 @@
  * boundary alone is insufficient.
  *
  * The PRIMARY boundary is `Conversation.handoffSnapshot` — a
- * `pg_current_snapshot()::text` captured atomically during the first
+ * `txid_current_snapshot()::text` captured atomically during the first
  * takeover (after a FOR UPDATE lock upgrade that blocks on pending FK
- * locks). When filtering messages, `pg_visible_in_snapshot(m.xmin, snapshot)`
+ * locks). When filtering messages, `txid_visible_in_snapshot(xmin::text::bigint, snapshot::txid_snapshot)`
  * returns true ONLY for messages whose inserting transaction was committed
  * (visible) at the snapshot time — regardless of SERIAL allocation order.
  *
@@ -237,10 +237,12 @@ async function fetchBoundedSnapshot(
       const useSeqBoundary = !useSnapshot && handoffSourceSeq !== null && handoffSourceSeq !== undefined
 
       // Raw SQL visibility condition for the snapshot boundary.
-      // pg_visible_in_snapshot(m.xmin, snapshot::pg_snapshot) returns true
+      // txid_visible_in_snapshot(xmin::text::bigint, snapshot::txid_snapshot) returns true
       // iff the message's inserting transaction was committed at snapshot time.
+      // xmin is a 32-bit xid system column; casting via text::bigint gives the
+      // raw value which txid_visible_in_snapshot accepts (epoch 0 in practice).
       const visibilityCondition = useSnapshot
-        ? Prisma.sql`AND pg_visible_in_snapshot(m.xmin, ${handoffSnapshot}::pg_snapshot)`
+        ? Prisma.sql`AND txid_visible_in_snapshot(m.xmin::text::bigint, ${handoffSnapshot}::txid_snapshot)`
         : Prisma.empty
 
       // Prisma where filters for non-snapshot boundaries.
