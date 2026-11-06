@@ -55,7 +55,7 @@ jobs:
             'tests/db-boundary/ai-q6-acceptance.test.ts':'2c0a5483c2192a3f751e7dfac0f2893e0e91653f',
             'tests/ai-q6-acceptance.spec.ts':'469d6c20b62e31fec56ff5e40571ab9f1a8b4c24',
             'tests/unit/ai-q6-adversarial-review.test.ts':'0e5afdb751de97d501fcdf38dc8f556f748a3ce3',
-            'tests/db-boundary/ai-q6-adversarial-review.test.ts':'14148c98818903189239dcd17b994a3949143191',
+            'tests/db-boundary/ai-q6-adversarial-review.test.ts':'6ea699539d1d0a524bc69951cec7f1c1669618b8',
           }
           if(Object.keys(expected).length!==26)throw Error('Expected 21 Q1-Q5 + 5 Q6 reviewer-protected files')
           for(const [file,sha] of Object.entries(expected)){
