@@ -36,6 +36,17 @@ export async function GET(
       return { unauthorized: true as const }
     }
 
+    // Verify the conversation belongs to this tenant (fail-closed).
+    // A foreign-tenant conversation ID must return 404 without revealing
+    // its existence or content.
+    const conversation = await db.conversation.findFirst({
+      where: { id, tenantId },
+      select: { id: true },
+    })
+    if (!conversation) {
+      return { notFound: true as const }
+    }
+
     // Fetch the summary — db proxy auto-injects tenantId (fail-closed).
     const summary = await db.conversationHandoffSummary.findUnique({
       where: { tenantId_conversationId: { tenantId, conversationId: id } },
@@ -67,6 +78,9 @@ export async function GET(
   }
   if (result.result.forbidden) {
     return NextResponse.json({ error: 'forbidden' }, { status: 403 })
+  }
+  if ('notFound' in result.result) {
+    return NextResponse.json({ error: 'not_found' }, { status: 404 })
   }
 
   return NextResponse.json({ summary: result.result.summary })
