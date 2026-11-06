@@ -37,6 +37,8 @@ The reviewer-owned tests define the following interfaces. Implement these exact 
 
 - `tests/unit/ai-q6-acceptance.test.ts` — 14 deterministic/safety checks.
 - `tests/db-boundary/ai-q6-acceptance.test.ts` — 10 real PG/tenant/quota/concurrency checks in Full + Lite.
+- `tests/unit/ai-q6-adversarial-review.test.ts` — 4 identity/provenance/chronology adversarial checks.
+- `tests/db-boundary/ai-q6-adversarial-review.test.ts` — 2 real PostgreSQL tests for the 501st AI message and earliest human cutoff in Full + Lite.
 - `tests/ai-q6-acceptance.spec.ts` — 8 real HTTP/browser/security/no-charge scenarios in Full + Lite.
 
 Unit test policy and data contract, DB tests assert real uniqueness and no billing, browser tests verify actual dashboard/visitor boundaries. Do **not** create placeholders or change expected hashes. Developer tests may supplement reviewer tests.
@@ -45,8 +47,14 @@ Unit test policy and data contract, DB tests assert real uniqueness and no billi
 
 For PR `feat/ai-q6-next`: ONLY the three Q6 suites above (Unit once, DB Full + Lite, browser Full + Lite) plus lint/TypeScript/Prisma/build/widget qualification/self-host qualification/Q6 preflight. No full Q1/Q2/Q3/Q4/Q5 suite repetition.
 
-For pushes to `main` and unrelated PRs: retain complete existing regression, including Q6. The reviewer preflight pins the **21 previous reviewer-owned files** and the **3 new Q6 reviewer files** by their Git blob hashes.
+For pushes to `main` and unrelated PRs: retain complete existing regression, including Q6. The reviewer preflight pins the **21 previous reviewer-owned files** and the **5 Q6 reviewer files** by their Git blob hashes (26 total).
 
 ## Delivery requirements
 
 After implementation, open **one PR** against current `main`. Supply HEAD, changed files, exact Full+Lite counts and CI URLs. Require all four CI jobs and reviewer Q6 preflight on the exact same HEAD. **DO NOT MERGE. DO NOT START Q7.**
+
+## Independent reviewer correction / red acceptance (post-implementation)
+
+- The first Q6 browser acceptance fixture created a *current-period* artificial sent AI row on a Free tenant, then incorrectly asserted AI-Q2 `used = 0`. Q2 correctly backfills all persisted sent AI messages in the current billing window. The reviewer corrected only this synthetic fixture to be **genuinely historical** (`createdAt: 2025-01-01`), preserving the Free-plan denial and zero-current-period-usage assertion. Do not change Q2 accounting to satisfy a mistaken fixture.
+- New red reviewer tests reject source IDs unsupported by visible excerpts, contradictory same-ID sender or timestamp, out-of-order older AI facts, an AI answer at message #501 hidden by the first-500-row scan, and post-human messages included because `firstResponseAt` was recorded later than the first agent reply.
+- All five Q6 reviewer-owned files are immutable from this handoff onward; never weaken, rename, skip or rehash them in the implementation agent's changes. The Q6 PR must pass 18 focused Unit tests, 12 real PG tests **per edition**, and 8 browser tests **per edition**, without duplicating Q1–Q5 suites.
