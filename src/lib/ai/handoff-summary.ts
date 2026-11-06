@@ -292,13 +292,18 @@ async function fetchBoundedSnapshot(
       // --- BLOCKER 1: Bounded retrieval prioritizing LATEST AI answers ---
 
       // 1. DB-side COUNT of pre-takeover AI messages — O(1) memory.
+      //    Uses lte (not lt) for the cutoff: when the AI reply and the
+      //    takeover signal (e.g. assignment trigger NOW()) occur within the
+      //    same millisecond — common when no explicit sleep separates them —
+      //    the AI reply is a genuine pre-takeover message and must be
+      //    included. The actual human agent reply is excluded by senderType.
       const aiCount = await tx.message.count({
         where: {
           conversationId,
           tenantId,
           senderType: 'ai',
           contentType: 'text',
-          createdAt: { lt: cutoff },
+          createdAt: { lte: cutoff },
         },
       })
 
@@ -318,7 +323,7 @@ async function fetchBoundedSnapshot(
           tenantId,
           senderType: 'ai',
           contentType: 'text',
-          createdAt: { lt: cutoff },
+          createdAt: { lte: cutoff },
         },
         select: selectFields,
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
@@ -355,7 +360,7 @@ async function fetchBoundedSnapshot(
           contentType: 'text',
           createdAt: {
             gte: earliestRetainedAiCreatedAt,
-            lt: cutoff,
+            lte: cutoff,
           },
         },
         select: selectFields,
