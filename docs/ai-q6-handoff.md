@@ -47,7 +47,7 @@ Unit test policy and data contract, DB tests assert real uniqueness and no billi
 
 For PR `feat/ai-q6-next`: ONLY the three Q6 suites above (Unit once, DB Full + Lite, browser Full + Lite) plus lint/TypeScript/Prisma/build/widget qualification/self-host qualification/Q6 preflight. No full Q1/Q2/Q3/Q4/Q5 suite repetition.
 
-For pushes to `main` and unrelated PRs: retain complete existing regression, including Q6. The reviewer preflight pins the **21 previous reviewer-owned files** and the **5 Q6 reviewer files** by their Git blob hashes (26 total).
+For pushes to `main` and unrelated PRs: retain complete existing regression, including Q6. The reviewer preflight pins the **21 previous reviewer-owned files** and the **5 Q6 reviewer files** by their Git blob hashes (27 total).
 
 ## Delivery requirements
 
@@ -57,4 +57,14 @@ After implementation, open **one PR** against current `main`. Supply HEAD, chang
 
 - The first Q6 browser acceptance fixture created a *current-period* artificial sent AI row on a Free tenant, then incorrectly asserted AI-Q2 `used = 0`. Q2 correctly backfills all persisted sent AI messages in the current billing window. The reviewer corrected only this synthetic fixture to be **genuinely historical** (`createdAt: 2025-01-01`), preserving the Free-plan denial and zero-current-period-usage assertion. Do not change Q2 accounting to satisfy a mistaken fixture.
 - New red reviewer tests reject source IDs unsupported by visible excerpts, contradictory same-ID sender or timestamp, out-of-order older AI facts, an AI answer at message #501 hidden by the first-500-row scan, and post-human messages included because `firstResponseAt` was recorded later than the first agent reply.
-- All five Q6 reviewer-owned files are immutable from this handoff onward; never weaken, rename, skip or rehash them in the implementation agent's changes. The Q6 PR must pass 18 focused Unit tests, 12 real PG tests **per edition**, and 8 browser tests **per edition**, without duplicating Q1–Q5 suites.
+- All six Q6 reviewer-owned files are immutable from this handoff onward; never weaken, rename, skip or rehash them in the implementation agent's changes. The Q6 PR must pass 18 focused Unit tests, 16 real PG tests **per edition**, and 8 browser tests **per edition**, without duplicating Q1–Q5 suites.
+
+## Latest independent reviewer invariants — additional unresolved blockers
+
+Reviewer-owned `tests/db-boundary/ai-q6-handoff-invariants-review.test.ts` (4 real PostgreSQL cases) validates:
+1. The first valid AI reply at **message 5001** cannot be silently hidden by a 5000-record scan cutoff.
+2. A delayed summary retry must exclude messages persisted after the **first assignment**. The production pipeline must retain an immutable authoritative first-assignment timestamp or equivalent transactionally persisted cut-off, not approximate it using the time of the later summary invocation.
+3. An **active Free subscription** overrides stale `Tenant.plan='pro'`: no summary.
+4. An **active Pro subscription** overrides stale `Tenant.plan='free'`: summary allowed, without new AI charges.
+
+Effective entitlement must match the active-subscription-first logic used in Q2. Do not change Q2 accounting. The reviewer preflight pins all **27** reviewer-owned test blobs. Q6 scoped CI runs **18 Unit**, **16 PostgreSQL per Full/Lite edition**, and **8 browser tests per edition**. No legacy Q1-Q5 suite reruns on this PR.
