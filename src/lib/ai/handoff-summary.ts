@@ -32,7 +32,7 @@
  *   Memory is bounded to at most MAX_AI_FETCH + MAX_CONTEXT_WINDOW +
  *   MAX_PRE_AI_CONTEXT rows (= 530). No unbounded history array.
  *
- * ## BLOCKER 2 — earliest authoritative takeover cutoff
+ * ## BLOCKER 2 — earliest authoritative takeover cutoff + exact seq boundary
  *
  * The cutoff is `min(firstHandoffAt, firstResponseAt, firstAgentMsg.createdAt)`.
  * `firstHandoffAt` is persisted atomically by a PostgreSQL BEFORE UPDATE
@@ -41,6 +41,26 @@
  * and never moves the boundary forward. Post-assignment messages are
  * excluded even when the summary runs much later. We NEVER fall back to
  * `new Date()` (summary-generation time).
+ *
+ * ## Exact handoff boundary — monotonic seq (millisecond equality is insufficient)
+ *
+ * Millisecond timestamp equality does NOT establish pre-handoff ordering.
+ * A message committed AFTER human takeover can share the same persisted
+ * millisecond as the takeover event. The service uses a persisted monotonic
+ * message insertion sequence (`Message.seq`, a global SERIAL) and a
+ * transactionally captured source boundary (`Conversation.handoffSourceSeq`).
+ *
+ * Two PostgreSQL triggers capture the boundary atomically:
+ *   - BEFORE UPDATE on Conversation (assignment): captures MAX(seq) when
+ *     assignedUserId transitions NULL → non-NULL.
+ *   - AFTER INSERT on Message (agent reply): captures MAX(seq) excluding
+ *     the agent message itself, when senderType = 'agent'.
+ *
+ * Messages with `seq <= handoffSourceSeq` are definitively pre-takeover.
+ * Messages with `seq > handoffSourceSeq` are definitively post-takeover.
+ * This works regardless of timestamp equality. When `handoffSourceSeq` is
+ * not available (legacy conversations), the service falls back to strict
+ * timestamp `lt: cutoff` — fail closed for same-millisecond messages.
  *
  * ## BLOCKER 3 & 4 — effective plan via shared resolver
  *
@@ -130,9 +150,10 @@ export async function ensureConversationHandoffSummary(
   }
 
   // 3. Validate tenant ownership + read persisted takeover signals.
-  //    firstHandoffAt is persisted atomically by the PostgreSQL trigger and
-  //    never moves forward on retry/reassignment, so reading it here (outside
-  //    the snapshot transaction) is safe — it is a monotonically stable value.
+  //    firstHandoffAt and handoffSourceSeq are persisted atomically by
+  //    PostgreSQL triggers and never move forward on retry/reassignment, so
+  //    reading them here (outside the snapshot transaction) is safe — they
+  //    are monotonically stable values.
   const conversation = await db.conversation.findUnique({
     where: { id: conversationId },
     select: {
@@ -141,6 +162,7 @@ export async function ensureConversationHandoffSummary(
       assignedUserId: true,
       firstResponseAt: true,
       firstHandoffAt: true,
+      handoffSourceSeq: true,
     },
   })
   if (!conversation || conversation.tenantId !== tenantId) {
@@ -156,11 +178,15 @@ export async function ensureConversationHandoffSummary(
   //    REPEATABLE READ transaction so the cutoff and every source message
   //    are observed at the same database snapshot. Finds AI messages beyond
   //    any arbitrary page limit without loading an unbounded history array.
+  //    Uses handoffSourceSeq (monotonic seq boundary) when available for
+  //    definitive pre/post-takeover separation — even when timestamps are
+  //    equal at millisecond precision.
   const snapshot = await fetchBoundedSnapshot(
     conversationId,
     tenantId,
     conversation.firstResponseAt,
     conversation.firstHandoffAt,
+    conversation.handoffSourceSeq,
   )
   if (!snapshot || snapshot.aiCount === 0) {
     return null
@@ -203,7 +229,7 @@ export async function ensureConversationHandoffSummary(
 }
 
 // ---------------------------------------------------------------------------
-// BLOCKER 1: Bounded retrieval — latest AI answers prioritized + one snapshot
+// BLOCKER: Bounded retrieval — latest AI answers + authoritative seq boundary
 // ---------------------------------------------------------------------------
 
 /**
@@ -213,38 +239,30 @@ export async function ensureConversationHandoffSummary(
  * (first agent message) and every source message read are observed at the
  * SAME database snapshot — one defensible pre-handoff state.
  *
+ * ## Authoritative source boundary (exact handoff integrity)
+ *
+ * When `handoffSourceSeq` is available (set atomically by a PostgreSQL
+ * trigger during the first takeover), messages are filtered by
+ * `seq <= handoffSourceSeq` — a monotonic insertion sequence that
+ * definitively separates pre-takeover from post-takeover messages,
+ * EVEN WHEN timestamps are equal at millisecond precision.
+ *
+ * When `handoffSourceSeq` is NOT available (legacy conversations without
+ * the trigger), the service falls back to strict timestamp `lt: cutoff`
+ * — fail closed for same-millisecond messages rather than presenting
+ * unverified facts as pre-handoff evidence.
+ *
  * Strategy (memory-bounded, prioritizes the LATEST AI answers):
  *
- *   1. Find the earliest agent message (inside the snapshot transaction).
- *      Compute cutoff = min(firstHandoffAt, firstResponseAt, firstAgentMsg).
- *      If no takeover signal exists at all, return null (no summary).
- *
+ *   1. Resolve the earliest authoritative takeover cutoff inside the
+ *      transaction. If no signal, return null.
  *   2. COUNT pre-takeover AI messages (DB-side, O(1) memory). If zero,
- *      return immediately — no AI history. An exhausted scan budget is
- *      NEVER interpreted as "no AI history exists."
- *
- *   3. Fetch the LATEST N AI messages in DESC (createdAt, id) order
- *      (take MAX_AI_FETCH). This prioritizes the most recent — potentially
- *      corrective — AI answers. If the conversation has 101 AI replies and
- *      substantial intervening visitor history, the final corrective reply
- *      is retained, not the oldest 100. A lone AI reply at row 5,001 is
- *      also found (it is the latest — and only — AI reply).
- *
- *   4. Sort the fetched AI messages chronologically (ASC) to define the
- *      "retained AI portion": from earliestRetainedAi to latestRetainedAi.
- *
- *   5. Fetch a bounded context window of ALL pre-takeover text messages
- *      from earliestRetainedAi to the cutoff, ordered DESC (latest first)
- *      so the context budget is filled from the MOST RECENT context around
- *      the latest AI answers — not exclusively from the earliest historical
- *      messages. Bounded to MAX_CONTEXT_WINDOW rows.
- *
- *   6. Fetch a small visitor context window immediately before the earliest
- *      retained AI message (MAX_PRE_AI_CONTEXT rows, DESC) so the agent sees
- *      what triggered the earliest retained AI reply.
- *
- *   7. Merge all fetched rows, deduplicate by id. The pure policy handles
- *      full-identity conflict detection and chronological sorting.
+ *      return immediately.
+ *   3. Fetch the LATEST N AI messages DESC (take MAX_AI_FETCH).
+ *   4. Sort chronologically (ASC) to define the retained AI portion.
+ *   5. Bounded context window DESC (latest-first) from earliestRetainedAi.
+ *   6. Small pre-AI visitor context (DESC, 30 rows).
+ *   7. Merge + deduplicate by id.
  *
  * Memory: at most MAX_AI_FETCH + MAX_CONTEXT_WINDOW + MAX_PRE_AI_CONTEXT
  * rows (= 530) materialized at any time. No unbounded history array.
@@ -254,6 +272,7 @@ async function fetchBoundedSnapshot(
   tenantId: string,
   firstResponseAt: Date | null,
   firstHandoffAt: Date | null,
+  handoffSourceSeq: number | null,
 ): Promise<FetchedSnapshot | null> {
   return db.$transaction(
     async (tx) => {
@@ -289,21 +308,26 @@ async function fetchBoundedSnapshot(
         current.getTime() < earliest.getTime() ? current : earliest,
       )
 
-      // --- BLOCKER 1: Bounded retrieval prioritizing LATEST AI answers ---
+      // --- Authoritative source boundary ---
+      // When handoffSourceSeq is available (set by trigger), use the
+      // monotonic seq boundary — definitive even when timestamps are equal.
+      // Otherwise, use strict timestamp lt — fail closed for same-ms.
+      const useSeqBoundary =
+        handoffSourceSeq !== null && handoffSourceSeq !== undefined
+      const seqFilter = useSeqBoundary ? { seq: { lte: handoffSourceSeq as number } } : {}
+      const timestampFilter = useSeqBoundary ? {} : { createdAt: { lt: cutoff } }
+
+      // --- Bounded retrieval prioritizing LATEST AI answers ---
 
       // 1. DB-side COUNT of pre-takeover AI messages — O(1) memory.
-      //    Uses lte (not lt) for the cutoff: when the AI reply and the
-      //    takeover signal (e.g. assignment trigger NOW()) occur within the
-      //    same millisecond — common when no explicit sleep separates them —
-      //    the AI reply is a genuine pre-takeover message and must be
-      //    included. The actual human agent reply is excluded by senderType.
       const aiCount = await tx.message.count({
         where: {
           conversationId,
           tenantId,
           senderType: 'ai',
           contentType: 'text',
-          createdAt: { lte: cutoff },
+          ...seqFilter,
+          ...timestampFilter,
         },
       })
 
@@ -312,18 +336,17 @@ async function fetchBoundedSnapshot(
       }
 
       // 2. Fetch the LATEST N AI messages in DESC (createdAt, id) order.
-      //    This is the key fix for BLOCKER 1 (latest answer lost): AI rows
-      //    are selected by senderType (so row 5,001 is found), and ordered
-      //    DESC so the most recent — potentially corrective — AI reply is
-      //    retained even when there are 101+ AI replies. The oldest surplus
-      //    AI replies are the ones dropped, not the latest.
+      //    AI rows are selected by senderType (so row 5,001 is found), and
+      //    ordered DESC so the most recent — potentially corrective — AI
+      //    reply is retained. The oldest surplus AI replies are dropped.
       const aiMessagesDesc = await tx.message.findMany({
         where: {
           conversationId,
           tenantId,
           senderType: 'ai',
           contentType: 'text',
-          createdAt: { lte: cutoff },
+          ...seqFilter,
+          ...timestampFilter,
         },
         select: selectFields,
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
@@ -347,20 +370,21 @@ async function fetchBoundedSnapshot(
 
       const earliestRetainedAiCreatedAt = aiMessages[0].createdAt
 
-      // 4. Bounded context window: all pre-takeover text messages from the
-      //    earliest retained AI to the cutoff. Ordered DESC (latest first)
-      //    so the context budget fills from the MOST RECENT context around
-      //    the latest AI answers — not exclusively from the earliest
-      //    historical messages. Bounded to MAX_CONTEXT_WINDOW rows.
+      // 4. Bounded context window: pre-takeover text messages from the
+      //    earliest retained AI onwards. Ordered DESC (latest first) so
+      //    the context budget fills from the MOST RECENT context around
+      //    the latest AI answers. Bounded to MAX_CONTEXT_WINDOW rows.
+      //    Uses the same authoritative boundary (seq or timestamp).
       const contextWindow = await tx.message.findMany({
         where: {
           conversationId,
           tenantId,
           senderType: { in: ['contact', 'ai'] },
           contentType: 'text',
+          ...seqFilter,
           createdAt: {
             gte: earliestRetainedAiCreatedAt,
-            lte: cutoff,
+            ...(useSeqBoundary ? {} : { lt: cutoff }),
           },
         },
         select: selectFields,
@@ -371,12 +395,14 @@ async function fetchBoundedSnapshot(
       // 5. Visitor context immediately before the earliest retained AI
       //    message. Ordered DESC to get the most-recent-before. This
       //    captures what triggered the earliest retained AI reply.
+      //    Uses the same authoritative boundary for safety.
       const preAiContext = await tx.message.findMany({
         where: {
           conversationId,
           tenantId,
           senderType: 'contact',
           contentType: 'text',
+          ...seqFilter,
           createdAt: { lt: earliestRetainedAiCreatedAt },
         },
         select: selectFields,
