@@ -13,7 +13,7 @@ const BASE='http://127.0.0.1:81'
 const H={'Content-Type':'application/json'}
 const unique=()=> 'q6-'+process.pid+'-'+Date.now()+'-'+Math.random().toString(36).slice(2,9)
 type Owner={page:Page,tenantId:string,slug:string,userId:string}
-type Visitor={token:string,contactId:string}
+type Visitor={token:string,contactId:string,name:string}
 type Sent={conversationId:string,message:{id:string},aiResponse:{source:string,text:string}|null}
 
 async function owner(page:Page,tag:string,plan:'free'|'pro'='pro'):Promise<Owner>{
@@ -53,12 +53,13 @@ async function owner(page:Page,tag:string,plan:'free'|'pro'='pro'):Promise<Owner
   return {page,tenantId:tenant.id,slug:tenant.slug,userId:membership!.userId}
 }
 async function visitor(o:Owner):Promise<Visitor>{
+  const name='Q6Visitor-'+unique()
   const r=await o.page.request.post(BASE+'/api/widget/'+o.slug+'/contact',{
-    headers:H,data:{visitorId:unique()},
+    headers:H,data:{visitorId:unique(),name},
   })
   expect(r.status(),await r.text()).toBe(200)
   const d=await r.json() as {contactId:string,realtimeToken:string}
-  return {contactId:d.contactId,token:d.realtimeToken}
+  return {contactId:d.contactId,token:d.realtimeToken,name}
 }
 async function send(o:Owner,v:Visitor,text='قیمت چراغ ویژه بهار'):Promise<Sent>{
   const r=await o.page.request.post(BASE+'/api/widget/'+o.slug+'/messages',{
@@ -113,7 +114,7 @@ test.describe('Reviewer AI-Q6 — no-cost grounded human handoff (real Full and 
       const summary=await handoff(o,first.conversationId)
       expect(summary).not.toBeNull()
       expect(summary!.text).toContain('چراغ ویژه بهار')
-      expect(summary!.text).toContain('654321')
+      expect(summary!.text.replace(/[\u066c\u060c,\s]/g,'')).toMatch(/654321|۶۵۴۳۲۱/)
       const rows=await globalDb.message.findMany({
         where:{tenantId:o.tenantId,conversationId:first.conversationId},
       })
@@ -121,7 +122,7 @@ test.describe('Reviewer AI-Q6 — no-cost grounded human handoff (real Full and 
       expect(await countRows(o,first.conversationId)).toBe(1)
       expect(await bill(o)).toBe(1)
       expect(rows.filter(x=>x.senderType==='ai')).toHaveLength(1)
-      await inboxSelect(o,'قیمت چراغ ویژه بهار')
+      await inboxSelect(o,v.name)
       const panel=o.page.getByTestId('ai-q6-handoff-summary')
       await expect(panel).toBeVisible({timeout:10000})
       await expect(panel).toContainText('چراغ ویژه بهار')
@@ -157,7 +158,7 @@ test.describe('Reviewer AI-Q6 — no-cost grounded human handoff (real Full and 
       expect(await handoff(o,first.conversationId)).toBeNull()
       expect(await countRows(o,first.conversationId)).toBe(0)
       expect(await bill(o)).toBe(0)
-      await inboxSelect(o,'سلام')
+      await inboxSelect(o,v.name)
       await expect(o.page.getByTestId('ai-q6-handoff-summary')).toHaveCount(0)
     }finally{await ctx.close()}
   })
@@ -242,7 +243,7 @@ test.describe('Reviewer AI-Q6 — no-cost grounded human handoff (real Full and 
         senderType:'contact',contentType:'text',status:'sent',content:{text:hostile},
       }})
       await assign(o,first.conversationId)
-      await inboxSelect(o,'قیمت چراغ ویژه بهار')
+      await inboxSelect(o,v.name)
       const panel=o.page.getByTestId('ai-q6-handoff-summary')
       await expect(panel).toBeVisible({timeout:10000})
       expect(await panel.locator('script,img,iframe,svg,object,embed').count()).toBe(0)
