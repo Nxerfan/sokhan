@@ -25,7 +25,7 @@ jobs:
         env:
           DATABASE_URL: postgresql://user:password@localhost:5432/dummy
           DIRECT_URL: postgresql://user:password@localhost:5432/dummy
-      - name: Verify immutable Q1 through Q5 reviewer Git blob hashes
+      - name: Verify immutable Q1 through Q6 reviewer Git blob hashes
         run: |
           node --input-type=module <<'NODE'
           import {execFileSync} from 'node:child_process'
@@ -51,12 +51,38 @@ jobs:
             'tests/db-boundary/ai-q5-commit-race-review.test.ts':'14deb3e698f460a3a4d19392d71cbfff0c3290d4',
             'tests/db-boundary/ai-q5-concurrent-settlement-review.test.ts':'c9ad1d2c0ddfc006bd1dd15067c478cd6987f2d2',
             'tests/ai-q5-human-takeover.spec.ts':'ecd0271c38abe39a9ccbaf51ca09a2d1f2620f41',
+            'tests/unit/ai-q6-acceptance.test.ts':'be4b32014b63d39980827519363b0991955bf159',
+            'tests/db-boundary/ai-q6-acceptance.test.ts':'2c0a5483c2192a3f751e7dfac0f2893e0e91653f',
+            'tests/ai-q6-acceptance.spec.ts':'1fecdb7090f730be809b26f27f653e4ba24db3eb',
           }
-          if(Object.keys(expected).length!==21)throw Error('Expected 21 reviewer-protected Q1-Q5 files')
+          if(Object.keys(expected).length!==24)throw Error('Expected 21 Q1-Q5 + 3 Q6 reviewer-protected files')
           for(const [file,sha] of Object.entries(expected)){
             const actual=execFileSync('git',['hash-object',file],{encoding:'utf8'}).trim()
             if(actual!==sha)throw Error('Reviewer-owned test changed: '+file)
             console.log('Reviewer integrity OK: '+file)
+          }
+          NODE
+      - name: Verify Q6 reviewer test syntax and exact test counts
+        run: |
+          node --input-type=module <<'NODE'
+          import {readFileSync} from 'node:fs'
+          import ts from 'typescript'
+          const checks=[
+            ['tests/unit/ai-q6-acceptance.test.ts',14],
+            ['tests/db-boundary/ai-q6-acceptance.test.ts',10],
+            ['tests/ai-q6-acceptance.spec.ts',8],
+          ]
+          for(const [file,count] of checks){
+            const source=readFileSync(file,'utf8')
+            const parsed=ts.createSourceFile(file,source,ts.ScriptTarget.Latest,true,ts.ScriptKind.TS)
+            if(parsed.parseDiagnostics.length){
+              for(const d of parsed.parseDiagnostics)
+                console.error(file+': '+ts.flattenDiagnosticMessageText(d.messageText,'\\n'))
+              throw Error('Reviewer Q6 acceptance syntax invalid: '+file)
+            }
+            const actual=(source.match(/\\btest\\s*\\(/g)||[]).length
+            if(actual!==count)throw Error('Reviewer Q6 acceptance count changed: '+file+' expected '+count+' got '+actual)
+            console.log('Q6 reviewer syntax and count OK: '+file+' '+count)
           }
           NODE
       - name: Enforce no repeated Q1-Q5 tests in scoped Q6 CI
