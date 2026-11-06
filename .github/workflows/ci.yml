@@ -41,8 +41,14 @@ jobs:
       - name: Unit tests - AI-Q4 scoped Q1/Q2/Q3 compatibility and Product Q&A
         if: github.event_name == 'pull_request' && github.head_ref == 'feat/ai-q4-grounded-products'
         run: bun test tests/unit/ai-q4-product-contract.test.ts tests/unit/ai-q4-adversarial-review.test.ts tests/unit/ai-q4-streaming-adversarial-review.test.ts tests/unit/ai-q4-catalog-resource.test.ts tests/unit/ai-q1-contract.test.ts tests/unit/ai-q2-policy.test.ts tests/unit/ai-q3-faq-contract.test.ts tests/unit/ai-q3-faq-adversarial-review.test.ts
+      # AI-Q5 contract tests are self-contained; the browser suite also checks
+      # Q4 grounded answers and Q2 charge/retry behavior. No duplicate legacy
+      # Q1-Q4 Unit suites on this PR; main retains the full regression.
+      - name: Unit tests - AI-Q5 focused takeover only
+        if: github.event_name == 'pull_request' && github.head_ref == 'feat/ai-q5-human-takeover'
+        run: bun test tests/unit/ai-q5-human-takeover-contract.test.ts
       - name: Unit tests - full regression (main and other PRs)
-        if: github.event_name != 'pull_request' || (github.head_ref != 'feat/ai-q2-atomic-usage' && github.head_ref != 'feat/ai-q4-grounded-products')
+        if: github.event_name != 'pull_request' || (github.head_ref != 'feat/ai-q2-atomic-usage' && github.head_ref != 'feat/ai-q4-grounded-products' && github.head_ref != 'feat/ai-q5-human-takeover')
         run: bun test tests/unit/
       - name: Production build
         run: bunx next build
@@ -161,8 +167,11 @@ jobs:
       - name: Run Full DB boundary tests - AI-Q4 product, Q2 usage and Q3 FAQ
         if: github.event_name == 'pull_request' && github.head_ref == 'feat/ai-q4-grounded-products'
         run: bun test tests/db-boundary/ai-q4-products.test.ts tests/db-boundary/ai-q4-concurrent-catalog.test.ts tests/db-boundary/ai-q4-snapshot-review.test.ts tests/db-boundary/ai-q2-usage.test.ts tests/db-boundary/ai-q3-faq.test.ts
+      - name: Run Full DB boundary tests - AI-Q5 takeover only
+        if: github.event_name == 'pull_request' && github.head_ref == 'feat/ai-q5-human-takeover'
+        run: bun test tests/db-boundary/ai-q5-human-takeover.test.ts tests/db-boundary/ai-q5-commit-race-review.test.ts tests/db-boundary/ai-q5-concurrent-settlement-review.test.ts
       - name: Run Full DB boundary tests (real PostgreSQL)
-        if: github.event_name != 'pull_request' || (github.head_ref != 'feat/ai-q2-atomic-usage' && github.head_ref != 'feat/ai-q4-grounded-products')
+        if: github.event_name != 'pull_request' || (github.head_ref != 'feat/ai-q2-atomic-usage' && github.head_ref != 'feat/ai-q4-grounded-products' && github.head_ref != 'feat/ai-q5-human-takeover')
         run: bun test tests/db-boundary/
       # AI-Q2: only AI-Q2 browser tests (Free + Pro, all 3 widget surfaces, safe link targets, downgrade + upgrade).
       # AI-Q2 must run real PostgreSQL concurrency AND legacy billing-state-machine compatibility.
@@ -178,10 +187,13 @@ jobs:
       - name: Run Full browser tests - AI-Q4 focused acceptance
         if: github.event_name == 'pull_request' && github.head_ref == 'feat/ai-q4-grounded-products'
         run: bunx playwright test tests/ai-q4-products.spec.ts tests/ai-q4-large-catalog-review.spec.ts --workers=1 --retries=0
+      - name: Run Full browser tests - AI-Q5 human takeover
+        if: github.event_name == 'pull_request' && github.head_ref == 'feat/ai-q5-human-takeover'
+        run: bunx playwright test tests/ai-q5-human-takeover.spec.ts --workers=1 --retries=0
       - name: Run Full regression tests - main and other PRs
-        if: github.event_name != 'pull_request' || (github.head_ref != 'feat/ai-q2-atomic-usage' && github.head_ref != 'feat/ai-q4-grounded-products')
+        if: github.event_name != 'pull_request' || (github.head_ref != 'feat/ai-q2-atomic-usage' && github.head_ref != 'feat/ai-q4-grounded-products' && github.head_ref != 'feat/ai-q5-human-takeover')
         run: |
-          bunx playwright test             tests/module2.spec.ts             tests/socketio-verify.spec.ts             tests/socket-race.spec.ts             tests/realtime-authz.spec.ts             tests/widget-external-origin.spec.ts tests/reconnect-regression.spec.ts tests/tenant-security.spec.ts tests/inbox-reply-echo-dedup.spec.ts tests/inbox-stale-selection.spec.ts tests/widget-npm-external-origin.spec.ts tests/widget-npm-identity.spec.ts tests/widget-script-identity.spec.ts tests/widget-access-identity-dashboard.spec.ts tests/inbox-burst-dedup.spec.ts tests/onboarding.spec.ts tests/anonymous-isolation.spec.ts tests/widget-live-messaging.spec.ts tests/widget-optimistic-failure.spec.ts tests/widget-duplicate-messages.spec.ts tests/widget-adversarial-ordering.spec.ts tests/caddy-public-boundary.spec.ts tests/invite-workspace-switching.spec.ts tests/widget-customization.spec.ts tests/widget-v2-positioning.spec.ts tests/widget-v2-colors.spec.ts tests/widget-domains.spec.ts tests/ai-q1-config.spec.ts tests/ai-q2-usage.spec.ts tests/ai-q3-faq.spec.ts tests/ai-q4-products.spec.ts tests/ai-q4-large-catalog-review.spec.ts tests/analytics-csat.spec.ts tests/workspace-switcher.spec.ts tests/password-reset.spec.ts tests/contacts-identity.spec.ts tests/auth-session-stress.spec.ts
+          bunx playwright test             tests/module2.spec.ts             tests/socketio-verify.spec.ts             tests/socket-race.spec.ts             tests/realtime-authz.spec.ts             tests/widget-external-origin.spec.ts tests/reconnect-regression.spec.ts tests/tenant-security.spec.ts tests/inbox-reply-echo-dedup.spec.ts tests/inbox-stale-selection.spec.ts tests/widget-npm-external-origin.spec.ts tests/widget-npm-identity.spec.ts tests/widget-script-identity.spec.ts tests/widget-access-identity-dashboard.spec.ts tests/inbox-burst-dedup.spec.ts tests/onboarding.spec.ts tests/anonymous-isolation.spec.ts tests/widget-live-messaging.spec.ts tests/widget-optimistic-failure.spec.ts tests/widget-duplicate-messages.spec.ts tests/widget-adversarial-ordering.spec.ts tests/caddy-public-boundary.spec.ts tests/invite-workspace-switching.spec.ts tests/widget-customization.spec.ts tests/widget-v2-positioning.spec.ts tests/widget-v2-colors.spec.ts tests/widget-domains.spec.ts tests/ai-q1-config.spec.ts tests/ai-q2-usage.spec.ts tests/ai-q3-faq.spec.ts tests/ai-q4-products.spec.ts tests/ai-q4-large-catalog-review.spec.ts tests/ai-q5-human-takeover.spec.ts tests/analytics-csat.spec.ts tests/workspace-switcher.spec.ts tests/password-reset.spec.ts tests/contacts-identity.spec.ts tests/auth-session-stress.spec.ts
       - name: Print Full container logs on failure
         if: failure()
         run: |
@@ -213,8 +225,11 @@ jobs:
       - name: Run Lite DB boundary tests - AI-Q4 product, Q2 usage and Q3 FAQ
         if: github.event_name == 'pull_request' && github.head_ref == 'feat/ai-q4-grounded-products'
         run: bun test tests/db-boundary/ai-q4-products.test.ts tests/db-boundary/ai-q4-concurrent-catalog.test.ts tests/db-boundary/ai-q4-snapshot-review.test.ts tests/db-boundary/ai-q2-usage.test.ts tests/db-boundary/ai-q3-faq.test.ts
+      - name: Run Lite DB boundary tests - AI-Q5 takeover only
+        if: github.event_name == 'pull_request' && github.head_ref == 'feat/ai-q5-human-takeover'
+        run: bun test tests/db-boundary/ai-q5-human-takeover.test.ts tests/db-boundary/ai-q5-commit-race-review.test.ts tests/db-boundary/ai-q5-concurrent-settlement-review.test.ts
       - name: Run Lite DB boundary tests (real PostgreSQL)
-        if: github.event_name != 'pull_request' || (github.head_ref != 'feat/ai-q2-atomic-usage' && github.head_ref != 'feat/ai-q4-grounded-products')
+        if: github.event_name != 'pull_request' || (github.head_ref != 'feat/ai-q2-atomic-usage' && github.head_ref != 'feat/ai-q4-grounded-products' && github.head_ref != 'feat/ai-q5-human-takeover')
         run: bun test tests/db-boundary/
       # AI-Q2: only AI-Q2 browser tests (Free + Pro, all widget surfaces, downgrade).
       # AI-Q2 must run real PostgreSQL concurrency AND legacy billing-state-machine compatibility.
@@ -227,10 +242,13 @@ jobs:
       - name: Run Lite browser tests - AI-Q4 focused acceptance
         if: github.event_name == 'pull_request' && github.head_ref == 'feat/ai-q4-grounded-products'
         run: bunx playwright test tests/ai-q4-products.spec.ts tests/ai-q4-large-catalog-review.spec.ts --workers=1 --retries=0
+      - name: Run Lite browser tests - AI-Q5 human takeover
+        if: github.event_name == 'pull_request' && github.head_ref == 'feat/ai-q5-human-takeover'
+        run: bunx playwright test tests/ai-q5-human-takeover.spec.ts --workers=1 --retries=0
       - name: Run Lite regression tests - main and other PRs
-        if: github.event_name != 'pull_request' || (github.head_ref != 'feat/ai-q2-atomic-usage' && github.head_ref != 'feat/ai-q4-grounded-products')
+        if: github.event_name != 'pull_request' || (github.head_ref != 'feat/ai-q2-atomic-usage' && github.head_ref != 'feat/ai-q4-grounded-products' && github.head_ref != 'feat/ai-q5-human-takeover')
         run: |
-          bunx playwright test             tests/module2.spec.ts             tests/socketio-verify.spec.ts             tests/socket-race.spec.ts             tests/realtime-authz.spec.ts             tests/widget-external-origin.spec.ts tests/reconnect-regression.spec.ts tests/tenant-security.spec.ts tests/inbox-reply-echo-dedup.spec.ts tests/inbox-stale-selection.spec.ts tests/widget-npm-external-origin.spec.ts tests/widget-npm-identity.spec.ts tests/widget-script-identity.spec.ts tests/widget-access-identity-dashboard.spec.ts tests/inbox-burst-dedup.spec.ts tests/onboarding.spec.ts tests/anonymous-isolation.spec.ts tests/widget-live-messaging.spec.ts tests/widget-optimistic-failure.spec.ts tests/widget-duplicate-messages.spec.ts tests/widget-adversarial-ordering.spec.ts tests/caddy-public-boundary.spec.ts tests/invite-workspace-switching.spec.ts tests/widget-customization.spec.ts tests/widget-v2-positioning.spec.ts tests/widget-v2-colors.spec.ts tests/widget-domains.spec.ts tests/ai-q1-config.spec.ts tests/ai-q2-usage.spec.ts tests/ai-q3-faq.spec.ts tests/ai-q4-products.spec.ts tests/ai-q4-large-catalog-review.spec.ts tests/analytics-csat.spec.ts tests/workspace-switcher.spec.ts tests/password-reset.spec.ts tests/contacts-identity.spec.ts tests/auth-session-stress.spec.ts
+          bunx playwright test             tests/module2.spec.ts             tests/socketio-verify.spec.ts             tests/socket-race.spec.ts             tests/realtime-authz.spec.ts             tests/widget-external-origin.spec.ts tests/reconnect-regression.spec.ts tests/tenant-security.spec.ts tests/inbox-reply-echo-dedup.spec.ts tests/inbox-stale-selection.spec.ts tests/widget-npm-external-origin.spec.ts tests/widget-npm-identity.spec.ts tests/widget-script-identity.spec.ts tests/widget-access-identity-dashboard.spec.ts tests/inbox-burst-dedup.spec.ts tests/onboarding.spec.ts tests/anonymous-isolation.spec.ts tests/widget-live-messaging.spec.ts tests/widget-optimistic-failure.spec.ts tests/widget-duplicate-messages.spec.ts tests/widget-adversarial-ordering.spec.ts tests/caddy-public-boundary.spec.ts tests/invite-workspace-switching.spec.ts tests/widget-customization.spec.ts tests/widget-v2-positioning.spec.ts tests/widget-v2-colors.spec.ts tests/widget-domains.spec.ts tests/ai-q1-config.spec.ts tests/ai-q2-usage.spec.ts tests/ai-q3-faq.spec.ts tests/ai-q4-products.spec.ts tests/ai-q4-large-catalog-review.spec.ts tests/ai-q5-human-takeover.spec.ts tests/analytics-csat.spec.ts tests/workspace-switcher.spec.ts tests/password-reset.spec.ts tests/contacts-identity.spec.ts tests/auth-session-stress.spec.ts
       - name: Print Lite container logs on failure
         if: failure()
         run: |

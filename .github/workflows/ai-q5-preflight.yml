@@ -1,0 +1,164 @@
+name: AI-Q5 — independent reviewer human-takeover acceptance preflight
+on:
+  push:
+    branches:
+      - feat/ai-q5-human-takeover
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  reviewer-ai-q5-preflight:
+    if: github.event_name == 'push' || github.head_ref == 'feat/ai-q5-human-takeover'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+      - name: Generate Prisma client for Playwright imports
+        run: bunx prisma generate
+        env:
+          DATABASE_URL: postgresql://user:password@localhost:5432/dummy
+          DIRECT_URL: postgresql://user:password@localhost:5432/dummy
+      - name: Verify immutable Q1 through Q5 reviewer Git blob hashes
+        run: |
+          node --input-type=module <<'NODE'
+          import {execFileSync} from 'node:child_process'
+          const expected={
+            'tests/unit/ai-q1-contract.test.ts':'c4ebfd333c3a87b9b8568306e7136b5f63ab9ffe',
+            'tests/ai-q1-config.spec.ts':'da4085c92f5db1f9c447c2d96a065ab25fbf2cd0',
+            'tests/unit/ai-q2-policy.test.ts':'4ea2e9b52dc6e3e657ccc090dc5c14a092d7fa5a',
+            'tests/db-boundary/ai-q2-usage.test.ts':'aa8959f7337fcf66e0c04decb0af9f765e92733b',
+            'tests/ai-q2-usage.spec.ts':'9769f4ca8d2779e829e783b0d9c03401935c22ff',
+            'tests/unit/ai-q3-faq-contract.test.ts':'5038fb8036b8699bb9c048c58a82007ddf6938ba',
+            'tests/db-boundary/ai-q3-faq.test.ts':'fbe9032979f62d3546438725c446aabd2d28f28f',
+            'tests/ai-q3-faq.spec.ts':'4b73548ba4dab02b551993ae46e3c3d5f8bf2355',
+            'tests/unit/ai-q3-faq-adversarial-review.test.ts':'83b4441bfb6997db5f79c5762f18c5f9ff00de2f',
+            'tests/unit/ai-q4-product-contract.test.ts':'219096d2d1dea3535bf33af72859cd3258fcefce',
+            'tests/unit/ai-q4-adversarial-review.test.ts':'0915c1f18a0e3fb52efbc3356f8801906d3565d8',
+            'tests/unit/ai-q4-streaming-adversarial-review.test.ts':'deb132de5322cffde6fde3cf3ecbda1d9492c3d0',
+            'tests/db-boundary/ai-q4-products.test.ts':'2b4d03c379910676488e8a796e67a69cd1e0e1ec',
+            'tests/db-boundary/ai-q4-snapshot-review.test.ts':'22fe6be77853c13f3a2fa007075cb6eec583be18',
+            'tests/ai-q4-products.spec.ts':'6dbc072903fd00fcacea1f4644a0cd0c4e7fd61f',
+            'tests/ai-q4-large-catalog-review.spec.ts':'42d8f364fa3f4df656afb9e61eb52563a34efc9f',
+            'tests/unit/ai-q5-human-takeover-contract.test.ts':'0c907672b31dc896488a3fcab62e0b0c50789634',
+            'tests/db-boundary/ai-q5-human-takeover.test.ts':'69fe3c6b8aaee6dea744e1d9f6e258848a5405a7',
+            'tests/db-boundary/ai-q5-commit-race-review.test.ts':'14deb3e698f460a3a4d19392d71cbfff0c3290d4',
+            'tests/db-boundary/ai-q5-concurrent-settlement-review.test.ts':'c9ad1d2c0ddfc006bd1dd15067c478cd6987f2d2',
+            'tests/ai-q5-human-takeover.spec.ts':'ecd0271c38abe39a9ccbaf51ca09a2d1f2620f41',
+          }
+          for(const [file,sha] of Object.entries(expected)){
+            const current=execFileSync('git',['hash-object',file],{encoding:'utf8'}).trim()
+            if(current!==sha)throw Error('Immutable reviewer test modified: '+file)
+            console.log('Reviewer integrity OK: '+file)
+          }
+          NODE
+      - name: Syntax-check five reviewer Q5 suites
+        run: |
+          node --input-type=module <<'NODE'
+          import ts from 'typescript'
+          import {readFileSync} from 'node:fs'
+          for(const path of [
+            'tests/unit/ai-q5-human-takeover-contract.test.ts',
+            'tests/db-boundary/ai-q5-human-takeover.test.ts',
+            'tests/db-boundary/ai-q5-commit-race-review.test.ts',
+              'tests/db-boundary/ai-q5-concurrent-settlement-review.test.ts',
+            'tests/ai-q5-human-takeover.spec.ts',
+          ]){
+            const file=ts.createSourceFile(path,readFileSync(path,'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TS)
+            if(file.parseDiagnostics.length){
+              for(const diagnostic of file.parseDiagnostics)
+                console.error(path+': '+ts.flattenDiagnosticMessageText(diagnostic.messageText,'\n'))
+              process.exitCode=1
+            }else console.log('Syntax OK: '+path)
+          }
+          NODE
+      - name: Verify scoped Q5 Full/Lite and preserve complete main regressions
+        run: |
+          node --input-type=module <<'NODE'
+          import {readFileSync} from 'node:fs'
+          const ci=readFileSync('.github/workflows/ci.yml','utf8')
+          const scoped="github.event_name == 'pull_request' && github.head_ref == 'feat/ai-q5-human-takeover'"
+          const full="github.event_name != 'pull_request' || (github.head_ref != 'feat/ai-q2-atomic-usage' && github.head_ref != 'feat/ai-q4-grounded-products' && github.head_ref != 'feat/ai-q5-human-takeover')"
+          function block(name){
+            const start=ci.indexOf('      - name: '+name+'\n')
+            if(start<0)throw Error('Missing CI step '+name)
+            const end=ci.indexOf('\n      - name: ',start+10)
+            return ci.slice(start,end<0?undefined:end)
+          }
+          const checks=[
+            ['Unit tests - AI-Q5 focused takeover only',[
+              'tests/unit/ai-q5-human-takeover-contract.test.ts',
+            ]],
+            ['Run Full DB boundary tests - AI-Q5 takeover only',[
+              'tests/db-boundary/ai-q5-human-takeover.test.ts',
+              'tests/db-boundary/ai-q5-commit-race-review.test.ts',
+              'tests/db-boundary/ai-q5-concurrent-settlement-review.test.ts',
+            ]],
+            ['Run Lite DB boundary tests - AI-Q5 takeover only',[
+              'tests/db-boundary/ai-q5-human-takeover.test.ts',
+              'tests/db-boundary/ai-q5-commit-race-review.test.ts',
+              'tests/db-boundary/ai-q5-concurrent-settlement-review.test.ts',
+            ]],
+            ['Run Full browser tests - AI-Q5 human takeover',['tests/ai-q5-human-takeover.spec.ts','--retries=0']],
+            ['Run Lite browser tests - AI-Q5 human takeover',['tests/ai-q5-human-takeover.spec.ts','--retries=0']],
+          ]
+          for(const [name,required] of checks){
+            const step=block(name)
+            if(!step.includes('if: '+scoped))throw Error('Not scoped to Q5: '+name)
+            for(const text of required)if(!step.includes(text))throw Error(name+' missing '+text)
+            console.log('Q5 scope OK: '+name)
+          }
+          // Exact commands: only new Q5 suites run on the Q5 PR.
+          // The Q5 browser suite itself verifies Q2 billing/retries and
+          // Q4 positive grounded Product Q&A, so legacy suites are redundant.
+          const exactRuns=[
+            ['Unit tests - AI-Q5 focused takeover only',
+              'run: bun test tests/unit/ai-q5-human-takeover-contract.test.ts'],
+            ['Run Full DB boundary tests - AI-Q5 takeover only',
+              'run: bun test tests/db-boundary/ai-q5-human-takeover.test.ts tests/db-boundary/ai-q5-commit-race-review.test.ts tests/db-boundary/ai-q5-concurrent-settlement-review.test.ts'],
+            ['Run Lite DB boundary tests - AI-Q5 takeover only',
+              'run: bun test tests/db-boundary/ai-q5-human-takeover.test.ts tests/db-boundary/ai-q5-commit-race-review.test.ts tests/db-boundary/ai-q5-concurrent-settlement-review.test.ts'],
+            ['Run Full browser tests - AI-Q5 human takeover',
+              'run: bunx playwright test tests/ai-q5-human-takeover.spec.ts --workers=1 --retries=0'],
+            ['Run Lite browser tests - AI-Q5 human takeover',
+              'run: bunx playwright test tests/ai-q5-human-takeover.spec.ts --workers=1 --retries=0'],
+          ]
+          for(const [name,required] of exactRuns){
+            const step=block(name)
+            const actual=step.split('\n').map(x=>x.trim()).filter(x=>x.startsWith('run: '))
+            if(actual.length!==1 || actual[0]!==required)
+              throw Error('Duplicate or unexpected Q1-Q4 suite in scoped Q5 step: '+name)
+            console.log('No duplicate legacy tests in scoped Q5 step: '+name)
+          }
+          for(const name of [
+            'Unit tests - full regression (main and other PRs)',
+            'Run Full DB boundary tests (real PostgreSQL)',
+            'Run Lite DB boundary tests (real PostgreSQL)',
+            'Run Full regression tests - main and other PRs',
+            'Run Lite regression tests - main and other PRs',
+          ]){
+            if(!block(name).includes('if: '+full))throw Error('Full main CI not preserved: '+name)
+            console.log('Main full regression retained: '+name)
+          }
+          for(const group of ['tests/ai-q1-config.spec.ts','tests/ai-q2-usage.spec.ts',
+            'tests/ai-q3-faq.spec.ts','tests/ai-q4-products.spec.ts',
+            'tests/ai-q4-large-catalog-review.spec.ts','tests/ai-q5-human-takeover.spec.ts']){
+            for(const name of [
+              'Run Full regression tests - main and other PRs',
+              'Run Lite regression tests - main and other PRs',
+            ]){
+              if(!block(name).includes(group))throw Error('Main '+name+' missing '+group)
+            }
+          }
+          console.log('Main and other PRs retain full Q1–Q5 regression.')
+          NODE
+      - name: Enumerate Q5 real-browser cases
+        run: bunx playwright test tests/ai-q5-human-takeover.spec.ts --list
+      - name: Run reviewer Q5 policy contract (expected red until implemented)
+        run: bun test tests/unit/ai-q5-human-takeover-contract.test.ts

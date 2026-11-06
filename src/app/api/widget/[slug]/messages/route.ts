@@ -656,6 +656,7 @@ async function tryAiResponse(
     streamProductCandidates,
     renderGroundedAnswer,
   } = await import('@/lib/ai/product-policy')
+  const { canAutoReplyToConversation } = await import('@/lib/ai/human-takeover')
 
   // Load AI config
   const aiConfig = await db.aiConfig.findUnique({ where: { tenantId } })
@@ -663,6 +664,14 @@ async function tryAiResponse(
 
   // At least one feature must be enabled.
   if (!aiConfig.faqEnabled && !aiConfig.productQaEnabled) return null
+
+  // AI-Q5: Human-takeover early eligibility check.
+  // If a human agent has already taken over the conversation (assigned,
+  // replied, closed, or set firstResponseAt), skip AI entirely.
+  // This is an EARLY check — the commit-time guard in commitAiReply
+  // handles the race where takeover occurs AFTER reservation.
+  const aiEligible = await canAutoReplyToConversation(conversationId)
+  if (!aiEligible) return null
 
   // --- Reserve one AI capacity unit (atomic, respects quota) ---
   const reservation = await reserveAiReply({ tenantId, conversationId, visitorMessageId })
