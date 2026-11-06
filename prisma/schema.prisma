@@ -295,12 +295,13 @@ model Message {
   content        Json
   status         String   @default("sent")
   createdAt      DateTime @default(now())
-  /// AI-Q6: Monotonic global insertion sequence. Set by PostgreSQL
-  /// (SERIAL/IDENTITY) — strictly increasing across all messages regardless
-  /// of conversation or tenant. Used by the handoff summary to establish
-  /// definitive pre/post-takeover ordering when millisecond timestamps are
-  /// equal. Captured at takeover time as Conversation.handoffSourceSeq.
-  seq             Int      @default(autoincrement())
+  /// AI-Q6: Authoritative monotonic insertion sequence. NOT a simple SERIAL
+  /// default — it is assigned by a BEFORE INSERT trigger AFTER acquiring a
+  /// per-conversation row lock. This ensures the seq value agrees with the
+  /// serialization order: a message that acquires the lock first gets a
+  /// lower seq, regardless of when its transaction commits. The SERIAL
+  /// default is overridden by nextval() in the trigger after the lock.
+  seq             Int      @default(0)
 
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   senderUser   User?        @relation(fields: [senderUserId], references: [id], onDelete: SetNull)
