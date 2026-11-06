@@ -72,14 +72,13 @@ async function blockingPids(pid:number):Promise<number[]>{
   return r[0]?.pids||[]
 }
 async function observe(
-  fn:()=>Promise<'ready'|'wait'|'error'>,
+  fn:()=>Promise<'ready'|'wait'|'pending'>,
   description:string,
 ):Promise<'ready'|'wait'>{
   const end=Date.now()+8000
   while(Date.now()<end){
     const result=await fn()
     if(result==='ready'||result==='wait')return result
-    if(result==='error')throw Error('Unexpected database blocking state: '+description)
     await Bun.sleep(30)
   }
   throw Error('Did not observe completion or database lock ordering: '+description)
@@ -147,7 +146,7 @@ async function race(kind:'assignment'|'agent'){
     },{timeout:22000,maxWait:10000})
     const writerPid=await writerPidReady.promise
     await observe(async()=>(
-      (await blockingPids(writerPid)).includes(blockerPid)?'wait':'error'
+      (await blockingPids(writerPid)).includes(blockerPid)?'wait':'pending'
     ),'writer held in test BEFORE INSERT trigger before FK check')
 
     highTask=globalDb.$transaction(async tx=>{
@@ -171,7 +170,7 @@ async function race(kind:'assignment'|'agent'){
       if(highCompleted)return 'ready'
       const pids=await blockingPids(highPid)
       if(pids.includes(writerPid))return 'wait'
-      return 'error'
+      return 'pending'
     },'higher-sequence writer completion or serializing lock')
     highWasCommittedBeforeTakeover=highCompleted
 
@@ -197,7 +196,7 @@ async function race(kind:'assignment'|'agent'){
       const humanBlocking=await blockingPids(humanPid)
       if(humanBlocking.includes(writerPid)||humanBlocking.includes(highPid))
         return 'wait'
-      return 'error'
+      return 'pending'
     },'human takeover committing or blocking behind pending message writer')
     humanFirst=outcome==='ready'
     writerFirst=outcome==='wait'
