@@ -269,6 +269,15 @@ model Conversation {
   /// This distinguishes pre/post messages even when timestamps are equal at
   /// millisecond precision. First-takeover wins — never overwritten.
   handoffSourceSeq   Int?
+  /// AI-Q6: PRIMARY commit-order boundary. Stores pg_current_snapshot()::text
+  /// captured atomically during the first human takeover. This snapshot records
+  /// exactly which transactions were committed (visible) at the moment of
+  /// takeover. When filtering messages, pg_visible_in_snapshot(m.xmin, snapshot)
+  /// correctly distinguishes messages committed before vs after the takeover,
+  /// REGARDLESS of SERIAL allocation order. This solves the fundamental problem
+  /// that nextval() allocates before FK lock acquisition and before commit.
+  /// First-takeover wins — never overwritten.
+  handoffSnapshot    String?
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
 
@@ -295,13 +304,13 @@ model Message {
   content        Json
   status         String   @default("sent")
   createdAt      DateTime @default(now())
-  /// AI-Q6: Authoritative monotonic insertion sequence. NOT a simple SERIAL
-  /// default — it is assigned by a BEFORE INSERT trigger AFTER acquiring a
-  /// per-conversation row lock. This ensures the seq value agrees with the
-  /// serialization order: a message that acquires the lock first gets a
-  /// lower seq, regardless of when its transaction commits. The SERIAL
-  /// default is overridden by nextval() in the trigger after the lock.
-  seq             Int      @default(0)
+  /// AI-Q6: Monotonic global insertion sequence (SERIAL). Used as a
+  /// secondary boundary for legacy compatibility. The PRIMARY boundary
+  /// is Conversation.handoffSnapshot (a pg_snapshot that captures which
+  /// transactions were committed at takeover time). The snapshot correctly
+  /// distinguishes pre/post-takeover messages even when SERIAL allocation
+  /// order disagrees with commit order.
+  seq             Int      @default(autoincrement())
 
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   senderUser   User?        @relation(fields: [senderUserId], references: [id], onDelete: SetNull)
