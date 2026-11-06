@@ -79,7 +79,8 @@ describe('Reviewer AI-Q6 — full-history eligibility and first human cut-off',(
     expect(records).toHaveLength(1)
     expect(records[0].summaryText).toContain('REAL_AI_REPLY_AT_MESSAGE_501')
     expect(records[0].sourceMessageIds).toContain(ai.id)
-    expect(records[0].sourceMessageIds.length).toBeLessThanOrEqual(30)
+    expect(Array.isArray(records[0].sourceMessageIds)).toBe(true)
+    expect((records[0].sourceMessageIds as string[]).length).toBeLessThanOrEqual(30)
   },20000)
 
   test('first human agent message is authoritative cut-off even if firstResponseAt was populated later',async()=>{
