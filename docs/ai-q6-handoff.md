@@ -68,3 +68,16 @@ Reviewer-owned `tests/db-boundary/ai-q6-handoff-invariants-review.test.ts` (4 re
 4. An **active Pro subscription** overrides stale `Tenant.plan='free'`: summary allowed, without new AI charges.
 
 Effective entitlement must match the active-subscription-first logic used in Q2. Do not change Q2 accounting. The reviewer preflight pins all **27** reviewer-owned test blobs. Q6 scoped CI runs **18 Unit**, **16 PostgreSQL per Full/Lite edition**, and **8 browser tests per edition**. No legacy Q1-Q5 suite reruns on this PR.
+
+## Current independent reviewer verdict — SERIAL allocation is not commit order
+
+**Latest accepted reviewer suite baseline: 31 immutable blob hashes** (21 from Q1–Q5 and 10 from Q6). The scoped Q6 CI now requires **20 Unit**, **21 real PostgreSQL per Full/Lite**, and **8 browser per Full/Lite** tests. Older suite counts elsewhere in this document reflect intermediate review checkpoints; this section is authoritative for the current PR.
+
+New immutable real-PostgreSQL suite: `tests/db-boundary/ai-q6-commit-order-review.test.ts` (two tests, pinned SHA `a1e7257399c5cca3e7e78a119c88feb5c0d05f78`). It establishes actual overlapping transactions without mocked Prisma or timing-only acceptance:
+
+1. An in-flight AI Message allocates a **lower SERIAL seq**, stays uncommitted; a second Message allocates a higher seq and commits. The human **assignment** then commits while the first writer is still pending. A later commit of the first writer must NOT be included as pre-handoff evidence.
+2. The same ordering with the **first agent message** instead of assignment must also be safe.
+
+Both legitimate serial orders are accepted: when the human action waits behind the earlier message transaction, that message may be included because it genuinely committed first; when human takeover commits first, the later-committed Message must be excluded. The unprotected `SELECT MAX(seq)` trigger incorrectly includes the uncommitted lower-seq writer after it commits later. **SERIAL/nextval order is not PostgreSQL transaction commit order.**
+
+Acceptance requires a shared PostgreSQL serialization boundary between **every** Message insert in the conversation and **both** human takeover forms. Ensure that `seq` is assigned in an order consistent with this lock (merely acquiring a lock *after* a default nextval allocation is not sufficient). Transactional ordering and Q5 AI settlement must remain compatible. Preserve Q6's zero-charge accounting, strict tenant access, bounded message selection and all prior hashes. **No Merge until the new real-PG suite passes on the exact PR HEAD.**
