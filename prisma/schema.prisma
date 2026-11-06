@@ -254,6 +254,13 @@ model Conversation {
   csatComment        String?
   csatAt             DateTime?
   firstResponseAt    DateTime?
+  /// AI-Q6: Authoritative first human-handoff timestamp. Set atomically by a
+  /// PostgreSQL BEFORE UPDATE trigger when `assignedUserId` transitions from
+  /// NULL to non-NULL and the column is still NULL. First assignment wins —
+  /// reassignment never overwrites the original cutoff. Used as the earliest
+  /// takeover signal for the handoff summary so post-assignment messages are
+  /// excluded even when summary generation runs much later.
+  firstHandoffAt     DateTime?
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
 
