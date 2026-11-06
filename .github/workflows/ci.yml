@@ -177,7 +177,7 @@ jobs:
         run: bun test tests/db-boundary/ai-q5-human-takeover.test.ts tests/db-boundary/ai-q5-commit-race-review.test.ts tests/db-boundary/ai-q5-concurrent-settlement-review.test.ts
       - name: Run Full DB boundary tests - AI-Q6 focused acceptance
         if: github.event_name == 'pull_request' && github.head_ref == 'feat/ai-q6-next'
-        run: bun test tests/db-boundary/ai-q6-acceptance.test.ts tests/db-boundary/ai-q6-adversarial-review.test.ts
+        run: bun test tests/db-boundary/ai-q6-acceptance.test.ts tests/db-boundary/ai-q6-adversarial-review.test.ts tests/db-boundary/ai-q6-handoff-invariants-review.test.ts
       - name: Run Full DB boundary tests (real PostgreSQL)
         if: github.event_name != 'pull_request' || (github.head_ref != 'feat/ai-q2-atomic-usage' && github.head_ref != 'feat/ai-q4-grounded-products' && github.head_ref != 'feat/ai-q5-human-takeover' && github.head_ref != 'feat/ai-q6-next')
         run: bun test tests/db-boundary/
@@ -241,7 +241,7 @@ jobs:
         run: bun test tests/db-boundary/ai-q5-human-takeover.test.ts tests/db-boundary/ai-q5-commit-race-review.test.ts tests/db-boundary/ai-q5-concurrent-settlement-review.test.ts
       - name: Run Lite DB boundary tests - AI-Q6 focused acceptance
         if: github.event_name == 'pull_request' && github.head_ref == 'feat/ai-q6-next'
-        run: bun test tests/db-boundary/ai-q6-acceptance.test.ts tests/db-boundary/ai-q6-adversarial-review.test.ts
+        run: bun test tests/db-boundary/ai-q6-acceptance.test.ts tests/db-boundary/ai-q6-adversarial-review.test.ts tests/db-boundary/ai-q6-handoff-invariants-review.test.ts
       - name: Run Lite DB boundary tests (real PostgreSQL)
         if: github.event_name != 'pull_request' || (github.head_ref != 'feat/ai-q2-atomic-usage' && github.head_ref != 'feat/ai-q4-grounded-products' && github.head_ref != 'feat/ai-q5-human-takeover' && github.head_ref != 'feat/ai-q6-next')
         run: bun test tests/db-boundary/
