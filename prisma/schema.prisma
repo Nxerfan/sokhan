@@ -74,6 +74,7 @@ model Tenant {
   aiUsagePeriods    AiUsagePeriod[]
   aiReplyReservations AiReplyReservation[]
   visitorMessageIdempotencies VisitorMessageIdempotency[]
+  handoffSummaries ConversationHandoffSummary[]
 }
 
 /// Global identity. A user may belong to multiple tenants via Membership.
@@ -262,6 +263,7 @@ model Conversation {
   department   Department?   @relation(fields: [departmentId], references: [id], onDelete: SetNull)
   messages     Message[]
   participants Participant[]
+  handoffSummaries ConversationHandoffSummary[]
 
   @@index([tenantId, status])
   @@index([tenantId, assignedUserId])
@@ -586,4 +588,19 @@ model PendingSignup {
   expiresAt       DateTime
 
   @@index([email])
+}
+
+model ConversationHandoffSummary {
+  id               String   @id @default(cuid())
+  tenantId         String
+  conversationId   String
+  summaryText      String
+  sourceMessageIds Json
+  createdAt        DateTime @default(now())
+
+  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, conversationId])
+  @@index([tenantId])
 }

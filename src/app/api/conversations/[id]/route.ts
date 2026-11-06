@@ -103,6 +103,19 @@ export async function PATCH(
       payload: { conversationId: id, changes: data },
     })
 
+    // AI-Q6: If a human agent was just assigned, try to create a handoff
+    // summary. This is a safe, non-blocking operation — failures do NOT
+    // roll back the assignment or create any AI charge. The summary is
+    // metadata only, idempotent (one per conversation), and uses no LLM.
+    if (body.assignedUserId) {
+      try {
+        const { ensureConversationHandoffSummary } = await import('@/lib/ai/handoff-summary')
+        await ensureConversationHandoffSummary(id)
+      } catch (e) {
+        console.error('[conversations:patch] handoff summary error:', e instanceof Error ? e.message : e)
+      }
+    }
+
     return { conversation } as const
   })
   if (!result) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })

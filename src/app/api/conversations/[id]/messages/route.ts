@@ -80,6 +80,16 @@ export async function POST(
       payload: { ...message, isNewConversation: false },
     })
 
+    // AI-Q6: Agent reply is a human-takeover event. Try to create a
+    // handoff summary. Safe — failures do NOT roll back the agent message
+    // or create any AI charge. Idempotent, metadata-only, no LLM.
+    try {
+      const { ensureConversationHandoffSummary } = await import('@/lib/ai/handoff-summary')
+      await ensureConversationHandoffSummary(id)
+    } catch (e) {
+      console.error('[conversations:messages] handoff summary error:', e instanceof Error ? e.message : e)
+    }
+
     return { message } as const
   })
   if (!result) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
