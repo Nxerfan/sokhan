@@ -80,7 +80,7 @@ jobs:
                 console.error(file+': '+ts.flattenDiagnosticMessageText(d.messageText,'\\n'))
               throw Error('Reviewer Q6 acceptance syntax invalid: '+file)
             }
-            const actual=(source.match(/\\btest\\s*\\(/g)||[]).length
+            const actual=(source.match(/\btest\s*\(/g)||[]).length
             if(actual!==count)throw Error('Reviewer Q6 acceptance count changed: '+file+' expected '+count+' got '+actual)
             console.log('Q6 reviewer syntax and count OK: '+file+' '+count)
           }
