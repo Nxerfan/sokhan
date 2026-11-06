@@ -53,9 +53,11 @@ jobs:
             'tests/ai-q5-human-takeover.spec.ts':'ecd0271c38abe39a9ccbaf51ca09a2d1f2620f41',
             'tests/unit/ai-q6-acceptance.test.ts':'be4b32014b63d39980827519363b0991955bf159',
             'tests/db-boundary/ai-q6-acceptance.test.ts':'2c0a5483c2192a3f751e7dfac0f2893e0e91653f',
-            'tests/ai-q6-acceptance.spec.ts':'1fecdb7090f730be809b26f27f653e4ba24db3eb',
+            'tests/ai-q6-acceptance.spec.ts':'469d6c20b62e31fec56ff5e40571ab9f1a8b4c24',
+            'tests/unit/ai-q6-adversarial-review.test.ts':'0e5afdb751de97d501fcdf38dc8f556f748a3ce3',
+            'tests/db-boundary/ai-q6-adversarial-review.test.ts':'14148c98818903189239dcd17b994a3949143191',
           }
-          if(Object.keys(expected).length!==24)throw Error('Expected 21 Q1-Q5 + 3 Q6 reviewer-protected files')
+          if(Object.keys(expected).length!==26)throw Error('Expected 21 Q1-Q5 + 5 Q6 reviewer-protected files')
           for(const [file,sha] of Object.entries(expected)){
             const actual=execFileSync('git',['hash-object',file],{encoding:'utf8'}).trim()
             if(actual!==sha)throw Error('Reviewer-owned test changed: '+file)
@@ -70,6 +72,8 @@ jobs:
           const checks=[
             ['tests/unit/ai-q6-acceptance.test.ts',14],
             ['tests/db-boundary/ai-q6-acceptance.test.ts',10],
+            ['tests/unit/ai-q6-adversarial-review.test.ts',4],
+            ['tests/db-boundary/ai-q6-adversarial-review.test.ts',2],
             ['tests/ai-q6-acceptance.spec.ts',8],
           ]
           for(const [file,count] of checks){
@@ -100,9 +104,9 @@ jobs:
             return ci.slice(from,to<0?undefined:to)
           }
           const scopedSteps=[
-            ['Unit tests - AI-Q6 focused acceptance','run: bun test tests/unit/ai-q6-acceptance.test.ts'],
-            ['Run Full DB boundary tests - AI-Q6 focused acceptance','run: bun test tests/db-boundary/ai-q6-acceptance.test.ts'],
-            ['Run Lite DB boundary tests - AI-Q6 focused acceptance','run: bun test tests/db-boundary/ai-q6-acceptance.test.ts'],
+            ['Unit tests - AI-Q6 focused acceptance','run: bun test tests/unit/ai-q6-acceptance.test.ts tests/unit/ai-q6-adversarial-review.test.ts'],
+            ['Run Full DB boundary tests - AI-Q6 focused acceptance','run: bun test tests/db-boundary/ai-q6-acceptance.test.ts tests/db-boundary/ai-q6-adversarial-review.test.ts'],
+            ['Run Lite DB boundary tests - AI-Q6 focused acceptance','run: bun test tests/db-boundary/ai-q6-acceptance.test.ts tests/db-boundary/ai-q6-adversarial-review.test.ts'],
             ['Run Full browser tests - AI-Q6 focused acceptance','run: bunx playwright test tests/ai-q6-acceptance.spec.ts --workers=1 --retries=0'],
             ['Run Lite browser tests - AI-Q6 focused acceptance','run: bunx playwright test tests/ai-q6-acceptance.spec.ts --workers=1 --retries=0'],
           ]
@@ -147,6 +151,8 @@ jobs:
           const required=[
             'tests/unit/ai-q6-acceptance.test.ts',
             'tests/db-boundary/ai-q6-acceptance.test.ts',
+            'tests/unit/ai-q6-adversarial-review.test.ts',
+            'tests/db-boundary/ai-q6-adversarial-review.test.ts',
             'tests/ai-q6-acceptance.spec.ts',
           ]
           for(const file of required){
@@ -161,4 +167,4 @@ jobs:
       - name: Enumerate Q6 browser acceptance
         run: bunx playwright test tests/ai-q6-acceptance.spec.ts --list
       - name: Run reviewer Q6 unit acceptance
-        run: bun test tests/unit/ai-q6-acceptance.test.ts
+        run: bun test tests/unit/ai-q6-acceptance.test.ts tests/unit/ai-q6-adversarial-review.test.ts
